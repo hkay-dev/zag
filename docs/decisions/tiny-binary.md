@@ -43,6 +43,10 @@ Ghostty's terminal core. ze drops all three.
   the load commands was enough to push `__TEXT` past 64 KB when the caret code went in
   (107 KB to 123 KB on disk for 2.6 KB of code). Check `size -m` when the file jumps by a page.
   With settings, wrap, replace, motion and sessions in, the binary is about 143 KB.
+- **No input methods and no accessibility.** ze is for US English typing on Apple Silicon only.
+  It has no input method support (Chinese, Japanese or accented-letter composing), no VoiceOver
+  or other accessibility support, and none is planned. Harsha set this on 2026-11-05, so new
+  features like the file sidebar can draw their own UI without accessibility hooks.
 
 ## Gotchas
 
