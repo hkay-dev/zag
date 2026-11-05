@@ -728,7 +728,9 @@ pub fn previousFile() void {
 
 fn named(d: *Doc) void {
     msg(void, d.window, "setTitle:", .{objc.str(d.name())});
-    if (d.path) |p| msg(void, d.window, "setRepresentedFilename:", .{objc.str(p)});
+    // The proxy icon, ⌘-click path menu and icon drag come with the URL; an untitled file has none.
+    const url = if (d.path) |p| msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(p)}) else null;
+    msg(void, d.window, "setRepresentedURL:", .{url});
     refresh(d);
 }
 
@@ -769,7 +771,7 @@ pub fn newDoc() ?*Doc {
     msg(void, d.link, "addToRunLoop:forMode:", .{ msg(Id, objc.class("NSRunLoop"), "mainRunLoop", .{}), NSRunLoopCommonModes });
     msg(void, d.link, "setPaused:", .{true});
     msg(void, win, "setTitlebarAppearsTransparent:", .{true});
-    msg(void, win, "setTitleVisibility:", .{@as(isize, 1)});
+    msg(void, win, "setTitleVisibility:", .{@as(isize, 0)});
     msg(void, win, "setMinSize:", .{Point{ .x = 360, .y = 240 }});
     msg(void, win, "setContentView:", .{view});
     msg(void, view, "release", .{});

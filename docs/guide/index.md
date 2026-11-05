@@ -21,9 +21,11 @@ past the top or bottom of the file (or the left edge) and the page stretches wit
 then springs back when you lift your fingers; momentum that hits an end overshoots a little and
 settles. A mouse wheel stops at the ends. Windows in the background don't show a caret.
 
-The window has no title bar, so the empty strip along its top stands in for one: drag it to move
-the window, and double-click it to zoom (or minimize, or nothing, as Desktop & Dock's "Double-click
-a window's title bar" setting says).
+The window's top strip is its title bar, with the editor drawn behind it: it shows the file's name
+and proxy icon (⌘-click the name for the folder path menu, drag the icon to drag the file; an
+untitled file has no icon), and the close button shows a dot while there are unsaved changes. Drag
+the empty part of the strip to move the window, and double-click it to zoom (or minimize, or
+nothing, as Desktop & Dock's "Double-click a window's title bar" setting says).
 
 ## Command palette
 
