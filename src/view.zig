@@ -3768,7 +3768,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         }
         k.flush();
         const width = if (d.which == 1 and d.mode == .replace) d.with.items.len else d.prompt.items.len;
-        placeCaret(d, now, cx, by + 8, false, .{ 1 + @intFromEnum(d.mode) * 2 + d.which, width, 0 }, key);
+        placeCaret(d, now, cx, by + 8, false, .{ 1 + @as(usize, @intFromEnum(d.mode)) * 2 + d.which, width, 0 }, key);
         var tally: []const u8 = "";
         if (finding) tally = if (d.found[1] == 0) "no matches" else std.fmt.bufPrint(&buf, "{d} of {d}", .{ @min(d.found[0], d.found[1]), d.found[1] }) catch "";
         if (d.mode == .open and d.list != null) tally = std.fmt.bufPrint(&buf, "{d} files", .{d.list.?.paths.items.len}) catch "";
