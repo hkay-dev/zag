@@ -82,7 +82,7 @@ folder's row pushes it away. Click a pinned folder to scroll back to it.
 
 - Click a folder to open or close it. Its files fade in or out while the rows below slide to make
   room, and its arrow turns.
-- Click a file to show it in the same window. The window keeps every file it has shown, with
+- Click a file to show it in the same window, where its text fades in. The window keeps every file it has shown, with
   its unsaved changes and undo, so switching never asks you to save. A dot next to a file in the
   sidebar means it has unsaved changes.
 - ⌘-click a file to open it in a new window.

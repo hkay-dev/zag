@@ -395,6 +395,9 @@ const fade_time = 0.12;
 const panel_time = 0.14;
 /// The sidebar slides in and out, and the card's left edge rides with it.
 const slide_time = 0.24;
+/// A newly shown file's text fades in over this long, rising this far.
+const load_time = 0.18;
+const load_rise = 6.0;
 /// The scroll bar stays a second after the page stops, then fades.
 const bar_hold = 1.0;
 const bar_time = 0.25;
@@ -463,7 +466,7 @@ fn blink(caret: Id) void {
 /// list still has frames to draw.
 fn scenery(d: *const Doc, now: f64) bool {
     const stretched = d.relax and (d.ov[0] != 0 or d.ov[1] != 0);
-    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.panel.moving(now) or d.side_t.moving(now) or d.side_a.moving(now) or fold.t.moving(now) or fold.closing or (d.had_sel and now < d.sel_t0 + fade_time) or now < d.bar_t0 + bar_hold + bar_time;
+    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.panel.moving(now) or d.side_t.moving(now) or d.side_a.moving(now) or fold.t.moving(now) or fold.closing or now < d.load_t + load_time or (d.had_sel and now < d.sel_t0 + fade_time) or now < d.bar_t0 + bar_hold + bar_time;
 }
 
 const spring_k = 380.0;
@@ -647,6 +650,8 @@ const Doc = struct {
     side_a: Tween = .{ .dur = slide_time },
     lx: f64 = gap,
     side_seen: bool = false,
+    /// When the window's file was last swapped in, for its text to fade in.
+    load_t: f64 = -1,
     /// The header's file name and folder as CoreText lines, made on first draw.
     head: [2]Id = .{ null, null },
 
@@ -798,6 +803,7 @@ fn install(d: *Doc, pg: Page) void {
     d.band_on = false;
     d.had_sel = false;
     d.snap = true;
+    d.load_t = CACurrentMediaTime();
     if (d.path) |p| if (relOf(p)) |rel| {
         tree.reveal(gpa, rel);
         rebuildTree();
@@ -2205,6 +2211,15 @@ fn draw(d: *Doc, ctx: Id) void {
     }
     syncStates(d, if (nvis > 0) vis[nvis - 1].line else 0);
 
+    // A newly shown file's text fades in, rising a few points into place.
+    const load = std.math.clamp((now - d.load_t) / load_time, 0, 1);
+    const loaded = 1 - (1 - load) * (1 - load) * (1 - load);
+    objc.CGContextSaveGState(ctx);
+    if (loaded < 1) {
+        objc.CGContextSetAlpha(ctx, loaded);
+        objc.CGContextTranslateCTM(ctx, 0, (1 - loaded) * load_rise);
+    }
+
     // The caret line's band slides after the caret.
     const band_on = d.mode == .edit and s[0] == s[1];
     if (band_on and d.band_on) d.band.aim(f(here.row) * lh, now) else d.band.snap(f(here.row) * lh);
@@ -2272,6 +2287,7 @@ fn draw(d: *Doc, ctx: Id) void {
         _ = k.run(l, v.seg.start, v.seg.end, v.seg.col, kinds, th, th.fg, ox, top_h + f(row) * lh - d.vy + baseline, skip, cols);
     }
     k.flush();
+    objc.CGContextRestoreGState(ctx);
 
     // The overlay scroll bar shows while the page moves and fades out after.
     // Nothing draws or waits when the whole file fits.
@@ -2297,7 +2313,7 @@ fn draw(d: *Doc, ctx: Id) void {
     const by = bottom(d);
     const key = msg(bool, d.window, "isKeyWindow", .{});
     if (d.mode == .edit) {
-        placeCaret(d, now, tx + f(here.col) * cw - 1, top_h + f(here.row) * lh + 2, true, .{ 0, here.row, here.col }, key);
+        placeCaret(d, now, tx + f(here.col) * cw - 1, top_h + f(here.row) * lh + 2, true, .{ 0, here.row, here.col }, key and load >= 1);
     }
 
     // The quick open list, rising out of the prompt line.
