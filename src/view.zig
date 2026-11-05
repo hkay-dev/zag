@@ -3181,7 +3181,7 @@ const row_fade = 0.12;
 /// Rows that change while typing crossfade over this long.
 const xfade_time = 0.08;
 /// Width of one glyph cell in a shortcut, and of the checkmark column.
-const key_cell = 14.0;
+const key_cell = 11.0;
 const check_col = 18.0;
 var panel_font: Id = null;
 var panel_small: Id = null;
@@ -4024,6 +4024,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     if (ph > 0.5 and (d.palette or d.list != null)) {
         const px = card.x + 6;
         const pw = card.w - 12;
+        // Nothing of the page shows beside or just above the inset panel.
+        fill(ctx, th.bg, card.x, by - ph - 10, card.w, ph + 10);
         // A soft shadow above the panel instead of a rule.
         for (0..10) |sh| {
             const fall = 1 - (f(sh) + 0.5) / 10;
