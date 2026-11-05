@@ -329,6 +329,14 @@ fn fillA(ctx: Id, c: Rgb, a: f64, x: f64, y: f64, w: f64, h: f64) void {
     objc.CGContextFillRect(ctx, .{ .x = x, .y = y, .w = w, .h = h });
 }
 
+/// The window's points per device pixel, set at the start of each draw.
+var dev_px: f64 = 0.5;
+
+/// One device pixel in points: separators and outlines are this thick.
+fn hair() f64 {
+    return dev_px;
+}
+
 /// A rounded rectangle: the card, the sidebar's selection, the icon tiles.
 fn pill(ctx: Id, c: Rgb, a: f64, x: f64, y: f64, w: f64, h: f64, radius: f64) void {
     const path = objc.CGPathCreateWithRoundedRect(.{ .x = x, .y = y, .w = w, .h = h }, radius, radius, null);
@@ -3450,6 +3458,7 @@ fn draw(w: *Win, ctx: Id) void {
         msg(void, w.window, "setBackgroundColor:", .{nscolor(chrome(th, dark))});
     }
     const r = msg(Rect, w.view, "bounds", .{});
+    dev_px = 1 / @max(1, msg(f64, w.window, "backingScaleFactor", .{}));
     placeLights(w);
     // A closing folder shuts once its rows have folded away.
     if (fold.closing and !fold.t.moving(now)) finishFold();
