@@ -1,7 +1,8 @@
-//! One window per file: an NSView subclass that draws the text with
-//! CoreText glyph runs on a monospace grid, and turns key and mouse events
-//! into editor commands. The bottom line is the status bar and the prompt
-//! for find, go to line, quick open and the command palette.
+//! The windows: an NSView subclass that draws a sidebar and one or more
+//! cards, each a pane with its own tabs, the text in CoreText glyph runs on
+//! a monospace grid, and turns key and mouse events into editor commands.
+//! A card's bottom line is the prompt for find, go to line, quick open and
+//! the command palette.
 const std = @import("std");
 const objc = @import("objc.zig");
 const editor = @import("editor.zig");
@@ -29,18 +30,20 @@ pub fn setRoot(dir: []const u8) void {
     root = dir;
     for (tree.open.items) |o| gpa.free(o);
     tree.open.clearRetainingCapacity();
-    for (docs.items) |d| d.side_y = 0;
+    for (wins.items) |w| w.side_y = 0;
     rebuildTree();
-    for (docs.items) |d| {
-        msg(void, d.window, "invalidateCursorRectsForView:", .{d.view});
-        refresh(d);
-    }
+    for (wins.items) |w| msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
+    refreshAll();
 }
 
 fn rebuildTree() void {
     if (root) |r| tree.rebuild(gpa, r);
+    tree_gen +%= 1;
     dropSideLines();
 }
+
+/// Counts tree rebuilds, so a window knows when to look up its selected row again.
+var tree_gen: u32 = 0;
 
 /// `p` relative to the folder, when it's inside it.
 fn relOf(p: []const u8) ?[]const u8 {
@@ -87,22 +90,18 @@ const label_h = 24.0;
 
 /// The sidebar shows when there's a folder, it's turned on, and the window
 /// is wide enough to keep room for the text.
-fn sideShown(d: *const Doc) bool {
-    return conf.sidebar and root != null and bounds(d).w >= side_w + 360;
+fn sideShown(w: *const Win) bool {
+    return conf.sidebar and root != null and msg(Rect, w.view, "bounds", .{}).w >= side_w + 360;
 }
 
-/// The card's left edge: right of the sidebar when it shows.
-fn left(d: *const Doc) f64 {
-    return if (sideShown(d)) side_w else gap;
-}
-
+/// A card's right edge in its pane, which it sits a gap inside of.
 fn rightEdge(d: *const Doc) f64 {
-    return bounds(d).w - gap;
+    return d.size.x - gap;
 }
 
 /// Where the text ends: the card's bottom, or the prompt line above it.
 fn bottom(d: *const Doc) f64 {
-    return bounds(d).h - gap - if (d.mode == .edit) 0 else barH();
+    return d.size.y - gap - if (d.mode == .edit) 0 else barH();
 }
 
 /// The window's own color around the card: the theme's background, a
@@ -512,11 +511,11 @@ fn moveCaret(d: *Doc, now: f64) void {
         x -= d.vx;
         y -= d.vy;
     }
-    const visible = d.shown and (!d.c_text or (x >= d.lx + pad_x - 2 and x < rightEdge(d) and y >= top_h - 2 and y + lh - 4 <= bottom(d)));
+    const visible = d.shown and (!d.c_text or (x >= gap + pad_x - 2 and x < rightEdge(d) and y >= top_h - 2 and y + lh - 4 <= bottom(d)));
     const t = objc.class("CATransaction");
     msg(void, t, "begin", .{});
     msg(void, t, "setDisableActions:", .{true});
-    msg(void, d.caret, "setFrame:", .{Rect{ .x = x, .y = y, .w = 2, .h = lh - 4 }});
+    msg(void, d.caret, "setFrame:", .{Rect{ .x = d.org.x + x, .y = d.org.y + y, .w = 2, .h = lh - 4 }});
     msg(void, d.caret, "setHidden:", .{!visible});
     msg(void, t, "commit", .{});
 }
@@ -539,7 +538,9 @@ fn blink(caret: Id) void {
 /// list still has frames to draw.
 fn scenery(d: *const Doc, now: f64) bool {
     const stretched = d.relax and (d.ov[0] != 0 or d.ov[1] != 0);
-    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.panel.moving(now) or d.side_t.moving(now) or d.side_a.moving(now) or fold.t.moving(now) or fold.closing or tabsMoving(d, now) or now < d.load_t + load_time or (d.had_sel and now < d.sel_t0 + fade_time) or now < d.bar_t0 + bar_hold + bar_time;
+    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.panel.moving(now) or d.lit.moving(now) or
+        d.prompt_t.moving(now) or d.plus_t.moving(now) or !d.pick_s.settled() or tabsMoving(d, now) or
+        now < d.load_t + load_time or (d.had_sel and now < d.sel_t0 + fade_time) or now < d.bar_t0 + bar_hold + bar_time;
 }
 
 const spring_k = 380.0;
@@ -593,13 +594,17 @@ fn pull(pos: *f64, o: *f64, delta: f64, hi: f64, dim: f64) void {
 }
 
 /// Display link callback: redraws while the scenery moves, otherwise just
-/// moves the caret, and pauses once everything has settled.
+/// moves the carets, and pauses once everything has settled.
 fn tick(self: Id, _: Sel, _: Id) callconv(.c) void {
-    const d = docOf(self) orelse return;
-    if (d.busy) return msg(void, self, "setNeedsDisplay:", .{true});
+    const w = winOf(self) orelse return;
+    if (w.busy) return msg(void, self, "setNeedsDisplay:", .{true});
     const now = CACurrentMediaTime();
-    moveCaret(d, now);
-    if (!d.cx.moving(now) and !d.cy.moving(now)) msg(void, d.link, "setPaused:", .{true});
+    var gliding = false;
+    for (docs.items) |d| if (d.win == w) {
+        moveCaret(d, now);
+        if (d.cx.moving(now) or d.cy.moving(now)) gliding = true;
+    };
+    if (!gliding) msg(void, w.link, "setPaused:", .{true});
 }
 
 // ---- documents ----
@@ -652,11 +657,26 @@ const Doc = struct {
     hover_x: bool = false,
     /// Where the + after the tabs last drew.
     plus_x: f64 = -100,
+    /// The mouse is on that +, and its hover highlight.
+    plus_on: bool = false,
+    plus_t: Tween = .{ .dur = fade_time },
     /// Absolute path, or null while untitled.
     path: ?[:0]u8 = null,
     lang: *const syntax.Lang = &syntax.plain,
+    /// The window it's a card in, and that window's NSWindow and view.
+    win: *Win = undefined,
     window: Id = null,
     view: Id = null,
+    /// The card's pane in the view: where it is now, its size now, and the
+    /// size it's headed for, which wrapping uses. The card sits a gap in
+    /// from the pane's edges, so it draws in its pane's coordinates.
+    org: Point = .{},
+    size: Point = .{},
+    fin: Point = .{},
+    /// 1 while the card takes typing in a window with others, for its ring.
+    lit: Tween = .{ .dur = tab_time },
+    /// Folding away after its last tab closed.
+    closing: bool = false,
     /// Where scrolling is headed; vx and vy are where it shows right now.
     sx: f64 = 0,
     sy: f64 = 0,
@@ -671,6 +691,13 @@ const Doc = struct {
     sel_t0: f64 = 0,
     /// Height of the quick open list.
     panel: Tween = .{ .dur = panel_time },
+    /// The quick open list's picked row highlight, which springs from row to
+    /// row once the list is up.
+    pick_s: Spring = .{ .k = 520, .c = 34, .eps = 0.05 },
+    pick_live: bool = false,
+    /// The prompt line's words, rising in as it opens.
+    prompt_t: Tween = .{ .dur = panel_time },
+    prompt_on: bool = false,
     /// The scroll bar's opacity, when the page last moved, and where it was.
     bar: Tween = .{ .dur = bar_time },
     bar_t0: f64 = 0,
@@ -688,7 +715,6 @@ const Doc = struct {
     ov_t: f64 = 0,
     /// Fingers are off the pad, so the stretch springs back.
     relax: bool = false,
-    link: Id = null,
     /// Soft wrap: the first screen row of each line, plus the total at the
     /// end, for rows `cols` cells wide.
     vfirst: std.ArrayList(u32) = .empty,
@@ -720,6 +746,7 @@ const Doc = struct {
     /// Syntax state at the start of each line, known for this many lines.
     states: std.ArrayList(syntax.State) = .empty,
     kinds: std.ArrayList(syntax.Kind) = .empty,
+    /// The caret's color was set for dark mode or light.
     dark: ?bool = null,
     /// The caret is a Core Animation layer, so its glide and blink run in
     /// the window server instead of redrawing the text.
@@ -731,29 +758,12 @@ const Doc = struct {
     snap: bool = false,
     /// The window's other files, in tab order.
     pages: std.ArrayList(Page) = .empty,
-    /// How far the sidebar is scrolled.
-    side_y: f64 = 0,
-    /// The mouse went down in the sidebar, so drags don't select text.
-    side_down: bool = false,
-    /// The mouse went down on the sidebar's edge and is dragging it.
-    side_drag: bool = false,
-    /// Scroll the sidebar to the window's file on the next draw.
-    side_find: bool = false,
-    /// The open folders pinned under the folder's name, and where each drew.
-    stuck: [max_stuck]usize = undefined,
-    stuck_y: [max_stuck]f64 = undefined,
-    nstuck: usize = 0,
-    /// A sidebar scroll that glides, like a click on a pinned folder.
-    side_t: Tween = .{ .dur = scroll_time },
-    /// How far the sidebar has slid in, 0 to 1, and the card's left edge
-    /// that rides with it. Layout and wrapping use where it ends up.
-    side_a: Tween = .{ .dur = slide_time },
-    lx: f64 = gap,
-    side_seen: bool = false,
     /// When the window's file was last swapped in, for its text to fade in.
     load_t: f64 = -1,
-    /// The header's folder as a CoreText line, made on first draw.
+    /// The header's folder as a CoreText line, cut from the front with an
+    /// ellipsis to fit `head_w`, made on first draw.
     head: Id = null,
+    head_w: f64 = -1,
 
     fn name(d: *const Doc) []const u8 {
         return if (d.path) |p| std.fs.path.basename(p) else "untitled";
@@ -786,20 +796,96 @@ const Doc = struct {
 
 var docs: std.ArrayList(*Doc) = .empty;
 var view_class: Id = null;
-var doc_ivar: usize = 0;
+var win_ivar: usize = 0;
 
-fn docOf(self: Id) ?*Doc {
-    const slot: *?*Doc = @ptrFromInt(@intFromPtr(self.?) + doc_ivar);
+/// A window: the sidebar on its left, and the cards right of it, laid out
+/// by a tree of splits. Each card is a Doc.
+const Win = struct {
+    window: Id,
+    view: Id,
+    link: Id = null,
+    cards: *Node,
+    /// The card that takes typing, the menu commands and sidebar clicks.
+    focus: *Doc,
+    dark: ?bool = null,
+    /// The last draw had scenery still moving.
+    busy: bool = false,
+    /// How far the sidebar is scrolled.
+    side_y: f64 = 0,
+    /// The mouse went down outside the cards' text (the sidebar, the title
+    /// band, a gap), so drags don't select text.
+    side_down: bool = false,
+    /// The mouse went down on the sidebar's edge and is dragging it.
+    side_drag: bool = false,
+    /// The gap between two cards that the mouse is dragging.
+    grab: ?*Node = null,
+    /// Scroll the sidebar to the focused card's file on the next draw.
+    side_find: bool = false,
+    /// The open folders pinned under the folder's name, and where each drew.
+    stuck: [max_stuck]usize = undefined,
+    stuck_y: [max_stuck]f64 = undefined,
+    nstuck: usize = 0,
+    /// A sidebar scroll that glides, like a click on a pinned folder.
+    side_t: Tween = .{ .dur = scroll_time },
+    /// How far the sidebar has slid in, 0 to 1, and the cards' left edge
+    /// that rides with it. Wrapping uses where it ends up.
+    side_a: Tween = .{ .dur = slide_time },
+    lx: f64 = gap,
+    side_seen: bool = false,
+    /// The sidebar's selection: the row it marks (looked up again when the
+    /// tree or the focused file changes), the row it marked last draw, where
+    /// it springs to in the list, and how far it's faded in.
+    sel_row: ?usize = null,
+    sel_was: ?usize = null,
+    sel_gen: u32 = 0,
+    sel_id: u32 = 0,
+    sel: Spring = .{ .k = 420, .c = 30, .eps = 0.05 },
+    sel_a: Tween = .{ .dur = fade_time },
+    /// The button by the traffic lights (1) or the sidebar's + (2) under the
+    /// mouse, and each one's hover highlight.
+    hot: u8 = 0,
+    hot_t: [2]Tween = @splat(.{ .dur = fade_time }),
+};
+
+var wins: std.ArrayList(*Win) = .empty;
+
+/// The cards' layout: a card, or a split of two, side by side or one above
+/// the other, with the first taking `share` of the room. A new card grows in
+/// from nothing and a closing one folds away as the share springs.
+const Node = struct {
+    pane: ?*Doc = null,
+    down: bool = false,
+    kids: [2]*Node = undefined,
+    up: ?*Node = null,
+    share: Spring = .{ .k = 300, .c = 24, .eps = 0.0005 },
+    /// The kid folding away, dropped once the share settles.
+    going: ?u1 = null,
+    /// Where it laid out last, for grabbing the gap between its kids.
+    r: Rect = .{},
+};
+
+/// A card keeps at least this much room when splitting or dragging a gap.
+const min_card_w: f64 = 220;
+const min_card_h: f64 = 140;
+
+fn winOf(self: Id) ?*Win {
+    const slot: *?*Win = @ptrFromInt(@intFromPtr(self.?) + win_ivar);
     return slot.*;
 }
 
-fn setDoc(self: Id, d: ?*Doc) void {
-    const slot: *?*Doc = @ptrFromInt(@intFromPtr(self.?) + doc_ivar);
-    slot.* = d;
+fn setWin(self: Id, w: ?*Win) void {
+    const slot: *?*Win = @ptrFromInt(@intFromPtr(self.?) + win_ivar);
+    slot.* = w;
 }
 
+/// The window's focused card: menu commands and typing go there.
+fn docOf(self: Id) ?*Doc {
+    return (winOf(self) orelse return null).focus;
+}
+
+/// The card's pane, in its own coordinates.
 fn bounds(d: *const Doc) Rect {
-    return msg(Rect, d.view, "bounds", .{});
+    return .{ .w = d.size.x, .h = d.size.y };
 }
 
 fn textH(d: *const Doc) f64 {
@@ -811,18 +897,19 @@ fn pageLines(d: *const Doc) usize {
 }
 
 /// Opens `path` (a file or a folder). A file shows in `into`, in a new tab
-/// right of the one on show, or else in a new window. A file that a window
+/// right of the one on show, or else in a new window. A file that a card
 /// already holds comes forward there.
 pub fn open(path: []const u8, into: ?*Doc) void {
     const abs = files.absolute(gpa, path) catch return;
     if (files.isDir(abs)) {
         setRoot(abs);
         const d = into orelse keyDoc() orelse newDoc() orelse return;
-        if (sideShown(d)) refreshAll() else startPrompt(d, .open);
+        if (sideShown(d.win)) refreshAll() else startPrompt(d, .open);
         return;
     }
     defer gpa.free(abs);
     for (docs.items) |o| {
+        if (o.closing) continue;
         if (o.path != null and std.mem.eql(u8, o.path.?, abs)) return front(o);
         if (pageIndex(o, abs)) |i| {
             showPage(o, i);
@@ -837,8 +924,21 @@ pub fn open(path: []const u8, into: ?*Doc) void {
     front(d);
 }
 
+/// Brings `d`'s window forward with `d` as its focused card.
 fn front(d: *Doc) void {
+    focus(d);
     msg(void, d.window, "makeKeyAndOrderFront:", .{@as(Id, null)});
+}
+
+/// Makes `d` the card that takes typing in its window. Its ring lights up
+/// and the other cards' carets go out.
+fn focus(d: *Doc) void {
+    const w = d.win;
+    if (w.focus == d) return;
+    w.focus = d;
+    w.side_find = true;
+    named(d);
+    refreshAll();
 }
 
 /// Reads a file into a page, at the caret and scroll it had last time.
@@ -917,7 +1017,7 @@ fn install(d: *Doc, pg: Page) void {
     if (d.path) |p| if (relOf(p)) |rel| {
         tree.reveal(gpa, rel);
         rebuildTree();
-        d.side_find = true;
+        if (d.win.focus == d) d.win.side_find = true;
     };
     named(d);
     refreshAll();
@@ -990,11 +1090,16 @@ fn newTab(d: *Doc) void {
     install(d, .{ .ed = ed, .path = null, .lang = &syntax.plain, .stamp = null, .sx = 0, .sy = 0, .id = newId() });
 }
 
-/// Closes tab `j`, asking first when it has unsaved changes. The window's
-/// last tab closes the window. The tab to the right takes the active
-/// one's place, or the one to the left at the end.
+/// Closes tab `j`, asking first when it has unsaved changes. A card's last
+/// tab folds the card away, or closes the window when it's the only card.
+/// The tab to the right takes the active one's place, or the one to the
+/// left at the end.
 fn closeTab(d: *Doc, at: usize) void {
-    if (tabCount(d) == 1) return msg(void, d.window, "performClose:", .{@as(Id, null)});
+    if (tabCount(d) == 1) {
+        if (d.win.cards.pane != null) return msg(void, d.window, "performClose:", .{@as(Id, null)});
+        if (d.ed.buf.dirty() and !keepOrDrop(d)) return;
+        return foldCard(d);
+    }
     var j = at;
     if (tabDirty(d, j)) {
         showTab(d, j);
@@ -1003,7 +1108,8 @@ fn closeTab(d: *Doc, at: usize) void {
         // Showing it dropped an empty untitled tab, so it was the last one.
         if (tabCount(d) == 1) {
             d.ed.buf.markSaved();
-            return msg(void, d.window, "performClose:", .{@as(Id, null)});
+            if (d.win.cards.pane != null) return msg(void, d.window, "performClose:", .{@as(Id, null)});
+            return foldCard(d);
         }
     }
     if (j != d.at) {
@@ -1042,19 +1148,244 @@ fn keepOrDrop(d: *Doc) bool {
     };
 }
 
+/// Drops the header's lines, and when `d` is its window's focused card,
+/// titles the window after its file.
 fn named(d: *Doc) void {
     dropHead(d);
+    refresh(d);
+    if (d.win.focus != d) return;
     msg(void, d.window, "setTitle:", .{objc.str(d.name())});
     // Window menu, Mission Control and the Dock show the title; the card's header shows the name.
     const url = if (d.path) |p| msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(p)}) else null;
     msg(void, d.window, "setRepresentedURL:", .{url});
-    refresh(d);
 }
 
+/// The key window's focused card.
 pub fn keyDoc() ?*Doc {
-    const w = msg(Id, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "keyWindow", .{});
-    for (docs.items) |d| if (d.window == w) return d;
+    const kw = msg(Id, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "keyWindow", .{});
+    for (wins.items) |w| if (w.window == kw) return w.focus;
     return null;
+}
+
+// ---- cards ----
+
+/// ⌘D and ⇧⌘D: a new card right of or under the focused one, springing in
+/// while this one makes room. It takes the tab on show when there are
+/// others to leave behind, else it starts with quick open.
+fn split(d: *Doc, down: bool) void {
+    const w = d.win;
+    const leaf = nodeOf(w.cards, d) orelse return;
+    const room = if (down) d.fin.y - 3 * gap else d.fin.x - 3 * gap;
+    if (room < 2 * (if (down) min_card_h else min_card_w)) return msg(void, objc.class("NSSound"), "beep", .{});
+    const e = newPane(w) orelse return;
+    const a = gpa.create(Node) catch return;
+    const b = gpa.create(Node) catch return gpa.destroy(a);
+    a.* = .{ .pane = d, .up = leaf };
+    b.* = .{ .pane = e, .up = leaf };
+    leaf.pane = null;
+    leaf.down = down;
+    leaf.kids = .{ a, b };
+    leaf.share.snap(1);
+    leaf.share.aim(0.5, CACurrentMediaTime());
+    // It starts as a sliver at the far edge, already the width it'll wrap at.
+    e.org = if (down) .{ .x = d.org.x, .y = d.org.y + d.size.y - 2 * gap } else .{ .x = d.org.x + d.size.x - 2 * gap, .y = d.org.y };
+    e.size = if (down) .{ .x = d.size.x, .y = 2 * gap } else .{ .x = 2 * gap, .y = d.size.y };
+    e.fin = if (down) .{ .x = d.fin.x, .y = room / 2 + 2 * gap } else .{ .x = room / 2 + 2 * gap, .y = d.fin.y };
+    if (tabCount(d) > 1) moveTab(d, e) else startPrompt(e, .open);
+    focus(e);
+    msg(void, d.window, "invalidateCursorRectsForView:", .{d.view});
+}
+
+/// Moves `d`'s tab on show into `e`, a card with a blank untitled file.
+/// The tab to its right takes its place in `d`.
+fn moveTab(d: *Doc, e: *Doc) void {
+    const pg: Page = .{ .ed = d.ed, .path = d.path, .lang = d.lang, .stamp = d.stamp, .sx = d.sx, .sy = d.sy, .id = d.id };
+    d.path = null;
+    const next = if (d.at < d.pages.items.len) d.at else d.at - 1;
+    const other = d.pages.orderedRemove(next);
+    d.at = next;
+    install(d, other);
+    _ = park(e, true);
+    install(e, pg);
+}
+
+/// A closing card's split springs it shut (without a bounce) while its
+/// neighbor takes the room, and the neighbor takes typing.
+fn foldCard(d: *Doc) void {
+    const w = d.win;
+    const leaf = nodeOf(w.cards, d) orelse return;
+    const up = leaf.up orelse return;
+    if (up.going != null) return;
+    const g: u1 = if (up.kids[0] == leaf) 0 else 1;
+    up.going = g;
+    up.share.c = 2 * @sqrt(up.share.k);
+    up.share.aim(if (g == 0) 0 else 1, CACurrentMediaTime());
+    d.closing = true;
+    d.shown = false;
+    msg(void, d.caret, "setHidden:", .{true});
+    focus(firstPane(up.kids[1 - g]));
+    msg(void, d.window, "invalidateCursorRectsForView:", .{d.view});
+}
+
+fn nodeOf(n: *Node, d: *const Doc) ?*Node {
+    if (n.pane) |p| return if (p == d) n else null;
+    return nodeOf(n.kids[0], d) orelse nodeOf(n.kids[1], d);
+}
+
+fn firstPane(n: *const Node) *Doc {
+    return n.pane orelse firstPane(n.kids[0]);
+}
+
+/// The panes of the first `s` and the rest of `r`, along its width or
+/// (`down`) its height. Each card sits a gap in from its pane's edges, so
+/// the two panes overlap by a gap and their cards are a gap apart.
+fn divide(r: Rect, s: f64, down: bool) [2]Rect {
+    const len = if (down) r.h else r.w;
+    const first = (len - 3 * gap) * std.math.clamp(s, 0, 1) + 2 * gap;
+    const at = first - gap;
+    if (down) return .{ .{ .x = r.x, .y = r.y, .w = r.w, .h = first }, .{ .x = r.x, .y = r.y + at, .w = r.w, .h = r.h - at } };
+    return .{ .{ .x = r.x, .y = r.y, .w = first, .h = r.h }, .{ .x = r.x + at, .y = r.y, .w = r.w - at, .h = r.h } };
+}
+
+/// Lays the cards out in `r` as they are now, and in `fin` as they'll end
+/// up, which wrapping uses so text doesn't rewrap while a card springs.
+fn place(n: *Node, r: Rect, fin: Rect, now: f64) void {
+    n.r = r;
+    if (n.pane) |d| {
+        d.org = .{ .x = r.x, .y = r.y };
+        d.size = .{ .x = r.w, .y = r.h };
+        d.fin = .{ .x = fin.w, .y = fin.h };
+        return;
+    }
+    const a = divide(r, n.share.step(now), n.down);
+    const b = divide(fin, n.share.to, n.down);
+    place(n.kids[0], a[0], b[0], now);
+    place(n.kids[1], a[1], b[1], now);
+}
+
+fn cardsMoving(n: *const Node) bool {
+    if (n.pane != null) return false;
+    return !n.share.settled() or cardsMoving(n.kids[0]) or cardsMoving(n.kids[1]);
+}
+
+/// Takes out the cards that have folded away: their split hands its place
+/// to the other kid.
+fn dropFolded(w: *Win, n: *Node) void {
+    if (n.pane != null) return;
+    if (n.going) |g| if (n.share.settled()) {
+        const gone = n.kids[g];
+        const keep = n.kids[1 - g];
+        closePane(gone.pane.?);
+        gpa.destroy(gone);
+        const up = n.up;
+        n.* = keep.*;
+        n.up = up;
+        if (n.pane == null) for (n.kids) |kid| {
+            kid.up = n;
+        };
+        gpa.destroy(keep);
+        w.grab = null;
+        msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
+        return dropFolded(w, n);
+    };
+    dropFolded(w, n.kids[0]);
+    dropFolded(w, n.kids[1]);
+}
+
+fn freeNodes(n: *Node) void {
+    if (n.pane == null) for (n.kids) |kid| freeNodes(kid);
+    gpa.destroy(n);
+}
+
+/// Lets go of a card that's out of its window's layout, or whose window closed.
+fn closePane(d: *Doc) void {
+    rememberPlace(d);
+    msg(void, d.caret, "removeFromSuperlayer", .{});
+    for (docs.items, 0..) |x, i| if (x == d) {
+        _ = docs.orderedRemove(i);
+        break;
+    };
+    d.deinit();
+    gpa.destroy(d);
+}
+
+/// The card under `p`, in the view's coordinates. Cards that are folding
+/// away don't count.
+fn paneAt(w: *const Win, p: Point) ?*Doc {
+    var near: ?*Doc = null;
+    for (docs.items) |d| if (d.win == w and !d.closing) {
+        const x = p.x - d.org.x;
+        const y = p.y - d.org.y;
+        if (x < 0 or y < 0 or x >= d.size.x or y >= d.size.y) continue;
+        if (x >= gap and y >= gap and x < d.size.x - gap and y < d.size.y - gap) return d;
+        near = d;
+    };
+    return near;
+}
+
+/// `p` in `d`'s pane.
+fn inPane(d: *const Doc, p: Point) Point {
+    return .{ .x = p.x - d.org.x, .y = p.y - d.org.y };
+}
+
+/// The gap between two cards, where it splits `n`, in the view.
+fn gapRect(n: *const Node) Rect {
+    const b = divide(n.r, n.share.x, n.down)[1];
+    if (n.down) return .{ .x = n.r.x + gap, .y = b.y, .w = n.r.w - 2 * gap, .h = gap };
+    return .{ .x = b.x, .y = n.r.y + gap, .w = gap, .h = n.r.h - 2 * gap };
+}
+
+/// The split whose gap is under `p`, a few points either side.
+fn gapAt(n: *Node, p: Point) ?*Node {
+    if (n.pane != null) return null;
+    if (n.going == null) {
+        const g = gapRect(n);
+        if (p.x >= g.x - 3 and p.x < g.x + g.w + 3 and p.y >= g.y - 3 and p.y < g.y + g.h + 3) return n;
+    }
+    return gapAt(n.kids[0], p) orelse gapAt(n.kids[1], p);
+}
+
+/// Moves split `n`'s gap to `p`, keeping each side's card a usable size.
+fn dragGap(w: *Win, n: *Node, p: Point) void {
+    const len = (if (n.down) n.r.h else n.r.w) - 3 * gap;
+    const at = (if (n.down) p.y - n.r.y else p.x - n.r.x) - 1.5 * gap;
+    const lo = @min(0.5, (if (n.down) min_card_h else min_card_w) / @max(len, 1));
+    n.share.snap(std.math.clamp(at / @max(len, 1), lo, 1 - lo));
+    msg(void, resizeCursor(n.down), "set", .{});
+    msg(void, w.view, "setNeedsDisplay:", .{true});
+}
+
+/// The gaps' cursors: left-right between cards side by side, up-down
+/// between cards one above the other.
+fn gapCursors(view: Id, n: *const Node) void {
+    if (n.pane != null) return;
+    if (n.going == null) msg(void, view, "addCursorRect:cursor:", .{ gapRect(n), resizeCursor(n.down) });
+    gapCursors(view, n.kids[0]);
+    gapCursors(view, n.kids[1]);
+}
+
+fn resizeCursor(down: bool) Id {
+    const c = objc.class("NSCursor");
+    return if (down) msg(Id, c, "resizeUpDownCursor", .{}) else msg(Id, c, "resizeLeftRightCursor", .{});
+}
+
+/// ⌘] and ⌘[: typing moves to the next or previous card, in layout order.
+fn stepCard(d: *Doc, by: isize) void {
+    var list: [64]*Doc = undefined;
+    const n = listPanes(d.win.cards, &list, 0);
+    if (n < 2) return;
+    const i = std.mem.indexOfScalar(*Doc, list[0..n], d) orelse return;
+    const ni: isize = @intCast(n);
+    focus(list[@intCast(@mod(@as(isize, @intCast(i)) + by, ni))]);
+}
+
+fn listPanes(n: *const Node, out: []*Doc, at: usize) usize {
+    if (n.pane) |p| {
+        if (p.closing or at >= out.len) return at;
+        out[at] = p;
+        return at + 1;
+    }
+    return listPanes(n.kids[1], out, listPanes(n.kids[0], out, at));
 }
 
 /// A doc nothing has been typed into, for a file to open into.
@@ -1063,22 +1394,23 @@ pub fn blankDoc() ?*Doc {
     return if (d.path == null and d.ed.text().len == 0) d else null;
 }
 
+/// How many windows are open.
 pub fn count() usize {
-    return docs.items.len;
+    return wins.items.len;
 }
 
+/// A new window with one card holding an empty untitled file.
 pub fn newDoc() ?*Doc {
-    const d = gpa.create(Doc) catch return null;
-    d.* = .{ .ed = Editor.init(gpa, "") catch return null, .id = newId() };
-    docs.append(gpa, d) catch return null;
+    const leaf = gpa.create(Node) catch return null;
+    const w = gpa.create(Win) catch return null;
+    wins.append(gpa, w) catch return null;
 
     const frame: Rect = .{ .w = 880, .h = 720 };
     const style: usize = 1 | 2 | 4 | 8 | (1 << 15);
     const win = msg(Id, msg(Id, objc.class("NSWindow"), "alloc", .{}), "initWithContentRect:styleMask:backing:defer:", .{ frame, style, @as(usize, 2), false });
     const view = msg(Id, msg(Id, view_class, "alloc", .{}), "initWithFrame:", .{frame});
-    setDoc(view, d);
-    d.window = win;
-    d.view = view;
+    w.* = .{ .window = win, .view = view, .cards = leaf, .focus = undefined };
+    setWin(view, w);
     msg(void, view, "setWantsLayer:", .{true});
     msg(void, view, "registerForDraggedTypes:", .{msg(Id, objc.class("NSArray"), "arrayWithObject:", .{NSPasteboardTypeFileURL})});
     // Hovering a tab lights it and shows its close button: mouse moves and
@@ -1086,13 +1418,14 @@ pub fn newDoc() ?*Doc {
     const area = msg(Id, msg(Id, objc.class("NSTrackingArea"), "alloc", .{}), "initWithRect:options:owner:userInfo:", .{ Rect{}, @as(usize, 0x01 | 0x02 | 0x40 | 0x200), view, @as(Id, null) });
     msg(void, view, "addTrackingArea:", .{area});
     msg(void, area, "release", .{});
-    d.caret = msg(Id, objc.class("CALayer"), "layer", .{});
-    msg(void, d.caret, "setCornerRadius:", .{@as(f64, 1)});
-    msg(void, d.caret, "setHidden:", .{true});
-    msg(void, msg(Id, view, "layer", .{}), "addSublayer:", .{d.caret});
-    d.link = msg(Id, view, "displayLinkWithTarget:selector:", .{ view, objc.sel_registerName("tick:") });
-    msg(void, d.link, "addToRunLoop:forMode:", .{ msg(Id, objc.class("NSRunLoop"), "mainRunLoop", .{}), NSRunLoopCommonModes });
-    msg(void, d.link, "setPaused:", .{true});
+    w.link = msg(Id, view, "displayLinkWithTarget:selector:", .{ view, objc.sel_registerName("tick:") });
+    msg(void, w.link, "addToRunLoop:forMode:", .{ msg(Id, objc.class("NSRunLoop"), "mainRunLoop", .{}), NSRunLoopCommonModes });
+    msg(void, w.link, "setPaused:", .{true});
+    const d = newPane(w) orelse return null;
+    leaf.* = .{ .pane = d };
+    w.focus = d;
+    d.size = .{ .x = frame.w, .y = frame.h };
+    d.fin = d.size;
     msg(void, win, "setTitlebarAppearsTransparent:", .{true});
     msg(void, win, "setTitleVisibility:", .{@as(isize, 1)});
     msg(void, win, "setMinSize:", .{Point{ .x = 360, .y = 240 }});
@@ -1100,16 +1433,29 @@ pub fn newDoc() ?*Doc {
     msg(void, view, "release", .{});
     msg(void, win, "setDelegate:", .{view});
     msg(void, win, "makeFirstResponder:", .{view});
-    if (docs.items.len == 1) {
+    if (wins.items.len == 1) {
         msg(void, win, "center", .{});
         _ = msg(bool, win, "setFrameAutosaveName:", .{objc.str("ze")});
     } else {
-        const fr = msg(Rect, docs.items[docs.items.len - 2].window, "frame", .{});
+        const fr = msg(Rect, wins.items[wins.items.len - 2].window, "frame", .{});
         msg(void, win, "setFrame:display:", .{ fr, false });
         msg(void, win, "setFrameTopLeftPoint:", .{Point{ .x = fr.x + 24, .y = fr.y + fr.h - 24 }});
     }
     named(d);
     msg(void, win, "makeKeyAndOrderFront:", .{@as(Id, null)});
+    return d;
+}
+
+/// A card for window `w` with an empty untitled file and its own caret.
+/// The caller puts it in the layout.
+fn newPane(w: *Win) ?*Doc {
+    const d = gpa.create(Doc) catch return null;
+    d.* = .{ .ed = Editor.init(gpa, "") catch return null, .id = newId(), .win = w, .window = w.window, .view = w.view };
+    docs.append(gpa, d) catch return null;
+    d.caret = msg(Id, objc.class("CALayer"), "layer", .{});
+    msg(void, d.caret, "setCornerRadius:", .{@as(f64, 1)});
+    msg(void, d.caret, "setHidden:", .{true});
+    msg(void, msg(Id, w.view, "layer", .{}), "addSublayer:", .{d.caret});
     return d;
 }
 
@@ -1292,16 +1638,17 @@ fn placeOf(p: []const u8) ?Place {
     return null;
 }
 
-/// On quit: every window's file and frame, back to front, for next launch.
+/// On quit: every window's focused file and frame, back to front, for next launch.
 pub fn saveSession() void {
     for (docs.items) |d| rememberPlace(d);
     const out = msg(Id, objc.class("NSMutableArray"), "array", .{});
-    const wins = msg(Id, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "orderedWindows", .{});
-    var i = msg(usize, wins, "count", .{});
+    const order = msg(Id, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "orderedWindows", .{});
+    var i = msg(usize, order, "count", .{});
     while (i > 0) {
         i -= 1;
-        const w = msg(Id, wins, "objectAtIndex:", .{i});
-        for (docs.items) |d| if (d.window == w and d.path != null) {
+        const w = msg(Id, order, "objectAtIndex:", .{i});
+        for (wins.items) |wn| if (wn.window == w and wn.focus.path != null) {
+            const d = wn.focus;
             const frame = objc.utf8(msg(Id, w, "stringWithSavedFrame", .{}));
             const entry = std.mem.concat(gpa, u8, &.{ frame, "\t", d.path.? }) catch continue;
             defer gpa.free(entry);
@@ -1423,6 +1770,11 @@ pub fn loadSettings() void {
         .dark => msg(Id, objc.class("NSAppearance"), "appearanceNamed:", .{objc.str("NSAppearanceNameDarkAqua")}),
     };
     msg(void, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "setAppearance:", .{look});
+    for (wins.items) |w| {
+        w.dark = null;
+        w.side_find = true;
+        msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
+    }
     for (docs.items) |d| {
         d.dark = null;
         d.sy = d.sy / old_lh * lh;
@@ -1430,8 +1782,6 @@ pub fn loadSettings() void {
         d.band_on = false;
         d.snap = true;
         reveal(d);
-        d.side_find = true;
-        msg(void, d.window, "invalidateCursorRectsForView:", .{d.view});
         refresh(d);
     }
 }
@@ -1763,8 +2113,10 @@ fn is(name: []const u8, comptime want: []const u8) bool {
 /// `col..ecol`. Without wrap every line is one row.
 const Seg = struct { k: usize = 0, start: usize = 0, col: usize = 0, end: usize = 0, ecol: usize = 0 };
 
+/// Rows wrap at the card's width once it's done springing, so a card that
+/// grows or shrinks doesn't rewrap every frame.
 fn wrapCols(d: *const Doc) usize {
-    return @max(@as(usize, @intFromFloat((rightEdge(d) - left(d) - 2 * pad_x) / cw)), 8);
+    return @max(@as(usize, @intFromFloat((d.fin.x - 2 * gap - 2 * pad_x) / cw)), 8);
 }
 
 /// Brings the row counts up to date after edits, a resize or a font change.
@@ -1918,7 +2270,7 @@ fn reveal(d: *Doc) void {
     if (y + lh > d.sy + th) d.sy = y + lh - th;
     if (!conf.wrap) {
         const x = f(c.col) * cw;
-        const tw = rightEdge(d) - left(d) - 2 * pad_x;
+        const tw = rightEdge(d) - gap - 2 * pad_x;
         if (x < d.sx) d.sx = @max(0, x - 8 * cw);
         if (x > d.sx + tw - cw) d.sx = x - tw + 8 * cw;
     }
@@ -1932,9 +2284,15 @@ fn center(d: *Doc) void {
     reveal(d);
 }
 
+/// Redraws `d`'s window, which shows the dot of unsaved changes in its
+/// close button when any of its cards has some.
 fn refresh(d: *Doc) void {
     msg(void, d.view, "setNeedsDisplay:", .{true});
-    msg(void, d.window, "setDocumentEdited:", .{d.dirty()});
+    var edited = false;
+    for (docs.items) |o| if (o.win == d.win and o.dirty()) {
+        edited = true;
+    };
+    msg(void, d.window, "setDocumentEdited:", .{edited});
 }
 
 // ---- drawing ----
@@ -2024,6 +2382,12 @@ fn tile(ctx: Id, which: Icon, dark: bool, th: *const Theme, x: f64, y: f64) void
     drawIcon(icon(which, dark, th), x, y, s);
 }
 
+/// A soft rounded square behind a button under the mouse, centered on
+/// `cx`, `cy`, at `a` of its full strength.
+fn hoverPill(ctx: Id, th: *const Theme, a: f64, cx: f64, cy: f64) void {
+    if (a > 0.01) pill(ctx, th.fg, 0.08 * a, cx - 13, cy - 12, 26, 24, 6);
+}
+
 /// Draws `img` centered in the square at `x`, `y` with side `s`.
 fn drawIcon(img: Id, x: f64, y: f64, s: f64) void {
     if (img == null) return;
@@ -2032,10 +2396,12 @@ fn drawIcon(img: Id, x: f64, y: f64, s: f64) void {
     msg(void, img, "drawInRect:fromRect:operation:fraction:respectFlipped:hints:", .{ r, Rect{}, @as(usize, 2), @as(f64, 1), true, @as(Id, null) });
 }
 
-/// Whether this window holds `rel` with unsaved changes.
-fn rowDirty(d: *const Doc, rel: []const u8) bool {
-    if (d.path) |p| if (relOf(p)) |r| if (std.mem.eql(u8, r, rel)) return d.ed.buf.dirty();
-    for (d.pages.items) |pg| if (pg.path) |p| if (relOf(p)) |r| if (std.mem.eql(u8, r, rel)) return pg.ed.buf.dirty();
+/// Whether this window holds `rel` with unsaved changes, in any card.
+fn rowDirty(w: *const Win, rel: []const u8) bool {
+    for (docs.items) |d| if (d.win == w) {
+        if (d.path) |p| if (relOf(p)) |r| if (std.mem.eql(u8, r, rel)) return d.ed.buf.dirty();
+        for (d.pages.items) |pg| if (pg.path) |p| if (relOf(p)) |r| if (std.mem.eql(u8, r, rel)) return pg.ed.buf.dirty();
+    };
     return false;
 }
 
@@ -2085,10 +2451,10 @@ fn stuckRows(sy: f64, out: *[max_stuck]usize) usize {
 }
 
 /// The tree row under `y`: a pinned folder, or a row in the list.
-fn sideRow(d: *const Doc, y: f64) ?usize {
-    for (d.stuck[0..d.nstuck], d.stuck_y[0..d.nstuck]) |i, sy| if (y >= sy and y < sy + side_h) return i;
+fn sideRow(w: *const Win, y: f64) ?usize {
+    for (w.stuck[0..w.nstuck], w.stuck_y[0..w.nstuck]) |i, sy| if (y >= sy and y < sy + side_h) return i;
     if (y < listTop()) return null;
-    const at = @floor((y - listTop() + d.side_y) / side_h);
+    const at = @floor((y - listTop() + w.side_y) / side_h);
     if (at < 0 or at >= f(tree.rows.items.len)) return null;
     return @intFromFloat(at);
 }
@@ -2143,17 +2509,21 @@ fn finishFold() void {
     refreshAll();
 }
 
+/// The sidebar's selection: a soft rounded highlight with a thin outline,
+/// fainter when the window isn't key.
+fn selPill(ctx: Id, th: *const Theme, key: bool, y: f64) void {
+    const hw = side_w - 2 * side_inset - 2;
+    pill(ctx, th.fg, if (key) 0.07 else 0.04, side_inset, y, hw, side_h, side_radius);
+    ring(ctx, th.fg, if (key) 0.09 else 0.05, side_inset, y, hw, side_h, side_radius);
+}
+
 /// One row of the tree with its top at `y`: chevron, tile, name and dot.
 /// `turn` is how far a folding folder's chevron has turned, 0 to 1.
-fn drawRow(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, i: usize, y: f64, cur: ?[]const u8, turn: ?f64) void {
+fn drawRow(w: *const Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, i: usize, y: f64, cur: ?[]const u8, turn: ?f64) void {
     const row = tree.rows.items[i];
     const s = tileSize();
     const x = 16 + f(row.depth) * 16;
-    if (cur != null and std.mem.eql(u8, row.rel, cur.?)) {
-        const w = side_w - 2 * side_inset - 2;
-        pill(ctx, th.fg, if (key) 0.07 else 0.04, side_inset, y, w, side_h, side_radius);
-        ring(ctx, th.fg, if (key) 0.09 else 0.05, side_inset, y, w, side_h, side_radius);
-    }
+    if (cur != null and std.mem.eql(u8, row.rel, cur.?)) selPill(ctx, th, key, y);
     const iy = y + (side_h - s) / 2;
     if (row.dir) {
         const cx = x - 4;
@@ -2171,83 +2541,118 @@ fn drawRow(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, i
     const nx = x + 10 + s + 8;
     const line = &side_lines.items[i];
     if (line.* == null) line.* = uiLine(row.rel[row.base..], side_font, side_w - nx - if (row.dir) @as(f64, 14) else 26);
-    const w = drawLine(ctx, line.*, th.fg, nx, y + side_base);
-    if (!row.dir and rowDirty(d, row.rel)) _ = k.text(" •", null, th, th.caret, nx + w, y + side_base, 0, 2);
+    const nw = drawLine(ctx, line.*, th.fg, nx, y + side_base);
+    if (!row.dir and rowDirty(w, row.rel)) _ = k.text(" •", null, th, th.caret, nx + nw, y + side_base, 0, 2);
 }
 
 /// The folder's parent and name pinned at the top, then a row per file and
 /// open folder down to the window's bottom. The open folders holding the
 /// rows at the top pin under the name, and the next folder pushes them up.
 /// `fade` is the sidebar's alpha while it slides.
-fn drawSide(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, bg: Rgb, fade: f64, now: f64) void {
+fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, bg: Rgb, fade: f64, now: f64) void {
     k.flush();
     const rows = tree.rows.items;
     const lt = listTop();
-    const view_h = bounds(d).h - lt;
-    const cur = if (d.path) |p| relOf(p) else null;
-    if (d.side_find) {
-        d.side_find = false;
+    const full_h = msg(Rect, w.view, "bounds", .{}).h;
+    const view_h = full_h - lt;
+    const cur = if (w.focus.path) |p| relOf(p) else null;
+    if (w.side_find) {
+        w.side_find = false;
         if (cur) |c| for (rows, 0..) |row, i| if (std.mem.eql(u8, row.rel, c)) {
             const y = f(i) * side_h;
-            if (y < d.side_y or y + side_h > d.side_y + view_h) d.side_y = y - view_h / 3;
+            if (y < w.side_y or y + side_h > w.side_y + view_h) w.side_y = y - view_h / 3;
             break;
         };
     }
-    d.side_y = std.math.clamp(d.side_y, 0, @max(0, f(rows.len + 1) * side_h - view_h));
-    if (d.side_t.to != d.side_y) d.side_t.snap(d.side_y);
-    const sy = if (d.side_t.moving(now)) d.side_t.at(now) else d.side_y;
+    w.side_y = std.math.clamp(w.side_y, 0, @max(0, f(rows.len + 1) * side_h - view_h));
+    if (w.side_t.to != w.side_y) w.side_t.snap(w.side_y);
+    const sy = if (w.side_t.moving(now)) w.side_t.at(now) else w.side_y;
     if (side_lines.items.len < rows.len) side_lines.appendNTimes(gpa, null, rows.len - side_lines.items.len) catch return;
 
     objc.CGContextSaveGState(ctx);
-    objc.CGContextClipToRect(ctx, .{ .y = top_h - 6, .w = side_w - 2, .h = bounds(d).h - top_h + 6 });
+    objc.CGContextClipToRect(ctx, .{ .y = top_h - 6, .w = side_w - 2, .h = full_h - top_h + 6 });
     if (side_label == null) {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        side_label = uiLine(tilde(&buf, std.fs.path.dirname(root.?) orelse "/"), head_font, side_w - 32);
+        // A long path loses its start, keeping the folders nearest the root.
+        side_label = uiLineCut(tilde(&buf, std.fs.path.dirname(root.?) orelse "/"), head_font, side_w - 32, 0);
     }
     _ = drawLine(ctx, side_label, th.muted, 16, top_h + label_h - 8);
     if (side_head == null) side_head = uiLine(std.fs.path.basename(root.?), name_font, side_w - 32);
     _ = drawLine(ctx, side_head, th.fg, 16, top_h + label_h + side_base);
 
     objc.CGContextClipToRect(ctx, .{ .y = lt, .w = side_w - 2, .h = view_h });
-    // A folding folder's own rows stay put and show only as far as it's
-    // open, fading in or out, and the rows after them slide to match.
     const folding = fold.t.moving(now) and fold.at < rows.len and std.mem.eql(u8, rows[fold.at].rel, fold.rel[0..fold.len]);
     const p = if (folding) std.math.clamp(fold.t.at(now), 0, 1) else 1;
     const off = if (folding) (1 - p) * f(fold.n) * side_h else 0;
-    const split = if (folding) fold.at + fold.n + 1 else rows.len;
+    const rest_at = if (folding) fold.at + fold.n + 1 else rows.len;
+
+    // The selection hops from row to row with a little bounce, and rides
+    // along when folders above it open or close.
+    if (w.sel_gen != tree_gen or w.sel_id != w.focus.id) {
+        w.sel_gen = tree_gen;
+        w.sel_id = w.focus.id;
+        w.sel_row = null;
+        if (cur) |c| for (rows, 0..) |row, i| if (std.mem.eql(u8, row.rel, c)) {
+            w.sel_row = i;
+            break;
+        };
+    }
+    if (w.sel_row) |i| {
+        const ty = f(i) * side_h - if (i >= rest_at) off else 0;
+        if (w.sel_a.to == 0 or w.sel_was == null) {
+            w.sel.snap(ty);
+        } else if (w.sel_was.? != i) {
+            w.sel.aim(ty, now);
+        } else {
+            w.sel.x += ty - w.sel.to;
+            w.sel.to = ty;
+        }
+        w.sel_a.aim(1, now);
+    } else w.sel_a.aim(0, now);
+    w.sel_was = w.sel_row;
+    const sel_a = w.sel_a.at(now) * if (w.sel_row != null and folding and w.sel_row.? > fold.at and w.sel_row.? < rest_at) p else 1;
+    if (sel_a > 0.01) {
+        objc.CGContextSaveGState(ctx);
+        objc.CGContextSetAlpha(ctx, sel_a * fade);
+        selPill(ctx, th, key, lt + w.sel.step(now) - sy);
+        objc.CGContextRestoreGState(ctx);
+    }
+
+    // A folding folder's own rows stay put and show only as far as it's
+    // open, fading in or out, and the rows after them slide to match.
     const from: usize = @intFromFloat(@max(@floor(sy / side_h), 0));
-    const to: usize = @min(split, @as(usize, @intFromFloat(@max(@ceil((sy + view_h) / side_h), 0))));
+    const to: usize = @min(rest_at, @as(usize, @intFromFloat(@max(@ceil((sy + view_h) / side_h), 0))));
     for (@min(from, to)..to) |i| {
         const y = lt + f(i) * side_h - sy;
         if (!folding or i <= fold.at) {
-            drawRow(d, ctx, th, k, dark, key, i, y, cur, if (folding and i == fold.at) p else null);
+            drawRow(w, ctx, th, k, dark, key, i, y, null, if (folding and i == fold.at) p else null);
             continue;
         }
         objc.CGContextSaveGState(ctx);
         objc.CGContextClipToRect(ctx, .{ .y = lt + f(fold.at + 1) * side_h - sy, .w = side_w, .h = f(fold.n) * side_h - off });
         objc.CGContextSetAlpha(ctx, fade * p);
-        drawRow(d, ctx, th, k, dark, key, i, y, cur, null);
+        drawRow(w, ctx, th, k, dark, key, i, y, null, null);
         k.flush();
         objc.CGContextRestoreGState(ctx);
     }
-    const from2 = @max(split, @as(usize, @intFromFloat(@max(@floor((sy + off) / side_h), 0))));
+    const from2 = @max(rest_at, @as(usize, @intFromFloat(@max(@floor((sy + off) / side_h), 0))));
     const to2: usize = @min(rows.len, @as(usize, @intFromFloat(@max(@ceil((sy + off + view_h) / side_h), 0))));
-    for (@min(from2, to2)..to2) |i| drawRow(d, ctx, th, k, dark, key, i, lt + f(i) * side_h - sy - off, cur, null);
+    for (@min(from2, to2)..to2) |i| drawRow(w, ctx, th, k, dark, key, i, lt + f(i) * side_h - sy - off, null, null);
 
     // Pinned folders, each held up by the end of its rows, the outer ones
     // drawn last so they stay on top.
-    d.nstuck = stuckRows(sy, &d.stuck);
+    w.nstuck = stuckRows(sy, &w.stuck);
     var low = lt;
-    var j = d.nstuck;
+    var j = w.nstuck;
     while (j > 0) {
         j -= 1;
-        const a = d.stuck[j];
+        const a = w.stuck[j];
         var e = a + 1;
         while (e < rows.len and rows[e].depth > rows[a].depth) e += 1;
         const y = @min(lt + f(j) * side_h, lt + f(e) * side_h - sy - side_h);
-        d.stuck_y[j] = y;
+        w.stuck_y[j] = y;
         fill(ctx, bg, 0, y, side_w, side_h);
-        drawRow(d, ctx, th, k, dark, key, a, y, cur, null);
+        drawRow(w, ctx, th, k, dark, key, a, y, cur, null);
         low = @max(low, y + side_h);
     }
     k.flush();
@@ -2284,6 +2689,11 @@ fn dropHead(d: *Doc) void {
 /// `s` as a line in `fnt` that takes the context's fill color, cut with an
 /// ellipsis past `width`. Owned: CFRelease it.
 fn uiLine(s: []const u8, fnt: Id, width: f64) Id {
+    return uiLineCut(s, fnt, width, 1);
+}
+
+/// `uiLine`, with the ellipsis at the start (0), end (1) or middle (2).
+fn uiLineCut(s: []const u8, fnt: Id, width: f64, at: u32) Id {
     const objs = [2]Id{ fnt, msg(Id, objc.class("NSNumber"), "numberWithBool:", .{true}) };
     const keys = [2]Id{ objc.str("NSFont"), objc.str("CTForegroundColorFromContext") };
     const attrs = msg(Id, objc.class("NSDictionary"), "dictionaryWithObjects:forKeys:count:", .{ &objs, &keys, @as(usize, 2) });
@@ -2295,7 +2705,7 @@ fn uiLine(s: []const u8, fnt: Id, width: f64) Id {
     defer msg(void, dots, "release", .{});
     const token = objc.CTLineCreateWithAttributedString(dots);
     defer if (token) |t| objc.CFRelease(t);
-    const short = objc.CTLineCreateTruncatedLine(line, width, 1, token);
+    const short = objc.CTLineCreateTruncatedLine(line, width, at, token);
     if (short == null) return line;
     objc.CFRelease(line.?);
     return short;
@@ -2316,16 +2726,17 @@ fn drawLine(ctx: Id, line: Id, c: Rgb, x: f64, y: f64) f64 {
     return objc.CTLineGetTypographicBounds(line, null, null, null);
 }
 
-/// A folder opens or closes; a file shows here, or with ⌘ in a new window.
-fn sideClick(d: *Doc, p: Point, flags: usize) void {
+/// A folder opens or closes; a file shows in the focused card, or with ⌘
+/// in a new window.
+fn sideClick(w: *Win, p: Point, flags: usize) void {
     if (fold.closing) finishFold();
-    const i = sideRow(d, p.y) orelse return;
+    const i = sideRow(w, p.y) orelse return;
     // A pinned folder scrolls back to where its rows start.
-    if (std.mem.indexOfScalar(usize, d.stuck[0..d.nstuck], i) != null and p.y < listTop() + f(d.nstuck) * side_h) {
-        d.side_t.snap(d.side_y);
-        d.side_y = f(i) * side_h;
-        d.side_t.aim(d.side_y, CACurrentMediaTime());
-        return refresh(d);
+    if (std.mem.indexOfScalar(usize, w.stuck[0..w.nstuck], i) != null and p.y < listTop() + f(w.nstuck) * side_h) {
+        w.side_t.snap(w.side_y);
+        w.side_y = f(i) * side_h;
+        w.side_t.aim(w.side_y, CACurrentMediaTime());
+        return refresh(w.focus);
     }
     const row = tree.rows.items[i];
     if (row.dir) {
@@ -2334,7 +2745,7 @@ fn sideClick(d: *Doc, p: Point, flags: usize) void {
     }
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ root.?, row.rel }) catch return;
-    open(path, if (flags & cmd_key != 0) null else d);
+    open(path, if (flags & cmd_key != 0) null else w.focus);
 }
 
 fn isDark(view: Id) bool {
@@ -2344,26 +2755,91 @@ fn isDark(view: Id) bool {
 
 const VRow = struct { line: usize, seg: Seg };
 
-fn draw(d: *Doc, ctx: Id) void {
+/// Draws a window: its chrome, each card in its pane, then the sidebar and
+/// the buttons by the traffic lights.
+fn draw(w: *Win, ctx: Id) void {
     const now = CACurrentMediaTime();
-    const dark = isDark(d.view);
+    const dark = isDark(w.view);
     const th = if (dark) &conf.dark else &conf.light;
-    if (d.dark != dark) {
-        d.dark = dark;
-        msg(void, d.window, "setBackgroundColor:", .{nscolor(chrome(th, dark))});
-        msg(void, d.caret, "setBackgroundColor:", .{msg(Id, nscolor(th.caret), "CGColor", .{})});
+    if (w.dark != dark) {
+        w.dark = dark;
+        msg(void, w.window, "setBackgroundColor:", .{nscolor(chrome(th, dark))});
     }
-    const r = bounds(d);
-    placeLights(d);
-    const b = &d.ed.buf;
+    const r = msg(Rect, w.view, "bounds", .{});
+    placeLights(w);
     // A closing folder shuts once its rows have folded away.
     if (fold.closing and !fold.t.moving(now)) finishFold();
     // The sidebar slides in and out, on the first draw it's just there.
-    const want: f64 = if (sideShown(d)) 1 else 0;
-    if (d.side_seen) d.side_a.aim(want, now) else d.side_a.snap(want);
-    d.side_seen = true;
-    const slid = std.math.clamp(d.side_a.at(now), 0, 1);
-    d.lx = @max(gap, side_w * slid);
+    const shown = sideShown(w);
+    const want: f64 = if (shown) 1 else 0;
+    if (w.side_seen) w.side_a.aim(want, now) else w.side_a.snap(want);
+    w.side_seen = true;
+    const slid = std.math.clamp(w.side_a.at(now), 0, 1);
+    w.lx = @max(gap, side_w * slid);
+    // The cards fill the room right of the sidebar, their panes reaching a
+    // gap back over it so each card sits a gap in.
+    dropFolded(w, w.cards);
+    const end_lx: f64 = if (shown) side_w else gap;
+    place(w.cards, .{ .x = w.lx - gap, .w = r.w - w.lx + gap, .h = r.h }, .{ .x = end_lx - gap, .w = r.w - end_lx + gap, .h = r.h }, now);
+    fill(ctx, chrome(th, dark), 0, 0, r.w, r.h);
+    const key = msg(bool, w.window, "isKeyWindow", .{});
+    const many = w.cards.pane == null;
+    for (&w.hot_t, 1..) |*t, i| t.aim(if (w.hot == i) 1 else 0, now);
+    var busy = w.side_t.moving(now) or w.side_a.moving(now) or fold.t.moving(now) or fold.closing or cardsMoving(w.cards) or
+        !w.sel.settled() or w.sel_a.moving(now) or w.hot_t[0].moving(now) or w.hot_t[1].moving(now);
+    var gliding = false;
+    for (docs.items) |d| if (d.win == w) {
+        // A card springing in or folding away fades with its size.
+        const grown = std.math.clamp(@min((d.size.x - 2 * gap) / 160, (d.size.y - 2 * gap) / 100), 0, 1);
+        if (grown <= 0.01) continue;
+        objc.CGContextSaveGState(ctx);
+        objc.CGContextTranslateCTM(ctx, d.org.x, d.org.y);
+        if (grown < 1) {
+            objc.CGContextSetAlpha(ctx, grown);
+            objc.CGContextBeginTransparencyLayer(ctx, null);
+        }
+        drawPane(d, ctx, th, dark, key, many, now);
+        if (grown < 1) objc.CGContextEndTransparencyLayer(ctx);
+        objc.CGContextRestoreGState(ctx);
+        busy = busy or d.busy;
+        gliding = gliding or d.cx.moving(now) or d.cy.moving(now);
+    };
+    // The sidebar, and the buttons by the traffic lights, each with a soft
+    // highlight under the mouse.
+    const hy = gap + head_h / 2;
+    var k: Ink = .{ .ctx = ctx };
+    if (slid > 0.002 and root != null) {
+        objc.CGContextSaveGState(ctx);
+        objc.CGContextClipToRect(ctx, .{ .w = side_w * slid, .h = r.h });
+        objc.CGContextTranslateCTM(ctx, side_w * (slid - 1), 0);
+        if (slid < 1) objc.CGContextSetAlpha(ctx, slid * slid);
+        drawSide(w, ctx, th, &k, dark, key, chrome(th, dark), if (slid < 1) slid * slid else 1, now);
+        hoverPill(ctx, th, w.hot_t[1].at(now), side_w - gap - 20, hy);
+        drawIcon(icon(.plus, dark, th), side_w - gap - 30, hy - 10, 20);
+        objc.CGContextRestoreGState(ctx);
+    }
+    if (root != null) {
+        hoverPill(ctx, th, w.hot_t[0].at(now), toggle_x, hy);
+        drawIcon(icon(.sidebar, dark, th), toggle_x - 10, hy - 10, 20);
+    }
+    w.busy = busy;
+    if (busy or gliding) msg(void, w.link, "setPaused:", .{false});
+}
+
+/// Draws a card in its pane's coordinates: the text, the prompt line and
+/// the header. `win_key` says whether its window is key, and `many`
+/// whether the window has other cards, which lights the focused one's ring.
+fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many: bool, now: f64) void {
+    if (d.dark != dark) {
+        d.dark = dark;
+        msg(void, d.caret, "setBackgroundColor:", .{msg(Id, nscolor(th.caret), "CGColor", .{})});
+    }
+    const r = bounds(d);
+    const focused = d.win.focus == d;
+    // The caret only shows in the key window's focused card.
+    const key = win_key and focused and !d.closing;
+    d.lit.aim(if (focused and many and win_key) 1 else 0, now);
+    const b = &d.ed.buf;
     layout(d);
     clampScroll(d);
     // Jumps glide the scroll. Stepping past the edge a few rows at a time and
@@ -2388,11 +2864,10 @@ fn draw(d: *Doc, ctx: Id) void {
     springBack(d, now);
     d.vy = d.ys.at(now) + d.ov[1];
     d.vx = d.xs.at(now) + d.ov[0];
-    // The window's chrome, then the card that holds the text, header and
-    // prompt line, which draw inside its rounded corners.
-    const lx = d.lx;
+    // The card that holds the text, header and prompt line, which draw
+    // inside its rounded corners.
+    const lx = gap;
     const card: Rect = .{ .x = lx, .y = gap, .w = rightEdge(d) - lx, .h = r.h - 2 * gap };
-    fill(ctx, chrome(th, dark), 0, 0, r.w, r.h);
     pill(ctx, th.bg, 1, card.x, card.y, card.w, card.h, card_radius);
     objc.CGContextSaveGState(ctx);
     clipRound(ctx, card.x, card.y, card.w, card.h, card_radius);
@@ -2528,9 +3003,7 @@ fn draw(d: *Doc, ctx: Id) void {
         }
     }
 
-    // The caret only shows in the key window.
     const by = bottom(d);
-    const key = msg(bool, d.window, "isKeyWindow", .{});
     if (d.mode == .edit) {
         placeCaret(d, now, tx + f(here.col) * cw - 1, top_h + f(here.row) * lh + 2, true, .{ 0, here.row, here.col }, key and load >= 1);
     }
@@ -2540,14 +3013,19 @@ fn draw(d: *Doc, ctx: Id) void {
     const want_ph: f64 = if (listing(d) != null) f(d.npicks) * lh + 12 else 0;
     d.panel.aim(want_ph, now);
     const ph = d.panel.at(now);
+    if (listing(d) == null) d.pick_live = false;
     if (ph > 0.5 and (d.palette or d.list != null)) {
         objc.CGContextSaveGState(ctx);
         objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = by - ph, .w = card.w, .h = ph });
         fill(ctx, th.panel, card.x, by - ph, card.w, ph);
         fill(ctx, th.rule, card.x, by - ph, card.w, 1);
+        // The picked row's highlight springs from row to row.
+        const pick_y = f(d.pick) * lh;
+        if (d.pick_live) d.pick_s.aim(pick_y, now) else d.pick_s.snap(pick_y);
+        d.pick_live = true;
+        if (d.npicks > 0) pill(ctx, th.sel, 1, card.x + 8, by - ph + 6 + d.pick_s.step(now), card.w - 16, lh, 6);
         for (d.picks[0..d.npicks], 0..) |p, i| {
             const y = by - ph + 6 + f(i) * lh;
-            if (i == d.pick) pill(ctx, th.sel, 1, card.x + 8, y, card.w - 16, lh, 6);
             if (d.palette) {
                 if (p >= cmds.items.len) continue;
                 const c = cmds.items[p];
@@ -2573,6 +3051,16 @@ fn draw(d: *Doc, ctx: Id) void {
     if (d.mode != .edit) {
         fill(ctx, th.bg, card.x, by, card.w, barH());
         fill(ctx, th.rule, card.x, by, card.w, 1);
+        // The prompt's words rise into place as it opens.
+        if (!d.prompt_on) d.prompt_t.snap(0);
+        d.prompt_on = true;
+        d.prompt_t.aim(1, now);
+        const rise = d.prompt_t.at(now);
+        objc.CGContextSaveGState(ctx);
+        if (rise < 1) {
+            objc.CGContextSetAlpha(ctx, rise);
+            objc.CGContextTranslateCTM(ctx, 0, (1 - rise) * 6);
+        }
         var x: f64 = tx;
         const label = switch (d.mode) {
             .find, .replace => "find",
@@ -2602,7 +3090,8 @@ fn draw(d: *Doc, ctx: Id) void {
         if (d.mode == .command) tally = std.fmt.bufPrint(&buf, "{d} commands", .{cmds.items.len}) catch "";
         _ = k.text(tally, null, th, th.muted, card.x + card.w - pad_x - f(tally.len) * cw, ty, 0, 64);
         k.flush();
-    }
+        objc.CGContextRestoreGState(ctx);
+    } else d.prompt_on = false;
 
     // The header, over any text scrolled under it: the file's name and
     // folder, or the window's tabs, and the caret's line and column.
@@ -2619,34 +3108,32 @@ fn draw(d: *Doc, ctx: Id) void {
     _ = k.text(spot, null, th, th.muted, spot_x, mono_y, 0, 32);
     k.flush();
     objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = @max(spot_x - 16 - card.x, 0), .h = head_h });
-    drawTabs(d, ctx, th, &k, dark, key, @max(card.x + 14, if (root != null) @as(f64, toggle_x + 22) else lights_x + 76), spot_x - 16, mono_y, now);
+    // The traffic lights and the sidebar button sit on a card at the window's top left.
+    const lights_end: f64 = if (root != null) toggle_x + 22 else lights_x + 76;
+    drawTabs(d, ctx, th, &k, dark, key, @max(card.x + 14, if (d.org.y < 1) lights_end - d.org.x else 0), spot_x - 16, mono_y, now);
     objc.CGContextRestoreGState(ctx);
 
-    // Outside the card: its outline, the sidebar, and the buttons by the
-    // traffic lights.
+    // The card's outline. In a window with more than one, the card that
+    // takes typing also gets a ring in the caret's color, which fades
+    // from card to card.
     ring(ctx, th.fg, if (dark) 0.1 else 0.08, card.x, card.y, card.w, card.h, card_radius);
-    if (slid > 0.002 and root != null) {
-        objc.CGContextSaveGState(ctx);
-        objc.CGContextClipToRect(ctx, .{ .w = side_w * slid, .h = r.h });
-        objc.CGContextTranslateCTM(ctx, side_w * (slid - 1), 0);
-        if (slid < 1) objc.CGContextSetAlpha(ctx, slid * slid);
-        drawSide(d, ctx, th, &k, dark, key, chrome(th, dark), if (slid < 1) slid * slid else 1, now);
-        drawIcon(icon(.plus, dark, th), side_w - gap - 30, hy - 10, 20);
-        objc.CGContextRestoreGState(ctx);
-    }
-    if (root != null) drawIcon(icon(.sidebar, dark, th), toggle_x - 10, hy - 10, 20);
-
+    const lit = d.lit.at(now);
+    if (lit > 0.01) ring(ctx, th.caret, 0.55 * lit, card.x, card.y, card.w, card.h, card_radius);
     d.busy = scenery(d, now);
-    if (d.busy or d.cx.moving(now) or d.cy.moving(now)) msg(void, d.link, "setPaused:", .{false});
 }
 
-/// The button by the traffic lights, or the + after the tabs, under `p`.
-fn toolAt(d: *const Doc, p: Point) ?Icon {
+/// The sidebar button by the traffic lights, or the + at the sidebar's
+/// top right, under `p` in the view.
+fn toolAt(w: *const Win, p: Point) ?Icon {
     if (@abs(p.y - (gap + head_h / 2)) > 12) return null;
     if (root != null and @abs(p.x - toggle_x) <= 12) return .sidebar;
-    if (sideShown(d) and @abs(p.x - (side_w - gap - 20)) <= 12) return .plus;
-    if (d.tabbed.to == 1 and @abs(p.x - d.plus_x) <= 12) return .plus;
+    if (sideShown(w) and @abs(p.x - (side_w - gap - 20)) <= 12) return .plus;
     return null;
+}
+
+/// Whether `p`, in the card's pane, is on the + after its tabs.
+fn onTabPlus(d: *const Doc, p: Point) bool {
+    return d.tabbed.to == 1 and @abs(p.y - (gap + head_h / 2)) <= 12 and @abs(p.x - d.plus_x) <= 12;
 }
 
 /// Brings the header's slots in line with the window's tabs: a new tab
@@ -2821,10 +3308,18 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
     const plus_a = std.math.clamp(2 * a - 1, 0, 1);
     var nx = end + 8;
     if (folder_a > 0.01) {
+        // Too long a folder loses its start, keeping the part nearest the file.
+        const note_w = if (d.note.len > 0) f(d.note.len + 2) * cw else 0;
+        const head_room = @max(@floor(x1 - nx - note_w), 24);
+        if (d.head != null and d.head_w != head_room) {
+            objc.CFRelease(d.head.?);
+            d.head = null;
+        }
         if (d.head == null) {
             var pbuf: [std.fs.max_path_bytes]u8 = undefined;
             const folder = if (d.path) |p| std.fs.path.dirname(p) orelse "/" else "";
-            d.head = uiLine(tilde(&pbuf, folder), side_font, 1e5);
+            d.head = uiLineCut(tilde(&pbuf, folder), side_font, head_room, 0);
+            d.head_w = head_room;
         }
         objc.CGContextSaveGState(ctx);
         objc.CGContextSetAlpha(ctx, folder_a);
@@ -2835,7 +3330,10 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
     if (plus_a > 0.01) {
         objc.CGContextSaveGState(ctx);
         objc.CGContextSetAlpha(ctx, plus_a);
-        drawIcon(icon(.plus, dark, th), end + 4 - 8 * (1 - plus_a), hy - 10, 20);
+        d.plus_t.aim(if (d.plus_on) 1 else 0, now);
+        const px = end + 4 - 8 * (1 - plus_a);
+        hoverPill(ctx, th, d.plus_t.at(now), px + 10, hy);
+        drawIcon(icon(.plus, dark, th), px, hy - 10, 20);
         objc.CGContextRestoreGState(ctx);
         nx = @max(nx, end + 36);
     }
@@ -2860,9 +3358,9 @@ fn tabAt(d: *const Doc, p: Point) ?TabHit {
 /// Moves the traffic lights in and down so they sit on the header's line.
 /// AppKit puts them back whenever it lays out the title bar, so every draw
 /// checks.
-fn placeLights(d: *Doc) void {
-    if (msg(usize, d.window, "styleMask", .{}) & (1 << 14) != 0) return;
-    const close = msg(Id, d.window, "standardWindowButton:", .{@as(usize, 0)});
+fn placeLights(w: *Win) void {
+    if (msg(usize, w.window, "styleMask", .{}) & (1 << 14) != 0) return;
+    const close = msg(Id, w.window, "standardWindowButton:", .{@as(usize, 0)});
     if (close == null) return;
     const at = msg(Rect, close, "frame", .{});
     const bar = msg(Rect, msg(Id, close, "superview", .{}), "bounds", .{});
@@ -2870,7 +3368,7 @@ fn placeLights(d: *Doc) void {
     const dy = @round(bar.h - (gap + head_h / 2) - at.h / 2) - at.y;
     if (dx == 0 and dy == 0) return;
     for (0..3) |i| {
-        const btn = msg(Id, d.window, "standardWindowButton:", .{i});
+        const btn = msg(Id, w.window, "standardWindowButton:", .{i});
         if (btn == null) continue;
         const fr = msg(Rect, btn, "frame", .{});
         msg(void, btn, "setFrameOrigin:", .{Point{ .x = fr.x + dx, .y = fr.y + dy }});
@@ -2880,9 +3378,9 @@ fn placeLights(d: *Doc) void {
 // ---- NSView methods ----
 
 fn drawRect(self: Id, _: Sel, _: Rect) callconv(.c) void {
-    const d = docOf(self) orelse return;
+    const w = winOf(self) orelse return;
     const gc = msg(Id, objc.class("NSGraphicsContext"), "currentContext", .{});
-    draw(d, msg(Id, gc, "CGContext", .{}));
+    draw(w, msg(Id, gc, "CGContext", .{}));
 }
 
 fn yes(_: Id, _: Sel) callconv(.c) bool {
@@ -3011,7 +3509,7 @@ fn posAt(d: *Doc, p: Point) usize {
     const i = lineOfRow(d, row);
     const l = b.line(i);
     const s = segN(d, l, row - rowOfLine(d, i));
-    const x = @max((p.x - d.lx - pad_x + d.vx) / cw, 0);
+    const x = @max((p.x - gap - pad_x + d.vx) / cw, 0);
     return b.lineStart(i) + std.math.clamp(editor.byteAtCol(l, f(s.col) + x), s.start, caretEnd(l, s));
 }
 
@@ -3033,38 +3531,59 @@ fn unitAt(d: *Doc, pos: usize) [2]usize {
 /// The header and the band over the sidebar stand in for the hidden title
 /// bar: they drag the window, and a double-click does what the Mac's
 /// Desktop & Dock setting says, like any title bar.
-fn titleStrip(d: *Doc, ev: Id) void {
-    d.side_down = true;
+fn titleStrip(w: *Win, ev: Id) void {
+    w.side_down = true;
     if (msg(isize, ev, "clickCount", .{}) == 2) {
         const act = objc.utf8(msg(Id, defaults(), "stringForKey:", .{objc.str("AppleActionOnDoubleClick")}));
-        if (is(act, "Minimize")) return msg(void, d.window, "performMiniaturize:", .{@as(Id, null)});
-        if (!is(act, "None")) msg(void, d.window, "performZoom:", .{@as(Id, null)});
+        if (is(act, "Minimize")) return msg(void, w.window, "performMiniaturize:", .{@as(Id, null)});
+        if (!is(act, "None")) msg(void, w.window, "performZoom:", .{@as(Id, null)});
         return;
     }
-    msg(void, d.window, "performWindowDragWithEvent:", .{ev});
+    msg(void, w.window, "performWindowDragWithEvent:", .{ev});
 }
 
+/// The buttons by the traffic lights, the sidebar and its edge, the gaps
+/// between cards, then the card under the mouse, which takes typing from
+/// then on.
 fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
-    const d = docOf(self) orelse return;
+    const w = winOf(self) orelse return;
     const p = local(self, ev);
+    w.side_down = true;
+    w.grab = null;
+    if (toolAt(w, p)) |t| {
+        if (t == .sidebar) toggleSidebar() else newTab(w.focus);
+        return;
+    }
+    const side = sideShown(w);
+    if (side and p.y >= top_h and @abs(p.x - side_w) <= edge_grab) {
+        w.side_drag = true;
+        return;
+    }
+    if (side and p.x < side_w) {
+        if (p.y < top_h) return titleStrip(w, ev);
+        return sideClick(w, p, msg(usize, ev, "modifierFlags", .{}));
+    }
+    if (gapAt(w.cards, p)) |n| {
+        w.grab = n;
+        return;
+    }
+    const d = paneAt(w, p) orelse return titleStrip(w, ev);
+    focus(d);
+    cardDown(d, inPane(d, p), ev);
+}
+
+/// A click in card `d`, at `p` in its pane: its tabs and +, the quick open
+/// list, or the text.
+fn cardDown(d: *Doc, p: Point, ev: Id) void {
     const by = bottom(d);
     d.note = "";
     if (p.y < top_h) {
-        d.side_down = true;
-        if (toolAt(d, p)) |t| {
-            if (t == .sidebar) toggleSidebar() else newTab(d);
-            return;
-        }
-        const hit = tabAt(d, p) orelse return titleStrip(d, ev);
+        if (onTabPlus(d, p)) return newTab(d);
+        const hit = tabAt(d, p) orelse return titleStrip(d.win, ev);
         if (hit.close) closeTab(d, hit.j) else showTab(d, hit.j);
         return;
     }
-    if (sideShown(d) and @abs(p.x - side_w) <= edge_grab) {
-        d.side_drag = true;
-        return;
-    }
-    d.side_down = sideShown(d) and p.x < side_w;
-    if (d.side_down) return sideClick(d, p, msg(usize, ev, "modifierFlags", .{}));
+    d.win.side_down = false;
     if (listing(d) != null) {
         const top = by - f(d.npicks) * lh - 6;
         if (p.y >= top and p.y < by) {
@@ -3073,7 +3592,10 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
             return refresh(d);
         }
     }
-    if (p.y >= by) return;
+    if (p.y >= by) {
+        d.win.side_down = true;
+        return;
+    }
     d.mode = .edit;
     const pos = posAt(d, p);
     switch (msg(isize, ev, "clickCount", .{})) {
@@ -3093,55 +3615,76 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
 
 /// Moves the sidebar's edge to `x` in every window, within its limits and
 /// leaving room for the text.
-fn resizeSide(d: *Doc, x: f64) void {
-    const room = bounds(d).w - 360;
-    const w = @round(std.math.clamp(x, settings.sidebar_min, @max(settings.sidebar_min, @min(settings.sidebar_max, room))));
+fn resizeSide(w: *Win, x: f64) void {
+    const room = msg(Rect, w.view, "bounds", .{}).w - 360;
+    const to = @round(std.math.clamp(x, settings.sidebar_min, @max(settings.sidebar_min, @min(settings.sidebar_max, room))));
     msg(void, msg(Id, objc.class("NSCursor"), "resizeLeftRightCursor", .{}), "set", .{});
-    if (w == side_w) return;
-    side_w = w;
+    if (to == side_w) return;
+    side_w = to;
     dropSideLines();
     refreshAll();
 }
 
-/// Lights the tab under the mouse and its close button.
+/// Lights the button, tab or tab's close button under the mouse, in
+/// whichever card it's over.
 fn mouseMoved(self: Id, _: Sel, ev: Id) callconv(.c) void {
-    const d = docOf(self) orelse return;
+    const w = winOf(self) orelse return;
     const p = local(self, ev);
-    const hit = if (p.y < top_h) tabAt(d, p) else null;
-    const id = if (hit) |h| h.id else 0;
-    const shut = if (hit) |h| h.close else false;
-    if (id == d.hover and shut == d.hover_x) return;
+    const tool = toolAt(w, p);
+    const hot: u8 = if (tool) |t| (if (t == .sidebar) 1 else 2) else 0;
+    if (hot != w.hot) {
+        w.hot = hot;
+        refresh(w.focus);
+    }
+    const over = if (tool == null) paneAt(w, p) else null;
+    for (docs.items) |d| if (d.win == w) {
+        const lp = inPane(d, p);
+        const hit = if (d == over and lp.y < top_h) tabAt(d, lp) else null;
+        setHover(d, if (hit) |h| h.id else 0, if (hit) |h| h.close else false, d == over and onTabPlus(d, lp));
+    };
+}
+
+fn setHover(d: *Doc, id: u32, shut: bool, plus: bool) void {
+    if (id == d.hover and shut == d.hover_x and plus == d.plus_on) return;
     d.hover = id;
     d.hover_x = shut;
+    d.plus_on = plus;
     refresh(d);
 }
 
 fn mouseExited(self: Id, _: Sel, _: Id) callconv(.c) void {
-    const d = docOf(self) orelse return;
-    if (d.hover == 0) return;
-    d.hover = 0;
-    d.hover_x = false;
-    refresh(d);
+    const w = winOf(self) orelse return;
+    if (w.hot != 0) {
+        w.hot = 0;
+        refresh(w.focus);
+    }
+    for (docs.items) |d| if (d.win == w) setHover(d, 0, false, false);
 }
 
-/// Ends a sidebar drag by saving the width, so new windows and the next
-/// launch use it.
+/// Ends a drag of the sidebar's edge by saving the width, so new windows
+/// and the next launch use it, or of a gap between cards.
 fn mouseUp(self: Id, _: Sel, _: Id) callconv(.c) void {
-    const d = docOf(self) orelse return;
-    if (!d.side_drag) return;
-    d.side_drag = false;
-    for (docs.items) |o| msg(void, o.window, "invalidateCursorRectsForView:", .{o.view});
+    const w = winOf(self) orelse return;
+    if (w.grab != null) {
+        w.grab = null;
+        return msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
+    }
+    if (!w.side_drag) return;
+    w.side_drag = false;
+    for (wins.items) |o| msg(void, o.window, "invalidateCursorRectsForView:", .{o.view});
     if (side_w == conf.sidebar_width) return;
     var buf: [24]u8 = undefined;
     store("sidebar-width", settings.decimal(&buf, side_w));
 }
 
 fn mouseDragged(self: Id, _: Sel, ev: Id) callconv(.c) void {
-    const d = docOf(self) orelse return;
-    if (d.side_drag) return resizeSide(d, local(self, ev).x);
-    if (d.side_down) return;
+    const w = winOf(self) orelse return;
+    if (w.side_drag) return resizeSide(w, local(self, ev).x);
+    if (w.grab) |n| return dragGap(w, n, local(self, ev));
+    if (w.side_down) return;
+    const d = w.focus;
     d.snap = true;
-    const p = local(self, ev);
+    const p = inPane(d, local(self, ev));
     if (p.y < top_h) d.sy -= lh;
     if (p.y > bottom(d)) d.sy += lh;
     clampScroll(d);
@@ -3156,13 +3699,16 @@ fn mouseDragged(self: Id, _: Sel, ev: Id) callconv(.c) void {
     refresh(d);
 }
 
+/// Scrolls the sidebar or the card under the mouse, focused or not.
 fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
-    const d = docOf(self) orelse return;
-    if (sideShown(d) and local(self, ev).x < side_w) {
+    const w = winOf(self) orelse return;
+    const at = local(self, ev);
+    if (sideShown(w) and at.x < side_w) {
         const dy = msg(f64, ev, "scrollingDeltaY", .{});
-        d.side_y -= if (msg(bool, ev, "hasPreciseScrollingDeltas", .{})) dy else dy * lh;
-        return refresh(d);
+        w.side_y -= if (msg(bool, ev, "hasPreciseScrollingDeltas", .{})) dy else dy * lh;
+        return refresh(w.focus);
     }
+    const d = paneAt(w, at) orelse return;
     var dx = msg(f64, ev, "scrollingDeltaX", .{});
     var dy = msg(f64, ev, "scrollingDeltaY", .{});
     const now = CACurrentMediaTime();
@@ -3173,7 +3719,7 @@ fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
         d.relax = msg(usize, ev, "phase", .{}) & touching == 0;
         if (!d.relax) d.ov_v = .{ 0, 0 };
         d.ov_t = now;
-        if (!conf.wrap) pull(&d.sx, &d.ov[0], -dx, std.math.inf(f64), @max(rightEdge(d) - left(d), cw));
+        if (!conf.wrap) pull(&d.sx, &d.ov[0], -dx, std.math.inf(f64), @max(rightEdge(d) - gap, cw));
         pull(&d.sy, &d.ov[1], -dy, @max(0, f(totalRows(d)) * lh - textH(d) / 2), textH(d));
     } else {
         dx *= lh;
@@ -3188,13 +3734,16 @@ fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
     refresh(d);
 }
 
-/// An I-beam over the card's text; the sidebar and the header keep the arrow.
+/// An I-beam over each card's text, resize arrows on the sidebar's edge
+/// and the gaps between cards; the headers keep the arrow.
 fn resetCursorRects(self: Id, _: Sel) callconv(.c) void {
-    const d = docOf(self) orelse return;
-    const r = bounds(d);
-    const lx = left(d);
-    msg(void, self, "addCursorRect:cursor:", .{ Rect{ .x = lx, .y = top_h, .w = rightEdge(d) - lx, .h = r.h - gap - top_h }, msg(Id, objc.class("NSCursor"), "IBeamCursor", .{}) });
-    if (sideShown(d)) {
+    const w = winOf(self) orelse return;
+    const r = msg(Rect, self, "bounds", .{});
+    for (docs.items) |d| if (d.win == w and !d.closing) {
+        msg(void, self, "addCursorRect:cursor:", .{ Rect{ .x = d.org.x + gap, .y = d.org.y + top_h, .w = @max(d.size.x - 2 * gap, 0), .h = @max(d.size.y - gap - top_h, 0) }, msg(Id, objc.class("NSCursor"), "IBeamCursor", .{}) });
+    };
+    gapCursors(self, w.cards);
+    if (sideShown(w)) {
         msg(void, self, "addCursorRect:cursor:", .{ Rect{ .x = side_w - edge_grab, .y = top_h, .w = 2 * edge_grab, .h = r.h - top_h }, msg(Id, objc.class("NSCursor"), "resizeLeftRightCursor", .{}) });
     }
 }
@@ -3248,14 +3797,17 @@ fn newMenu() Id {
     return objc.new("NSMenu");
 }
 
-/// Right-click and control-click: Edit's commands over the text, the file's
-/// commands over a sidebar row, and nothing elsewhere.
+/// Right-click and control-click: Edit's commands over a card's text, which
+/// takes typing from then on, the file's commands over a sidebar row, and
+/// nothing elsewhere.
 fn menuForEvent(self: Id, _: Sel, ev: Id) callconv(.c) Id {
-    const d = docOf(self) orelse return null;
+    const w = winOf(self) orelse return null;
     const p = local(self, ev);
     if (p.y < top_h) return null;
-    if (!sideShown(d) or p.x >= side_w) {
-        if (p.y >= bottom(d)) return null;
+    if (!sideShown(w) or p.x >= side_w) {
+        const d = paneAt(w, p) orelse return null;
+        if (inPane(d, p).y >= bottom(d)) return null;
+        focus(d);
         if (text_menu == null) {
             const m = newMenu();
             _ = menuItem(m, "Cut", "cut:", "x");
@@ -3268,7 +3820,7 @@ fn menuForEvent(self: Id, _: Sel, ev: Id) callconv(.c) Id {
         }
         return text_menu;
     }
-    const row = tree.rows.items[sideRow(d, p.y) orelse return null];
+    const row = tree.rows.items[sideRow(w, p.y) orelse return null];
     const path = std.fmt.bufPrint(&menu_path, "{s}/{s}", .{ root.?, row.rel }) catch return null;
     menu_len = path.len;
     if (side_menu == null) {
@@ -3299,23 +3851,29 @@ fn copyPath(_: Id, _: Sel, _: Id) callconv(.c) void {
     _ = msg(bool, pb, "setString:forType:", .{ objc.str(menu_path[0..menu_len]), NSPasteboardTypeString });
 }
 
+/// Each card with unsaved changes asks first.
 fn windowShouldClose(self: Id, _: Sel, _: Id) callconv(.c) bool {
-    const d = docOf(self) orelse return true;
-    return settle(d);
+    const w = winOf(self) orelse return true;
+    for (docs.items) |d| if (d.win == w and !d.closing and !settle(d)) return false;
+    return true;
 }
 
 fn windowWillClose(self: Id, _: Sel, _: Id) callconv(.c) void {
-    const d = docOf(self) orelse return;
-    rememberPlace(d);
-    msg(void, d.link, "invalidate", .{});
-    setDoc(self, null);
-    msg(void, d.window, "setDelegate:", .{@as(Id, null)});
-    for (docs.items, 0..) |x, i| if (x == d) {
-        _ = docs.orderedRemove(i);
+    const w = winOf(self) orelse return;
+    msg(void, w.link, "invalidate", .{});
+    setWin(self, null);
+    msg(void, w.window, "setDelegate:", .{@as(Id, null)});
+    var i = docs.items.len;
+    while (i > 0) {
+        i -= 1;
+        if (docs.items[i].win == w) closePane(docs.items[i]);
+    }
+    freeNodes(w.cards);
+    for (wins.items, 0..) |x, j| if (x == w) {
+        _ = wins.orderedRemove(j);
         break;
     };
-    d.deinit();
-    gpa.destroy(d);
+    gpa.destroy(w);
 }
 
 // ---- menu actions ----
@@ -3326,7 +3884,8 @@ fn action(comptime run: fn (*Doc) void) *const anyopaque {
             const d = docOf(self) orelse return;
             d.note = "";
             run(d);
-            refresh(d);
+            // Closing the last tab closes the window, and the card with it.
+            if (std.mem.indexOfScalar(*Doc, docs.items, d) != null) refresh(d);
         }
     }.imp);
 }
@@ -3415,6 +3974,22 @@ fn closeActive(d: *Doc) void {
     closeTab(d, d.at);
 }
 
+fn splitRight(d: *Doc) void {
+    split(d, false);
+}
+
+fn splitDown(d: *Doc) void {
+    split(d, true);
+}
+
+fn nextCard(d: *Doc) void {
+    stepCard(d, 1);
+}
+
+fn previousCard(d: *Doc) void {
+    stepCard(d, -1);
+}
+
 fn comment(d: *Doc) void {
     if (d.mode != .edit) return;
     d.ed.toggleComment(gpa, d.lang.line_comment) catch {};
@@ -3453,7 +4028,7 @@ fn changeFont(_: Id, _: Sel, sender: Id) callconv(.c) void {
 pub fn setup() void {
     loadSettings();
     const c = objc.ClassBuilder.begin("NSView", "ZeView");
-    c.ivar("doc");
+    c.ivar("win");
     c.method("drawRect:", @ptrCast(&drawRect), "v@:{CGRect=dddd}");
     c.method("isFlipped", @ptrCast(&yes), "c@:");
     c.method("isOpaque", @ptrCast(&yes), "c@:");
@@ -3490,8 +4065,10 @@ pub fn setup() void {
         .{ "quickOpen:", quickOpen },       .{ "toggleComment:", comment }, .{ "zoomIn:", zoomIn },
         .{ "zoomOut:", zoomOut },           .{ "zoomReset:", zoomReset },   .{ "findAndReplace:", findReplace },
         .{ "commandPalette:", palette },    .{ "newTab:", newTab },         .{ "closeTab:", closeActive },
+        .{ "splitRight:", splitRight },     .{ "splitDown:", splitDown },   .{ "nextCard:", nextCard },
+        .{ "previousCard:", previousCard },
     };
     inline for (actions) |a| c.method(a[0], action(a[1]), "v@:@");
     view_class = c.finish();
-    doc_ivar = objc.ivarOffset(view_class, "doc");
+    win_ivar = objc.ivarOffset(view_class, "win");
 }

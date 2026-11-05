@@ -7,8 +7,9 @@ covers:
 since: 2026-11-04
 ---
 
-ze is a small text editor. A window shows one file at a time, on a card with rounded corners
-that sits a little in from the window's edges, and keeps the other files you open in it as tabs.
+ze is a small text editor. A window shows files on cards with rounded corners that sit a little
+in from the window's edges. A window starts with one card and can split into more, side by side
+or stacked (see Cards), and each card keeps the files you open in it as tabs.
 When you've opened a folder, a sidebar on the left lists its files. With one file, the card's
 header shows the file's kind as a small colored icon, its name, a dot when there are unsaved
 changes, its folder, and the line and column of the caret on the right. With more, it shows tabs
@@ -24,7 +25,9 @@ past the top or bottom of the file (or the left edge) and the page stretches wit
 then springs back when you lift your fingers; momentum that hits an end overshoots a little and
 settles. A mouse wheel stops at the ends. Windows in the background don't show a caret, their
 sidebar highlight fades and their header dims. The mouse pointer hides while you type and
-comes back when you move the mouse.
+comes back when you move the mouse. The sidebar's highlight and the picked row in the quick open
+list hop to their new row with a little bounce, the prompt line's words rise in as it opens, and
+the buttons by the traffic lights and the tabs' **+** light up under the mouse.
 
 A thin scroll bar shows on the right edge of the text while the page scrolls, with its knob
 sized and placed by how much of the file is in view, and fades out a second after it stops. A file
@@ -36,9 +39,10 @@ Right-click (or control-click) in the text for **Cut**, **Copy**, **Paste**, **S
 The window has no title bar of its own. The traffic lights sit at the top of the sidebar, in line
 with the header, next to a sidebar button that shows or hides the sidebar and a **+** button
 at the sidebar's right that opens a new tab. With the sidebar hidden, the traffic lights and
-the sidebar button sit on the header. Drag the header or the empty band above the sidebar to
-move the window, and double-click it to zoom (or minimize, or nothing, as Desktop & Dock's
-"Double-click a window's title bar" setting says).
+the sidebar button sit on the header. A folder too long for the header or the sidebar's top line
+loses its start to "…", keeping the folders nearest the file. Drag the header or the empty band
+above the sidebar to move the window, and double-click it to zoom (or minimize, or nothing, as
+Desktop & Dock's "Double-click a window's title bar" setting says).
 
 ## Command palette
 
@@ -61,8 +65,9 @@ points at the matching command in its menu. Press Return to run it.
 - **File > Open Recent** lists the last 15 files you opened or saved. **Clear Menu** empties it.
 - **File > Quick Open…** (⌘P) lists every file in ze's folder (see Sidebar). Type a few letters
   of the name, use ↑ and ↓ to pick, and press Return.
-- Opening a file that's already open in another window brings that window forward. Quick open
-  and the sidebar show the new file in a new tab, right of the one on show (see Tabs).
+- Opening a file that's already open in another window or card brings it forward. Quick open
+  and the sidebar show the new file in a new tab of the focused card, right of the one on show
+  (see Tabs).
 - A file opens where you left it: the caret and the scroll come back to where they were the last
   time you closed it.
 - Files that look binary don't open.
@@ -80,7 +85,8 @@ in beside it with a little bounce, and a **+** shows after the last one.
   after it slide over.
 - **File > New Tab** (⌘T) or the **+** opens an untitled file in a new tab.
 - **File > Close Tab** (⌘W) closes the tab on show, asking first when it has unsaved changes. The
-  tab to its right takes its place. Closing the last tab closes the window.
+  tab to its right takes its place. Closing the last tab folds its card away, or closes the
+  window when it's the only card.
 - **File > Close Window** (⇧⌘W) closes the window and all its tabs.
 - **View > Show Next Tab** (⌃Tab) and **Show Previous Tab** (⌃⇧Tab) step through the tabs and go
   around at the ends.
@@ -88,6 +94,22 @@ in beside it with a little bounce, and a **+** shows after the last one.
 When the tabs don't fit, they all get narrower and their names end in "…". Past that, the row
 scrolls to keep the active tab in view. Drag the header between and around the tabs to move the
 window.
+
+## Cards
+
+A window can hold several cards, each with its own tabs, split side by side or stacked. One card
+has the focus: typing, saving and the File menu act on it, and the window's title follows its
+file. With more than one card, the focused card has a thin ring in the caret's color, and the
+others hide their caret and dim their header.
+
+- **View > Split Right** (⌘D) and **Split Down** (⇧⌘D) split the focused card in two. The new
+  card springs open beside or below it and takes the tab on show. A card with only one tab keeps
+  it, and the new card starts with quick open so you can pick a file for it.
+- Click a card to focus it. **View > Next Card** (⌘]) and **Previous Card** (⌘[) step through
+  them and go around at the ends.
+- Drag the gap between two cards to resize them. Neither gets narrower than 220 points or shorter
+  than 140. ⌘D beeps when the focused card has no room to split.
+- Closing a card's last tab folds the card away, and its neighbor springs over to fill the room.
 
 ## Sidebar
 
@@ -124,7 +146,8 @@ The sidebar reads the disk again when you come back to ze, so new and deleted fi
 
 When you quit ze with files open and later start it without naming a file (from the Dock, say),
 it reopens those files in the same windows, at the same sizes and places, and brings back the
-folder you had open. Each window comes back with the file it was showing, not the others it held.
+folder you had open. Each window comes back with the file its focused card was showing, as one
+card, not the other cards or tabs it held.
 Starting it with a file, like `ze notes.txt`, opens just that file. Close every window before
 quitting and the next start gives you one empty window.
 

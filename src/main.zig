@@ -217,6 +217,11 @@ fn buildMenu(delegate: Id) void {
     _ = item(v, "Show Next Tab", "nextTab:", "\t", ctrl);
     // ⇧Tab arrives as back tab, so that's the key to match.
     _ = item(v, "Show Previous Tab", "previousTab:", "\x19", ctrl | shift);
+    separator(v);
+    _ = item(v, "Split Right", "splitRight:", "d", cmd);
+    _ = item(v, "Split Down", "splitDown:", "d", cmd | shift);
+    _ = item(v, "Next Card", "nextCard:", "]", cmd);
+    _ = item(v, "Previous Card", "previousCard:", "[", cmd);
     const themes = submenu(v, "Theme");
     msg(void, item(themes, "Appearance", "", "", 0), "setEnabled:", .{false});
     for ([_][]const u8{ "Auto", "Light", "Dark" }, 0..) |title, i| {

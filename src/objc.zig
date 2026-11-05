@@ -107,6 +107,8 @@ pub extern fn CGContextClipToRect(ctx: Id, rect: Rect) void;
 pub extern fn CGContextTranslateCTM(ctx: Id, tx: f64, ty: f64) void;
 pub extern fn CGContextRotateCTM(ctx: Id, angle: f64) void;
 pub extern fn CGContextSetAlpha(ctx: Id, alpha: f64) void;
+pub extern fn CGContextBeginTransparencyLayer(ctx: Id, info: ?*anyopaque) void;
+pub extern fn CGContextEndTransparencyLayer(ctx: Id) void;
 pub extern fn CGContextClip(ctx: Id) void;
 extern fn CGContextSetTextMatrix(ctx: Id, t: Transform) void;
 pub extern fn CTFontGetGlyphsForCharacters(font: Id, chars: [*]const u16, glyphs: [*]u16, count: isize) bool;
