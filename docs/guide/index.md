@@ -80,7 +80,8 @@ The folder's parent and name stay pinned at the top while the rows scroll. An op
 files fill the top of the list pins under the name too, up to three levels deep, until the next
 folder's row pushes it away. Click a pinned folder to scroll back to it.
 
-- Click a folder to open or close it.
+- Click a folder to open or close it. Its files fade in or out while the rows below slide to make
+  room, and its arrow turns.
 - Click a file to show it in the same window. The window keeps every file it has shown, with
   its unsaved changes and undo, so switching never asks you to save. A dot next to a file in the
   sidebar means it has unsaved changes.

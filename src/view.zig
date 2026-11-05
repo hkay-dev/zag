@@ -463,7 +463,7 @@ fn blink(caret: Id) void {
 /// list still has frames to draw.
 fn scenery(d: *const Doc, now: f64) bool {
     const stretched = d.relax and (d.ov[0] != 0 or d.ov[1] != 0);
-    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.panel.moving(now) or d.side_t.moving(now) or d.side_a.moving(now) or (d.had_sel and now < d.sel_t0 + fade_time) or now < d.bar_t0 + bar_hold + bar_time;
+    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.panel.moving(now) or d.side_t.moving(now) or d.side_a.moving(now) or fold.t.moving(now) or fold.closing or (d.had_sel and now < d.sel_t0 + fade_time) or now < d.bar_t0 + bar_hold + bar_time;
 }
 
 const spring_k = 380.0;
@@ -1869,8 +1869,59 @@ fn sideRow(d: *const Doc, y: f64) ?usize {
     return @intFromFloat(at);
 }
 
+/// Folders open and close over this long: the rows below slide while the
+/// folder's own rows fade in or out under it, and its chevron turns.
+const fold_time = 0.2;
+
+/// The folder opening or closing in every window's sidebar. An opening
+/// folder's rows are in the tree from the start; a closing one keeps its
+/// rows on show until it's shut.
+const Fold = struct {
+    at: usize = 0,
+    /// The rows it holds.
+    n: usize = 0,
+    /// How far open, 0 to 1.
+    t: Tween = .{ .dur = fold_time },
+    closing: bool = false,
+    rel: [std.fs.max_path_bytes]u8 = undefined,
+    len: usize = 0,
+};
+var fold: Fold = .{};
+
+/// Opens or closes the folder at row `i`, turning back a folder that's
+/// still opening from where it got to.
+fn startFold(i: usize) void {
+    const now = CACurrentMediaTime();
+    const row = tree.rows.items[i];
+    const shut = tree.isOpen(row.rel);
+    const p0 = if (fold.t.moving(now) and fold.at == i) fold.t.at(now) else @as(f64, if (shut) 1 else 0);
+    @memcpy(fold.rel[0..row.rel.len], row.rel);
+    fold.len = row.rel.len;
+    fold.at = i;
+    fold.closing = shut;
+    if (!shut) {
+        tree.toggle(gpa, row.rel);
+        rebuildTree();
+    }
+    fold.t.snap(p0);
+    fold.t.aim(if (shut) 0 else 1, now);
+    const rows = tree.rows.items;
+    var e = i + 1;
+    while (e < rows.len and rows[e].depth > rows[i].depth) e += 1;
+    fold.n = e - i - 1;
+}
+
+/// Shuts the closing folder once its rows have folded away.
+fn finishFold() void {
+    fold.closing = false;
+    tree.toggle(gpa, fold.rel[0..fold.len]);
+    rebuildTree();
+    refreshAll();
+}
+
 /// One row of the tree with its top at `y`: chevron, tile, name and dot.
-fn drawRow(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, i: usize, y: f64, cur: ?[]const u8) void {
+/// `turn` is how far a folding folder's chevron has turned, 0 to 1.
+fn drawRow(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, i: usize, y: f64, cur: ?[]const u8, turn: ?f64) void {
     const row = tree.rows.items[i];
     const s = tileSize();
     const x = 16 + f(row.depth) * 16;
@@ -1880,7 +1931,18 @@ fn drawRow(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, i
         ring(ctx, th.fg, if (key) 0.09 else 0.05, side_inset, y, w, side_h, side_radius);
     }
     const iy = y + (side_h - s) / 2;
-    if (row.dir) drawIcon(icon(if (tree.isOpen(row.rel)) .opened else .closed, dark, th), x - 4, iy + (s - 12) / 2, 12);
+    if (row.dir) {
+        const cx = x - 4;
+        const cy = iy + (s - 12) / 2;
+        if (turn) |t| {
+            objc.CGContextSaveGState(ctx);
+            objc.CGContextTranslateCTM(ctx, cx + 6, cy + 6);
+            objc.CGContextRotateCTM(ctx, t * std.math.pi / 2);
+            objc.CGContextTranslateCTM(ctx, -cx - 6, -cy - 6);
+            drawIcon(icon(.closed, dark, th), cx, cy, 12);
+            objc.CGContextRestoreGState(ctx);
+        } else drawIcon(icon(if (tree.isOpen(row.rel)) .opened else .closed, dark, th), cx, cy, 12);
+    }
     tile(ctx, iconFor(row.rel[row.base..], row.dir), dark, th, x + 10, iy);
     const nx = x + 10 + s + 8;
     const line = &side_lines.items[i];
@@ -1892,7 +1954,8 @@ fn drawRow(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, i
 /// The folder's parent and name pinned at the top, then a row per file and
 /// open folder down to the window's bottom. The open folders holding the
 /// rows at the top pin under the name, and the next folder pushes them up.
-fn drawSide(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, bg: Rgb, now: f64) void {
+/// `fade` is the sidebar's alpha while it slides.
+fn drawSide(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, bg: Rgb, fade: f64, now: f64) void {
     k.flush();
     const rows = tree.rows.items;
     const lt = listTop();
@@ -1922,9 +1985,30 @@ fn drawSide(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
     _ = drawLine(ctx, side_head, th.fg, 16, top_h + label_h + side_base);
 
     objc.CGContextClipToRect(ctx, .{ .y = lt, .w = side_w - 2, .h = view_h });
+    // A folding folder's own rows stay put and show only as far as it's
+    // open, fading in or out, and the rows after them slide to match.
+    const folding = fold.t.moving(now) and fold.at < rows.len and std.mem.eql(u8, rows[fold.at].rel, fold.rel[0..fold.len]);
+    const p = if (folding) std.math.clamp(fold.t.at(now), 0, 1) else 1;
+    const off = if (folding) (1 - p) * f(fold.n) * side_h else 0;
+    const split = if (folding) fold.at + fold.n + 1 else rows.len;
     const from: usize = @intFromFloat(@max(@floor(sy / side_h), 0));
-    const to: usize = @min(rows.len, @as(usize, @intFromFloat(@max(@ceil((sy + view_h) / side_h), 0))));
-    for (@min(from, to)..to) |i| drawRow(d, ctx, th, k, dark, key, i, lt + f(i) * side_h - sy, cur);
+    const to: usize = @min(split, @as(usize, @intFromFloat(@max(@ceil((sy + view_h) / side_h), 0))));
+    for (@min(from, to)..to) |i| {
+        const y = lt + f(i) * side_h - sy;
+        if (!folding or i <= fold.at) {
+            drawRow(d, ctx, th, k, dark, key, i, y, cur, if (folding and i == fold.at) p else null);
+            continue;
+        }
+        objc.CGContextSaveGState(ctx);
+        objc.CGContextClipToRect(ctx, .{ .y = lt + f(fold.at + 1) * side_h - sy, .w = side_w, .h = f(fold.n) * side_h - off });
+        objc.CGContextSetAlpha(ctx, fade * p);
+        drawRow(d, ctx, th, k, dark, key, i, y, cur, null);
+        k.flush();
+        objc.CGContextRestoreGState(ctx);
+    }
+    const from2 = @max(split, @as(usize, @intFromFloat(@max(@floor((sy + off) / side_h), 0))));
+    const to2: usize = @min(rows.len, @as(usize, @intFromFloat(@max(@ceil((sy + off + view_h) / side_h), 0))));
+    for (@min(from2, to2)..to2) |i| drawRow(d, ctx, th, k, dark, key, i, lt + f(i) * side_h - sy - off, cur, null);
 
     // Pinned folders, each held up by the end of its rows, the outer ones
     // drawn last so they stay on top.
@@ -1939,7 +2023,7 @@ fn drawSide(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
         const y = @min(lt + f(j) * side_h, lt + f(e) * side_h - sy - side_h);
         d.stuck_y[j] = y;
         fill(ctx, bg, 0, y, side_w, side_h);
-        drawRow(d, ctx, th, k, dark, key, a, y, cur);
+        drawRow(d, ctx, th, k, dark, key, a, y, cur, null);
         low = @max(low, y + side_h);
     }
     k.flush();
@@ -2009,6 +2093,7 @@ fn drawLine(ctx: Id, line: Id, c: Rgb, x: f64, y: f64) f64 {
 
 /// A folder opens or closes; a file shows here, or with ⌘ in a new window.
 fn sideClick(d: *Doc, p: Point, flags: usize) void {
+    if (fold.closing) finishFold();
     const i = sideRow(d, p.y) orelse return;
     // A pinned folder scrolls back to where its rows start.
     if (std.mem.indexOfScalar(usize, d.stuck[0..d.nstuck], i) != null and p.y < listTop() + f(d.nstuck) * side_h) {
@@ -2019,8 +2104,7 @@ fn sideClick(d: *Doc, p: Point, flags: usize) void {
     }
     const row = tree.rows.items[i];
     if (row.dir) {
-        tree.toggle(gpa, row.rel);
-        rebuildTree();
+        startFold(i);
         return refreshAll();
     }
     var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -2047,6 +2131,8 @@ fn draw(d: *Doc, ctx: Id) void {
     const r = bounds(d);
     placeLights(d);
     const b = &d.ed.buf;
+    // A closing folder shuts once its rows have folded away.
+    if (fold.closing and !fold.t.moving(now)) finishFold();
     // The sidebar slides in and out, on the first draw it's just there.
     const want: f64 = if (sideShown(d)) 1 else 0;
     if (d.side_seen) d.side_a.aim(want, now) else d.side_a.snap(want);
@@ -2324,7 +2410,7 @@ fn draw(d: *Doc, ctx: Id) void {
         objc.CGContextClipToRect(ctx, .{ .w = side_w * slid, .h = r.h });
         objc.CGContextTranslateCTM(ctx, side_w * (slid - 1), 0);
         if (slid < 1) objc.CGContextSetAlpha(ctx, slid * slid);
-        drawSide(d, ctx, th, &k, dark, key, chrome(th, dark), now);
+        drawSide(d, ctx, th, &k, dark, key, chrome(th, dark), if (slid < 1) slid * slid else 1, now);
         drawIcon(icon(.plus, dark, th), side_w - gap - 30, hy - 10, 20);
         objc.CGContextRestoreGState(ctx);
     }
