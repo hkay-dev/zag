@@ -393,6 +393,8 @@ const scroll_time = 0.16;
 const caret_time = 0.09;
 const fade_time = 0.12;
 const panel_time = 0.14;
+/// The sidebar slides in and out, and the card's left edge rides with it.
+const slide_time = 0.24;
 /// The scroll bar stays a second after the page stops, then fades.
 const bar_hold = 1.0;
 const bar_time = 0.25;
@@ -434,7 +436,7 @@ fn moveCaret(d: *Doc, now: f64) void {
         x -= d.vx;
         y -= d.vy;
     }
-    const visible = d.shown and (!d.c_text or (x >= left(d) + pad_x - 2 and x < rightEdge(d) and y >= top_h - 2 and y + lh - 4 <= bottom(d)));
+    const visible = d.shown and (!d.c_text or (x >= d.lx + pad_x - 2 and x < rightEdge(d) and y >= top_h - 2 and y + lh - 4 <= bottom(d)));
     const t = objc.class("CATransaction");
     msg(void, t, "begin", .{});
     msg(void, t, "setDisableActions:", .{true});
@@ -461,7 +463,7 @@ fn blink(caret: Id) void {
 /// list still has frames to draw.
 fn scenery(d: *const Doc, now: f64) bool {
     const stretched = d.relax and (d.ov[0] != 0 or d.ov[1] != 0);
-    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.panel.moving(now) or d.side_t.moving(now) or (d.had_sel and now < d.sel_t0 + fade_time) or now < d.bar_t0 + bar_hold + bar_time;
+    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.panel.moving(now) or d.side_t.moving(now) or d.side_a.moving(now) or (d.had_sel and now < d.sel_t0 + fade_time) or now < d.bar_t0 + bar_hold + bar_time;
 }
 
 const spring_k = 380.0;
@@ -640,6 +642,11 @@ const Doc = struct {
     nstuck: usize = 0,
     /// A sidebar scroll that glides, like a click on a pinned folder.
     side_t: Tween = .{ .dur = scroll_time },
+    /// How far the sidebar has slid in, 0 to 1, and the card's left edge
+    /// that rides with it. Layout and wrapping use where it ends up.
+    side_a: Tween = .{ .dur = slide_time },
+    lx: f64 = gap,
+    side_seen: bool = false,
     /// The header's file name and folder as CoreText lines, made on first draw.
     head: [2]Id = .{ null, null },
 
@@ -2040,6 +2047,12 @@ fn draw(d: *Doc, ctx: Id) void {
     const r = bounds(d);
     placeLights(d);
     const b = &d.ed.buf;
+    // The sidebar slides in and out, on the first draw it's just there.
+    const want: f64 = if (sideShown(d)) 1 else 0;
+    if (d.side_seen) d.side_a.aim(want, now) else d.side_a.snap(want);
+    d.side_seen = true;
+    const slid = std.math.clamp(d.side_a.at(now), 0, 1);
+    d.lx = @max(gap, side_w * slid);
     layout(d);
     clampScroll(d);
     // Jumps glide the scroll. Stepping past the edge a few rows at a time and
@@ -2066,7 +2079,7 @@ fn draw(d: *Doc, ctx: Id) void {
     d.vx = d.xs.at(now) + d.ov[0];
     // The window's chrome, then the card that holds the text, header and
     // prompt line, which draw inside its rounded corners.
-    const lx = left(d);
+    const lx = d.lx;
     const card: Rect = .{ .x = lx, .y = gap, .w = rightEdge(d) - lx, .h = r.h - 2 * gap };
     fill(ctx, chrome(th, dark), 0, 0, r.w, r.h);
     pill(ctx, th.bg, 1, card.x, card.y, card.w, card.h, card_radius);
@@ -2285,7 +2298,7 @@ fn draw(d: *Doc, ctx: Id) void {
     _ = k.text(spot, null, th, th.muted, spot_x, mono_y, 0, 32);
     k.flush();
     objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = @max(spot_x - 16 - card.x, 0), .h = head_h });
-    var hx: f64 = if (sideShown(d)) card.x + 14 else if (root != null) toggle_x + 22 else lights_x + 76;
+    var hx: f64 = @max(card.x + 14, if (root != null) @as(f64, toggle_x + 22) else lights_x + 76);
     const ts = tileSize();
     tile(ctx, iconFor(d.name(), false), dark, th, hx, @round(hy - ts / 2));
     hx += ts + 8;
@@ -2306,9 +2319,14 @@ fn draw(d: *Doc, ctx: Id) void {
     // Outside the card: its outline, the sidebar, and the buttons by the
     // traffic lights.
     ring(ctx, th.fg, if (dark) 0.1 else 0.08, card.x, card.y, card.w, card.h, card_radius);
-    if (sideShown(d)) {
+    if (slid > 0.002 and root != null) {
+        objc.CGContextSaveGState(ctx);
+        objc.CGContextClipToRect(ctx, .{ .w = side_w * slid, .h = r.h });
+        objc.CGContextTranslateCTM(ctx, side_w * (slid - 1), 0);
+        if (slid < 1) objc.CGContextSetAlpha(ctx, slid * slid);
         drawSide(d, ctx, th, &k, dark, key, chrome(th, dark), now);
         drawIcon(icon(.plus, dark, th), side_w - gap - 30, hy - 10, 20);
+        objc.CGContextRestoreGState(ctx);
     }
     if (root != null) drawIcon(icon(.sidebar, dark, th), toggle_x - 10, hy - 10, 20);
 
@@ -2478,7 +2496,7 @@ fn posAt(d: *Doc, p: Point) usize {
     const i = lineOfRow(d, row);
     const l = b.line(i);
     const s = segN(d, l, row - rowOfLine(d, i));
-    const x = @max((p.x - left(d) - pad_x + d.vx) / cw, 0);
+    const x = @max((p.x - d.lx - pad_x + d.vx) / cw, 0);
     return b.lineStart(i) + std.math.clamp(editor.byteAtCol(l, f(s.col) + x), s.start, caretEnd(l, s));
 }
 

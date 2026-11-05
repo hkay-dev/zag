@@ -88,8 +88,9 @@ folder's row pushes it away. Click a pinned folder to scroll back to it.
 - Right-click (or control-click) a file for **Open in New Window**, **Reveal in Finder** and
   **Copy Path**. A folder has the last two.
 - **View > Previous File** (⌃Tab) goes back to the file the window showed before.
-- **View > Sidebar** (⌘\) shows or hides the sidebar in every window. It also hides when a window
-  is too narrow to fit it beside the text.
+- **View > Sidebar** (⌘\) or the sidebar button by the traffic lights shows or hides the sidebar
+  in every window. It slides in and out, and the text's card follows its edge. It also hides when
+  a window is too narrow to fit it beside the text.
 - Drag the sidebar's right edge to make it wider or narrower, from 150 to 500 points. Every
   window follows, and new windows and the next start use the width you left it at.
 
