@@ -3490,7 +3490,7 @@ pub const ax = struct {
         @memcpy(buf[0..rel.len], rel);
         const want = buf[0..rel.len];
         // Shutting a folder rebuilds the rows, so look the row up after.
-        if (fold.closing) finishFold();
+        for (&folds) |*o| if (o.closing) finishFold(o);
         const i = for (tree.rows.items, 0..) |row, k| {
             if (std.mem.eql(u8, row.rel, want)) break k;
         } else return false;
