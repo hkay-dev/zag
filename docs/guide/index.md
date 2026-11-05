@@ -44,6 +44,9 @@ menu's first, each with its shortcut and a checkmark when it's on. Type a few le
 under a heading carry its name, like "Appearance: Dark" or "Dark Mode: Ayu Dark", so typing
 `dark` finds them all.
 
+The Mac's own menu search works too: press ⇧⌘/ (or open the **Help** menu) and type, and macOS
+points at the matching command in its menu. Press Return to run it.
+
 ## Open files
 
 - From a terminal, `ze notes.txt` opens a file, and `ze .` opens a folder. A file that doesn't
