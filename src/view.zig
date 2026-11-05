@@ -9,6 +9,7 @@ const syntax = @import("syntax.zig");
 const finder = @import("finder.zig");
 const files = @import("files.zig");
 const settings = @import("settings.zig");
+const tree_mod = @import("tree.zig");
 const Editor = editor.Editor;
 const Id = objc.Id;
 const Sel = objc.Sel;
@@ -17,8 +18,39 @@ const Point = objc.Point;
 const msg = objc.msg;
 
 pub const gpa = std.heap.c_allocator;
-/// The folder quick open lists. Owned by gpa.
+/// The folder quick open lists and the sidebar shows. Owned by gpa.
 pub var root: ?[]const u8 = null;
+/// The sidebar's rows, shared by every window.
+var tree: tree_mod.Tree = .init(gpa);
+
+/// Makes `dir` (owned by gpa) the folder, and shows it in the sidebar.
+pub fn setRoot(dir: []const u8) void {
+    if (root) |r| gpa.free(r);
+    root = dir;
+    for (tree.open.items) |o| gpa.free(o);
+    tree.open.clearRetainingCapacity();
+    for (docs.items) |d| d.side_y = 0;
+    rebuildTree();
+    for (docs.items) |d| {
+        msg(void, d.window, "invalidateCursorRectsForView:", .{d.view});
+        refresh(d);
+    }
+}
+
+fn rebuildTree() void {
+    if (root) |r| tree.rebuild(gpa, r);
+}
+
+/// `p` relative to the folder, when it's inside it.
+fn relOf(p: []const u8) ?[]const u8 {
+    const r = root orelse return null;
+    if (p.len <= r.len + 1 or !std.mem.startsWith(u8, p, r) or p[r.len] != '/') return null;
+    return p[r.len + 1 ..];
+}
+
+fn refreshAll() void {
+    for (docs.items) |d| refresh(d);
+}
 
 const shift_key: usize = 1 << 17;
 const cmd_key: usize = 1 << 20;
@@ -32,6 +64,18 @@ const Theme = settings.Theme;
 
 const pad_x = 28.0;
 const top_h = 40.0;
+const side_w = 250.0;
+
+/// The sidebar shows when there's a folder, it's turned on, and the window
+/// is wide enough to keep room for the text.
+fn sideShown(d: *const Doc) bool {
+    return conf.sidebar and root != null and bounds(d).w >= side_w + 360;
+}
+
+/// Where the text area starts: right of the sidebar when it shows.
+fn left(d: *const Doc) f64 {
+    return if (sideShown(d)) side_w else 0;
+}
 
 /// Font, size, colors and toggles, from the settings file.
 var conf: settings.Settings = .{};
@@ -40,6 +84,7 @@ var conf_stamp: ?files.Stamp = null;
 /// View menu items that show a checkmark, set by the menu builder.
 pub var wrap_item: Id = null;
 pub var pairs_item: Id = null;
+pub var sidebar_item: Id = null;
 /// View > Theme items, in `settings.schemes` order.
 pub var scheme_items: [settings.schemes.len]Id = @splat(null);
 
@@ -299,7 +344,7 @@ fn moveCaret(d: *Doc, now: f64) void {
         y -= d.vy;
     }
     const by = bounds(d).h - barH();
-    const visible = d.shown and (!d.c_text or (x >= pad_x - 2 and y >= top_h - 8 and y + lh - 4 <= by));
+    const visible = d.shown and (!d.c_text or (x >= left(d) + pad_x - 2 and y >= top_h - 8 and y + lh - 4 <= by));
     const t = objc.class("CATransaction");
     msg(void, t, "begin", .{});
     msg(void, t, "setDisableActions:", .{true});
@@ -342,6 +387,22 @@ fn tick(self: Id, _: Sel, _: Id) callconv(.c) void {
 
 const Mode = enum { edit, find, line, open, replace };
 const Drag = enum { char, word, line };
+
+/// A file a window holds but isn't showing: the sidebar and quick open
+/// switch files inside a window and keep the others, edits and all.
+const Page = struct {
+    ed: Editor,
+    path: ?[:0]u8,
+    lang: *const syntax.Lang,
+    stamp: ?files.Stamp,
+    sx: f64,
+    sy: f64,
+
+    fn deinit(p: *Page) void {
+        p.ed.deinit(gpa);
+        if (p.path) |s| gpa.free(s);
+    }
+};
 
 const Doc = struct {
     ed: Editor,
@@ -409,9 +470,24 @@ const Doc = struct {
     shown: bool = false,
     /// Place the caret without gliding (mouse drags).
     snap: bool = false,
+    /// Other files this window holds, the last shown at the end.
+    pages: std.ArrayList(Page) = .empty,
+    /// How far the sidebar is scrolled.
+    side_y: f64 = 0,
+    /// The mouse went down in the sidebar, so drags don't select text.
+    side_down: bool = false,
+    /// Scroll the sidebar to the window's file on the next draw.
+    side_find: bool = false,
 
     fn name(d: *const Doc) []const u8 {
         return if (d.path) |p| std.fs.path.basename(p) else "untitled";
+    }
+
+    /// Unsaved changes in the file on show or any page.
+    fn dirty(d: *const Doc) bool {
+        if (d.ed.buf.dirty()) return true;
+        for (d.pages.items) |p| if (p.ed.buf.dirty()) return true;
+        return false;
     }
 
     fn deinit(d: *Doc) void {
@@ -424,6 +500,8 @@ const Doc = struct {
         d.states.deinit(gpa);
         d.kinds.deinit(gpa);
         d.vfirst.deinit(gpa);
+        for (d.pages.items) |*p| p.deinit();
+        d.pages.deinit(gpa);
     }
 };
 
@@ -453,54 +531,125 @@ fn pageLines(d: *const Doc) usize {
     return @max(@as(usize, @intFromFloat(textH(d) / lh)), 2) - 1;
 }
 
-/// Opens `path` (a file or a folder). Reuses `into` when it has no unsaved
-/// changes, and brings a window forward when it already shows the file.
+/// Opens `path` (a file or a folder). A file shows in `into`, which keeps
+/// the file it had as a page, or else in a new window. A file that a window
+/// already holds comes forward there.
 pub fn open(path: []const u8, into: ?*Doc) void {
     const abs = files.absolute(gpa, path) catch return;
     if (files.isDir(abs)) {
-        if (root) |r| gpa.free(r);
-        root = abs;
+        setRoot(abs);
         const d = into orelse keyDoc() orelse newDoc() orelse return;
-        startPrompt(d, .open);
+        if (sideShown(d)) refreshAll() else startPrompt(d, .open);
         return;
     }
     defer gpa.free(abs);
-    for (docs.items) |d| if (d.path != null and std.mem.eql(u8, d.path.?, abs)) {
-        msg(void, d.window, "makeKeyAndOrderFront:", .{@as(Id, null)});
-        return;
-    };
+    for (docs.items) |o| {
+        if (o.path != null and std.mem.eql(u8, o.path.?, abs)) return front(o);
+        if (pageIndex(o, abs)) |i| {
+            showPage(o, i);
+            return front(o);
+        }
+    }
+    var pg = loadPage(abs) orelse return;
+    const d = into orelse newDoc() orelse return pg.deinit();
+    if (!park(d)) return pg.deinit();
+    install(d, pg);
+    noteRecent(abs);
+    front(d);
+}
+
+fn front(d: *Doc) void {
+    msg(void, d.window, "makeKeyAndOrderFront:", .{@as(Id, null)});
+}
+
+/// Reads a file into a page, at the caret and scroll it had last time.
+fn loadPage(abs: [:0]const u8) ?Page {
     const bytes = files.read(gpa, abs) catch |err| switch (err) {
-        error.FileNotFound => gpa.alloc(u8, 0) catch return,
-        else => return alert("Couldn't open this file.", abs),
+        error.FileNotFound => gpa.alloc(u8, 0) catch return null,
+        else => {
+            alert("Couldn't open this file.", abs);
+            return null;
+        },
     };
     defer gpa.free(bytes);
-    if (std.mem.indexOfScalar(u8, bytes[0..@min(bytes.len, 8000)], 0) != null) return alert("This looks like a binary file.", abs);
-    const d = if (into) |t| (if (t.ed.buf.dirty()) newDoc() else t) else newDoc();
-    const doc = d orelse return;
-    const ed = Editor.init(gpa, bytes) catch return;
-    rememberPlace(doc);
-    doc.ed.deinit(gpa);
-    doc.ed = ed;
-    if (doc.path) |p| gpa.free(p);
-    doc.path = gpa.dupeSentinel(u8, abs, 0) catch null;
-    doc.lang = syntax.forPath(abs);
-    doc.states.clearRetainingCapacity();
-    doc.stamp = files.stamp(abs);
-    doc.sx = 0;
-    doc.sy = 0;
-    doc.mode = .edit;
+    if (std.mem.indexOfScalar(u8, bytes[0..@min(bytes.len, 8000)], 0) != null) {
+        alert("This looks like a binary file.", abs);
+        return null;
+    }
+    var ed = Editor.init(gpa, bytes) catch return null;
+    const z = gpa.dupeSentinel(u8, abs, 0) catch {
+        ed.deinit(gpa);
+        return null;
+    };
+    var sy: f64 = 0;
     if (placeOf(abs)) |pl| {
         var c = @min(pl.cur, bytes.len);
         while (c > 0 and c < bytes.len and bytes[c] & 0xC0 == 0x80) c -= 1;
-        doc.ed.select(c, c);
-        doc.sy = pl.sy;
+        ed.select(c, c);
+        sy = pl.sy;
     }
-    doc.ys.snap(doc.sy);
-    doc.xs.snap(0);
-    doc.snap = true;
-    noteRecent(abs);
-    named(doc);
-    msg(void, doc.window, "makeKeyAndOrderFront:", .{@as(Id, null)});
+    return .{ .ed = ed, .path = z, .lang = syntax.forPath(abs), .stamp = files.stamp(abs), .sx = 0, .sy = sy };
+}
+
+fn pageIndex(d: *const Doc, abs: []const u8) ?usize {
+    for (d.pages.items, 0..) |p, i| if (p.path != null and std.mem.eql(u8, p.path.?, abs)) return i;
+    return null;
+}
+
+/// Sets the window's file aside as a page, for `install` to replace right
+/// after. An empty untitled file is dropped instead. False when it can't.
+fn park(d: *Doc) bool {
+    if (d.path == null and d.ed.text().len == 0) {
+        d.ed.deinit(gpa);
+        return true;
+    }
+    d.pages.append(gpa, .{ .ed = d.ed, .path = d.path, .lang = d.lang, .stamp = d.stamp, .sx = d.sx, .sy = d.sy }) catch return false;
+    rememberPlace(d);
+    return true;
+}
+
+/// Shows `pg` in the window, which must have just been parked.
+fn install(d: *Doc, pg: Page) void {
+    d.ed = pg.ed;
+    d.path = pg.path;
+    d.lang = pg.lang;
+    d.stamp = pg.stamp;
+    d.sx = pg.sx;
+    d.sy = pg.sy;
+    d.states.clearRetainingCapacity();
+    d.vfirst.clearRetainingCapacity();
+    d.cols = 0;
+    d.mode = .edit;
+    d.note = "";
+    d.ys.snap(d.sy);
+    d.xs.snap(d.sx);
+    d.band_on = false;
+    d.had_sel = false;
+    d.snap = true;
+    if (d.path) |p| if (relOf(p)) |rel| {
+        tree.reveal(gpa, rel);
+        rebuildTree();
+        d.side_find = true;
+    };
+    named(d);
+    refreshAll();
+}
+
+/// Shows page `i` of the window and keeps the file it had as a page.
+fn showPage(d: *Doc, i: usize) void {
+    const pg = d.pages.orderedRemove(i);
+    if (!park(d)) {
+        d.pages.insert(gpa, i, pg) catch {};
+        return;
+    }
+    install(d, pg);
+    checkOutside(d);
+}
+
+/// ⌃Tab: back to the file the front window showed before.
+pub fn previousFile() void {
+    const d = keyDoc() orelse return;
+    if (d.pages.items.len > 0) showPage(d, d.pages.items.len - 1);
 }
 
 fn named(d: *Doc) void {
@@ -573,25 +722,48 @@ fn alert(text: []const u8, detail: []const u8) void {
     msg(void, a, "release", .{});
 }
 
-/// Asks to save unsaved changes. False when the user cancels.
+/// Asks to save the window's unsaved files: the one on show and its pages.
+/// False when the user cancels.
 fn settle(d: *Doc) bool {
-    if (!d.ed.buf.dirty()) return true;
-    msg(void, d.window, "makeKeyAndOrderFront:", .{@as(Id, null)});
+    var n: usize = @intFromBool(d.ed.buf.dirty());
+    var page: usize = 0;
+    for (d.pages.items, 0..) |p, i| if (p.ed.buf.dirty()) {
+        n += 1;
+        page = i;
+    };
+    if (n == 0) return true;
+    if (n == 1 and !d.ed.buf.dirty()) showPage(d, page);
+    front(d);
     const a = objc.new("NSAlert");
     var buf: [300]u8 = undefined;
-    const title = std.fmt.bufPrint(&buf, "Save changes to {s}?", .{d.name()}) catch "Save changes?";
+    const title = if (n == 1)
+        std.fmt.bufPrint(&buf, "Save changes to {s}?", .{d.name()}) catch "Save changes?"
+    else
+        std.fmt.bufPrint(&buf, "Save changes to {d} files?", .{n}) catch "Save changes?";
     msg(void, a, "setMessageText:", .{objc.str(title)});
     msg(void, a, "setInformativeText:", .{objc.str("Your changes are lost if you don't save them.")});
-    _ = msg(Id, a, "addButtonWithTitle:", .{objc.str("Save")});
+    _ = msg(Id, a, "addButtonWithTitle:", .{objc.str(if (n == 1) "Save" else "Save All")});
     _ = msg(Id, a, "addButtonWithTitle:", .{objc.str("Don't Save")});
     _ = msg(Id, a, "addButtonWithTitle:", .{objc.str("Cancel")});
     const r = msg(isize, a, "runModal", .{});
     msg(void, a, "release", .{});
     return switch (r) {
-        1000 => save(d, false),
+        1000 => saveAll(d),
         1001 => true,
         else => false,
     };
+}
+
+/// Saves the file on show, then each unsaved page in turn.
+fn saveAll(d: *Doc) bool {
+    if (d.ed.buf.dirty() and !save(d, false)) return false;
+    while (true) {
+        const i = for (d.pages.items, 0..) |p, j| {
+            if (p.ed.buf.dirty()) break j;
+        } else return true;
+        showPage(d, i);
+        if (!save(d, false)) return false;
+    }
 }
 
 /// For quitting: every window with unsaved changes asks first.
@@ -623,7 +795,9 @@ fn save(d: *Doc, as: bool) bool {
     d.note = "saved";
     noteRecent(d.path.?);
     if (conf_path != null and std.mem.eql(u8, d.path.?, conf_path.?)) loadSettings();
-    refresh(d);
+    // A new file shows in the tree, and its dot goes away.
+    rebuildTree();
+    refreshAll();
     return true;
 }
 
@@ -736,10 +910,21 @@ pub fn saveSession() void {
         };
     }
     msg(void, defaults(), "setObject:forKey:", .{ out, objc.str("session") });
+    if (root) |r| {
+        msg(void, defaults(), "setObject:forKey:", .{ objc.str(r), objc.str("root") });
+    } else msg(void, defaults(), "removeObjectForKey:", .{objc.str("root")});
 }
 
-/// Reopens last session's windows where they were. False when none opened.
+/// Reopens last session's windows where they were, and its folder when ze
+/// started without one. False when no window opened.
 pub fn restoreSession() bool {
+    if (root == null) {
+        const saved = msg(Id, defaults(), "stringForKey:", .{objc.str("root")});
+        if (saved != null) {
+            const z = gpa.dupeSentinel(u8, objc.utf8(saved), 0) catch return false;
+            if (files.isDir(z)) setRoot(z) else gpa.free(z);
+        }
+    }
     const list = msg(Id, defaults(), "stringArrayForKey:", .{objc.str("session")});
     if (list == null) return false;
     for (0..msg(usize, list, "count", .{})) |i| {
@@ -766,6 +951,8 @@ fn sameStamp(a: ?files.Stamp, b: ?files.Stamp) bool {
 pub fn recheckAll() void {
     if (conf_path) |p| if (!sameStamp(files.stamp(p), conf_stamp)) loadSettings();
     for (docs.items) |d| checkOutside(d);
+    rebuildTree();
+    refreshAll();
 }
 
 /// A clean doc reloads from disk; one with unsaved changes asks first. A
@@ -821,6 +1008,8 @@ pub fn loadSettings() void {
     setFont();
     if (wrap_item != null) msg(void, wrap_item, "setState:", .{@as(isize, @intFromBool(conf.wrap))});
     if (pairs_item != null) msg(void, pairs_item, "setState:", .{@as(isize, @intFromBool(conf.pairs))});
+    if (sidebar_item != null) msg(void, sidebar_item, "setState:", .{@as(isize, @intFromBool(conf.sidebar))});
+    dropIcons();
     for (scheme_items, 0..) |it, i| {
         if (it != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(i == conf.light_scheme or i == conf.dark_scheme))});
     }
@@ -831,6 +1020,8 @@ pub fn loadSettings() void {
         d.band_on = false;
         d.snap = true;
         reveal(d);
+        d.side_find = true;
+        msg(void, d.window, "invalidateCursorRectsForView:", .{d.view});
         refresh(d);
     }
 }
@@ -856,6 +1047,10 @@ pub fn toggleWrap() void {
 
 pub fn togglePairs() void {
     store("pairs", if (conf.pairs) "off" else "on");
+}
+
+pub fn toggleSidebar() void {
+    store("sidebar", if (conf.sidebar) "off" else "on");
 }
 
 /// Makes built-in theme `i` the one for its own mode, light or dark.
@@ -893,7 +1088,7 @@ fn startPrompt(d: *Doc, m: Mode) void {
                     d.note = "open a folder first (⌘O)";
                     return refresh(d);
                 };
-                root = gpa.dupe(u8, std.fs.path.dirname(p) orelse "/") catch return;
+                setRoot(gpa.dupe(u8, std.fs.path.dirname(p) orelse "/") catch return);
                 break :blk root.?;
             };
             d.list = finder.scan(gpa, r) catch null;
@@ -1050,7 +1245,7 @@ fn is(name: []const u8, comptime want: []const u8) bool {
 const Seg = struct { k: usize = 0, start: usize = 0, col: usize = 0, end: usize = 0, ecol: usize = 0 };
 
 fn wrapCols(d: *const Doc) usize {
-    return @max(@as(usize, @intFromFloat((bounds(d).w - 2 * pad_x) / cw)), 8);
+    return @max(@as(usize, @intFromFloat((bounds(d).w - left(d) - 2 * pad_x) / cw)), 8);
 }
 
 /// Brings the row counts up to date after edits, a resize or a font change.
@@ -1204,7 +1399,7 @@ fn reveal(d: *Doc) void {
     if (y + lh > d.sy + th) d.sy = y + lh - th;
     if (!conf.wrap) {
         const x = f(c.col) * cw;
-        const tw = bounds(d).w - 2 * pad_x;
+        const tw = bounds(d).w - left(d) - 2 * pad_x;
         if (x < d.sx) d.sx = @max(0, x - 8 * cw);
         if (x > d.sx + tw - cw) d.sx = x - tw + 8 * cw;
     }
@@ -1220,7 +1415,7 @@ fn center(d: *Doc) void {
 
 fn refresh(d: *Doc) void {
     msg(void, d.view, "setNeedsDisplay:", .{true});
-    msg(void, d.window, "setDocumentEdited:", .{d.ed.buf.dirty()});
+    msg(void, d.window, "setDocumentEdited:", .{d.dirty()});
 }
 
 // ---- drawing ----
@@ -1235,6 +1430,123 @@ fn syncStates(d: *Doc, upto: usize) void {
         const i = d.states.items.len - 1;
         d.states.append(gpa, syntax.lexLine(d.lang, b.line(i), d.states.items[i], null)) catch return;
     }
+}
+
+// ---- sidebar ----
+
+const Icon = enum { closed, opened, folder, code, text, data, image, notes };
+/// SF Symbols, which come with macOS, so they cost ze no size.
+const icon_names = [_][:0]const u8{ "chevron.right", "chevron.down", "folder.fill", "chevron.left.forwardslash.chevron.right", "doc.text", "curlybraces", "photo", "text.alignleft" };
+/// Symbol images for the light and dark themes, tinted and made on first use.
+var icons: [2][icon_names.len]Id = @splat(@splat(null));
+
+/// After the colors or the font size change.
+fn dropIcons() void {
+    for (&icons) |*set| for (set) |*i| if (i.* != null) {
+        msg(void, i.*, "release", .{});
+        i.* = null;
+    };
+}
+
+fn iconFor(row: tree_mod.Row) Icon {
+    if (row.dir) return .folder;
+    const name = row.rel[row.base..];
+    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return .text;
+    for ([_][]const u8{ ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".icns", ".heic" }) |e| {
+        if (std.ascii.eqlIgnoreCase(name[dot..], e)) return .image;
+    }
+    const lang = syntax.forPath(name);
+    if (lang.markdown) return .notes;
+    if (lang.keys) return .data;
+    return if (lang == &syntax.plain) .text else .code;
+}
+
+fn icon(which: Icon, dark: bool, th: *const Theme) Id {
+    const slot = &icons[@intFromBool(dark)][@intFromEnum(which)];
+    if (slot.* != null) return slot.*;
+    const small = which == .closed or which == .opened;
+    const color = if (which == .folder) th.kinds[@intFromEnum(syntax.Kind.function)] else th.muted;
+    const cfg = objc.class("NSImageSymbolConfiguration");
+    const sized = msg(Id, cfg, "configurationWithPointSize:weight:", .{ conf.size * @as(f64, if (small) 0.65 else 0.85), @as(f64, if (small) 0.3 else 0) });
+    const tint = msg(Id, cfg, "configurationWithPaletteColors:", .{msg(Id, objc.class("NSArray"), "arrayWithObject:", .{nscolor(color)})});
+    const img = msg(Id, objc.class("NSImage"), "imageWithSystemSymbolName:accessibilityDescription:", .{ objc.str(icon_names[@intFromEnum(which)]), @as(Id, null) });
+    if (img == null) return null;
+    const made = msg(Id, img, "imageWithSymbolConfiguration:", .{msg(Id, sized, "configurationByApplyingConfiguration:", .{tint})});
+    slot.* = msg(Id, made, "retain", .{});
+    return slot.*;
+}
+
+/// Draws `img` centered in the square at `x`, `y` with side `s`.
+fn drawIcon(img: Id, x: f64, y: f64, s: f64) void {
+    if (img == null) return;
+    const size = msg(Point, img, "size", .{});
+    const r: Rect = .{ .x = @round(x + (s - size.x) / 2), .y = @round(y + (s - size.y) / 2), .w = size.x, .h = size.y };
+    msg(void, img, "drawInRect:fromRect:operation:fraction:respectFlipped:hints:", .{ r, Rect{}, @as(usize, 2), @as(f64, 1), true, @as(Id, null) });
+}
+
+/// Whether this window holds `rel` with unsaved changes.
+fn rowDirty(d: *const Doc, rel: []const u8) bool {
+    if (d.path) |p| if (relOf(p)) |r| if (std.mem.eql(u8, r, rel)) return d.ed.buf.dirty();
+    for (d.pages.items) |pg| if (pg.path) |p| if (relOf(p)) |r| if (std.mem.eql(u8, r, rel)) return pg.ed.buf.dirty();
+    return false;
+}
+
+/// The folder's name, then a row per file and open folder, under the
+/// title bar and above the status bar.
+fn drawSide(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, by: f64, dark: bool) void {
+    k.flush();
+    fill(ctx, th.panel, 0, 0, side_w, by);
+    fill(ctx, th.rule, side_w - 1, 0, 1, by);
+    const rows = tree.rows.items;
+    const view_h = by - top_h;
+    const cur = if (d.path) |p| relOf(p) else null;
+    if (d.side_find) {
+        d.side_find = false;
+        if (cur) |c| for (rows, 1..) |row, i| if (std.mem.eql(u8, row.rel, c)) {
+            const y = f(i) * lh;
+            if (y < d.side_y or y + lh > d.side_y + view_h) d.side_y = y - view_h / 3;
+            break;
+        };
+    }
+    d.side_y = std.math.clamp(d.side_y, 0, @max(0, f(rows.len + 2) * lh - view_h));
+
+    objc.CGContextSaveGState(ctx);
+    objc.CGContextClipToRect(ctx, .{ .y = top_h - 8, .w = side_w - 1, .h = by - top_h + 8 });
+    const y0 = top_h - d.side_y;
+    const cells: usize = @intFromFloat(@max((side_w - 28) / cw, 0));
+    _ = k.text(std.fs.path.basename(root.?), null, th, th.muted, 14, y0 + baseline, 0, cells);
+    const s = @round(conf.size + 4);
+    const from: usize = @intFromFloat(@max(@floor(d.side_y / lh) - 1, 0));
+    const to: usize = @min(rows.len, @as(usize, @intFromFloat(@ceil((d.side_y + view_h) / lh))));
+    for (rows[@min(from, to)..to], @min(from, to) + 1..) |row, i| {
+        const y = y0 + f(i) * lh;
+        const x = 10 + f(row.depth) * 14;
+        if (cur != null and std.mem.eql(u8, row.rel, cur.?)) fill(ctx, th.sel, 0, y, side_w - 1, lh);
+        const iy = y + (lh - s) / 2;
+        if (row.dir) drawIcon(icon(if (tree.isOpen(row.rel)) .opened else .closed, dark, th), x, iy + (s - 14) / 2, 14);
+        drawIcon(icon(iconFor(row), dark, th), x + 15, iy, s);
+        const nx = x + 15 + s + 6;
+        const room: usize = @intFromFloat(@max((side_w - nx - 10) / cw, 0));
+        const n = k.text(row.rel[row.base..], null, th, th.fg, nx, y + baseline, 0, room);
+        if (!row.dir and rowDirty(d, row.rel)) _ = k.text(" •", null, th, th.caret, nx + f(n) * cw, y + baseline, 0, 2);
+    }
+    k.flush();
+    objc.CGContextRestoreGState(ctx);
+}
+
+/// A folder opens or closes; a file shows here, or with ⌘ in a new window.
+fn sideClick(d: *Doc, p: Point, flags: usize) void {
+    const at = @floor((p.y - top_h + d.side_y) / lh);
+    if (at < 1 or at > f(tree.rows.items.len)) return;
+    const row = tree.rows.items[@as(usize, @intFromFloat(at)) - 1];
+    if (row.dir) {
+        tree.toggle(gpa, row.rel);
+        rebuildTree();
+        return refreshAll();
+    }
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ root.?, row.rel }) catch return;
+    open(path, if (flags & cmd_key != 0) null else d);
 }
 
 fn isDark(view: Id) bool {
@@ -1285,7 +1597,9 @@ fn draw(d: *Doc, ctx: Id) void {
     const last = @min(total, @as(usize, @intFromFloat(@max(@ceil((d.vy + textH(d)) / lh), 0))) + 1);
     const first: usize = @min(@as(usize, @intFromFloat(@max(@floor(d.vy / lh), 0))), last);
     const skip: usize = @intFromFloat(@max(@ceil(d.vx / cw), 0));
-    const ox = pad_x + f(skip) * cw - d.vx;
+    const lx = left(d);
+    const tx = lx + pad_x;
+    const ox = tx + f(skip) * cw - d.vx;
     const cols: usize = @intFromFloat(@ceil((r.w - ox) / cw));
     const s = d.ed.sel();
     const here = caretRow(d);
@@ -1316,7 +1630,7 @@ fn draw(d: *Doc, ctx: Id) void {
     const band_on = d.mode == .edit and s[0] == s[1];
     if (band_on and d.band_on) d.band.aim(f(here.row) * lh, now) else d.band.snap(f(here.row) * lh);
     d.band_on = band_on;
-    if (band_on) fill(ctx, th.line, 0, top_h + d.band.at(now) - d.vy, r.w, lh);
+    if (band_on) fill(ctx, th.line, lx, top_h + d.band.at(now) - d.vy, r.w - lx, lh);
 
     // A new selection fades in.
     const has_sel = s[0] != s[1];
@@ -1384,11 +1698,12 @@ fn draw(d: *Doc, ctx: Id) void {
     const by = r.h - barH();
     const key = msg(bool, d.window, "isKeyWindow", .{});
     if (d.mode == .edit) {
-        placeCaret(d, now, pad_x + f(here.col) * cw - 1, top_h + f(here.row) * lh + 2, true, .{ 0, here.row, here.col }, key);
+        placeCaret(d, now, tx + f(here.col) * cw - 1, top_h + f(here.row) * lh + 2, true, .{ 0, here.row, here.col }, key);
     }
 
     // The band under the title bar, the quick open list, and the status bar.
     fill(ctx, th.bg, 0, 0, r.w, top_h - 8);
+    if (lx > 0) drawSide(d, ctx, th, &k, by, dark);
     const ty = by + 6 + baseline;
     const want_ph: f64 = if (d.mode == .open and d.list != null) f(d.npicks) * lh + 12 else 0;
     d.panel.aim(want_ph, now);
@@ -1404,8 +1719,8 @@ fn draw(d: *Doc, ctx: Id) void {
             if (i == d.pick) fill(ctx, th.sel, 0, y, r.w, lh);
             const path = d.list.?.paths.items[p];
             const slash = if (std.mem.lastIndexOfScalar(u8, path, '/')) |j| j + 1 else 0;
-            const n = k.text(path[slash..], null, th, th.fg, pad_x, y + baseline, 0, 200);
-            _ = k.text(path[0..slash], null, th, th.muted, pad_x + f(n + 2) * cw, y + baseline, 0, 200);
+            const n = k.text(path[slash..], null, th, th.fg, tx, y + baseline, 0, 200);
+            _ = k.text(path[0..slash], null, th, th.muted, tx + f(n + 2) * cw, y + baseline, 0, 200);
         }
         k.flush();
         objc.CGContextRestoreGState(ctx);
@@ -1414,7 +1729,7 @@ fn draw(d: *Doc, ctx: Id) void {
     fill(ctx, th.rule, 0, by, r.w, 1);
     var buf: [64]u8 = undefined;
     var right: []const u8 = "";
-    var x: f64 = pad_x;
+    var x: f64 = tx;
     if (d.mode == .edit) {
         x += f(k.text(d.name(), null, th, th.fg, x, ty, 0, 200)) * cw;
         if (b.dirty()) x += f(k.text(" •", null, th, th.caret, x, ty, 0, 4)) * cw;
@@ -1586,7 +1901,7 @@ fn posAt(d: *Doc, p: Point) usize {
     const i = lineOfRow(d, row);
     const l = b.line(i);
     const s = segN(d, l, row - rowOfLine(d, i));
-    const x = @max((p.x - pad_x + d.vx) / cw, 0);
+    const x = @max((p.x - left(d) - pad_x + d.vx) / cw, 0);
     return b.lineStart(i) + std.math.clamp(editor.byteAtCol(l, f(s.col) + x), s.start, caretEnd(l, s));
 }
 
@@ -1619,6 +1934,8 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
         }
     }
     if (p.y >= by) return;
+    d.side_down = p.x < left(d);
+    if (d.side_down) return sideClick(d, p, msg(usize, ev, "modifierFlags", .{}));
     d.mode = .edit;
     const pos = posAt(d, p);
     switch (msg(isize, ev, "clickCount", .{})) {
@@ -1638,6 +1955,7 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
 
 fn mouseDragged(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const d = docOf(self) orelse return;
+    if (d.side_down) return;
     d.snap = true;
     const p = local(self, ev);
     if (p.y < top_h) d.sy -= lh;
@@ -1656,6 +1974,11 @@ fn mouseDragged(self: Id, _: Sel, ev: Id) callconv(.c) void {
 
 fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const d = docOf(self) orelse return;
+    if (local(self, ev).x < left(d)) {
+        const dy = msg(f64, ev, "scrollingDeltaY", .{});
+        d.side_y -= if (msg(bool, ev, "hasPreciseScrollingDeltas", .{})) dy else dy * lh;
+        return refresh(d);
+    }
     var dx = msg(f64, ev, "scrollingDeltaX", .{});
     var dy = msg(f64, ev, "scrollingDeltaY", .{});
     if (!msg(bool, ev, "hasPreciseScrollingDeltas", .{})) {
@@ -1670,8 +1993,15 @@ fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
     refresh(d);
 }
 
+/// An I-beam over the text; the sidebar keeps the arrow.
 fn resetCursorRects(self: Id, _: Sel) callconv(.c) void {
-    msg(void, self, "addCursorRect:cursor:", .{ msg(Rect, self, "bounds", .{}), msg(Id, objc.class("NSCursor"), "IBeamCursor", .{}) });
+    var r = msg(Rect, self, "bounds", .{});
+    if (docOf(self)) |d| {
+        const lx = left(d);
+        r.x += lx;
+        r.w -= lx;
+    }
+    msg(void, self, "addCursorRect:cursor:", .{ r, msg(Id, objc.class("NSCursor"), "IBeamCursor", .{}) });
 }
 
 /// Also the window delegate's key and resign key calls, so the caret shows

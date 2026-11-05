@@ -88,6 +88,14 @@ fn togglePairs(_: Id, _: Sel, _: Id) callconv(.c) void {
     view.togglePairs();
 }
 
+fn toggleSidebar(_: Id, _: Sel, _: Id) callconv(.c) void {
+    view.toggleSidebar();
+}
+
+fn previousFile(_: Id, _: Sel, _: Id) callconv(.c) void {
+    view.previousFile();
+}
+
 fn pickScheme(_: Id, _: Sel, sender: Id) callconv(.c) void {
     view.pickScheme(@intCast(msg(isize, sender, "tag", .{})));
 }
@@ -189,6 +197,8 @@ fn buildMenu(delegate: Id) void {
     separator(v);
     view.wrap_item = item(v, "Soft Wrap", "toggleWrap:", "z", opt);
     view.pairs_item = item(v, "Auto-Close Brackets", "togglePairs:", "", 0);
+    view.sidebar_item = item(v, "Sidebar", "toggleSidebar:", "\\", cmd);
+    _ = item(v, "Previous File", "previousFile:", "\t", ctrl);
     const themes = submenu(v, "Theme");
     for (settings.schemes, 0..) |sc, i| {
         if (i == 0 or sc.dark != settings.schemes[i - 1].dark) {
@@ -216,11 +226,13 @@ pub fn main(init: std.process.Init.Minimal) void {
     const pool = objc.objc_autoreleasePoolPush();
     const nsapp = app();
     _ = msg(bool, nsapp, "setActivationPolicy:", .{@as(isize, 0)});
+    // No window tabs, so ⌃Tab reaches Previous File.
+    msg(void, objc.class("NSWindow"), "setAllowsAutomaticWindowTabbing:", .{false});
 
     // From a terminal, quick open lists the folder ze started in. Finder
     // starts apps in /, so there it waits for a folder to be opened.
     if (files.cwd(view.gpa)) |dir| {
-        if (dir.len > 1) view.root = dir else view.gpa.free(dir);
+        if (dir.len > 1) view.setRoot(dir) else view.gpa.free(dir);
     }
 
     const d = objc.ClassBuilder.begin("NSObject", "ZeApp");
@@ -236,6 +248,8 @@ pub fn main(init: std.process.Init.Minimal) void {
     d.method("openSettings:", @ptrCast(&openSettings), "v@:@");
     d.method("toggleWrap:", @ptrCast(&toggleWrap), "v@:@");
     d.method("togglePairs:", @ptrCast(&togglePairs), "v@:@");
+    d.method("toggleSidebar:", @ptrCast(&toggleSidebar), "v@:@");
+    d.method("previousFile:", @ptrCast(&previousFile), "v@:@");
     d.method("pickScheme:", @ptrCast(&pickScheme), "v@:@");
     d.method("menuNeedsUpdate:", @ptrCast(&fillRecent), "v@:@");
     d.method("openRecent:", @ptrCast(&openRecent), "v@:@");

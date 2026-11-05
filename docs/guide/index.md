@@ -7,10 +7,10 @@ covers:
 since: 2026-11-04
 ---
 
-ze is a small text editor. Each file gets its own window, with the text filling the page and one
-line at the bottom. That line shows the file's name, a dot when there are unsaved changes, and the
-line and column of the caret. It also turns into a prompt when you find, replace, jump to a line or
-open a file.
+ze is a small text editor. A window shows one file at a time, with the text filling the page and
+one line at the bottom. When you've opened a folder, a sidebar on the left lists its files. The
+bottom line shows the file's name, a dot when there are unsaved changes, and the line and column
+of the caret. It also turns into a prompt when you find, replace, jump to a line or open a file.
 
 ze follows the Mac's light or dark setting, with a theme for each (see Themes). Things move
 a little instead of jumping: the caret glides to each new spot and blinks with a soft fade after a
@@ -28,18 +28,37 @@ background don't show a caret.
 - **File > Quick Open…** (⌘P) lists every file in the folder ze started in, or the folder you
   opened. Type a few letters of the name, use ↑ and ↓ to pick, and press Return. If there's no
   folder yet, it lists the folder of the file you're looking at.
-- Opening a file that's already open brings its window forward. Quick open shows the new file in
-  the same window when that window has no unsaved changes.
+- Opening a file that's already open in another window brings that window forward. Quick open
+  and the sidebar show the new file in the same window, which keeps the file it had (see Sidebar).
 - A file opens where you left it: the caret and the scroll come back to where they were the last
   time you closed it.
 - Files that look binary don't open.
 
+## Sidebar
+
+When ze has a folder (the one it started in from a terminal, or one you opened), the left side
+of each window lists that folder's files, folders first. Files and folders whose names start
+with a dot are left out. Each row has a small icon for its kind: folder, code, Markdown, data,
+image or plain text.
+
+- Click a folder to open or close it.
+- Click a file to show it in the same window. The window keeps every file it has shown, with
+  its unsaved changes and undo, so switching never asks you to save. A dot next to a file in the
+  sidebar means it has unsaved changes.
+- ⌘-click a file to open it in a new window.
+- **View > Previous File** (⌃Tab) goes back to the file the window showed before.
+- **View > Sidebar** (⌘\) shows or hides the sidebar in every window. It also hides when a window
+  is too narrow to fit it beside the text.
+
+The sidebar reads the disk again when you come back to ze, so new and deleted files show up.
+
 ## Pick up where you left off
 
 When you quit ze with files open and later start it without naming a file (from the Dock, say),
-it reopens those files in the same windows, at the same sizes and places. Starting it with a file,
-like `ze notes.txt`, opens just that file. Close every window before quitting and the next start
-gives you one empty window.
+it reopens those files in the same windows, at the same sizes and places, and brings back the
+folder you had open. Each window comes back with the file it was showing, not the others it held.
+Starting it with a file, like `ze notes.txt`, opens just that file. Close every window before
+quitting and the next start gives you one empty window.
 
 ## Edit
 
@@ -106,7 +125,10 @@ When another app changes a file that's open in ze, ze notices the next time you 
 it in, so a crash halfway through a save never leaves a half-written file. The file keeps its
 permissions.
 
-Closing a window, or quitting, with unsaved changes asks whether to save them first.
+Closing a window, or quitting, with unsaved changes asks whether to save them first. When a
+window holds more than one unsaved file, one question covers them all: **Save All** saves each
+one (asking for a name for any untitled file), **Don't Save** drops the changes, and **Cancel**
+keeps the window open.
 
 ## Syntax colors
 
@@ -147,6 +169,7 @@ size = 14
 line-height = 1.75       # as a multiple of the size
 wrap = off
 pairs = on               # auto-close brackets and quotes
+sidebar = on             # the folder's files on the left
 light-theme = paper      # paper, ayu-light, one-light, ink, ayu-dark or one-dark
 dark-theme = ink
 light.comment = #B3AEA3  # one color of the light theme, as #rrggbb
@@ -155,7 +178,8 @@ light.comment = #B3AEA3  # one color of the light theme, as #rrggbb
 A `light.` or `dark.` line changes one color of that mode's theme, whichever theme it is. The
 names are `background`, `text`, `muted` (the bottom line's fainter words), `keyword`, `string`,
 `comment`, `number`, `function`, `type`, `selection`, `line` (the caret's line), `caret`, `match`
-(other find matches), `panel` (the quick open list) and `rule` (the line above the bottom line).
+(other find matches), `panel` (the quick open list and the sidebar) and `rule` (the line above the
+bottom line and the sidebar's edge).
 Either mode can also use any theme from the file, so `light-theme = one-dark` keeps ze dark all
 the time. A line ze doesn't understand is skipped, and a missing line keeps its default. The menus,
 the size shortcuts and the Font panel rewrite their own line in the file and leave the rest of it

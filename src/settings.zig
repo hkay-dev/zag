@@ -1,5 +1,5 @@
 //! The settings file, `~/.config/ze/settings`: font, size, line height, soft
-//! wrap, auto-closing pairs and the colors of both themes, as `key = value`
+//! wrap, auto-closing pairs, the sidebar and the colors of both themes, as `key = value`
 //! lines. ze writes every key into it the first time it's opened, and menu
 //! toggles rewrite just their own line.
 const std = @import("std");
@@ -144,6 +144,8 @@ pub const Settings = struct {
     spacing: f64 = 1.75,
     wrap: bool = false,
     pairs: bool = true,
+    /// The folder tree on the left of folder windows.
+    sidebar: bool = true,
     /// Indexes into `schemes`: the theme for light mode and for dark mode.
     light_scheme: u8 = 0,
     dark_scheme: u8 = 3,
@@ -264,6 +266,8 @@ pub fn parse(text: []const u8) Settings {
             s.wrap = flag(val) orelse s.wrap;
         } else if (std.mem.eql(u8, key, "pairs")) {
             s.pairs = flag(val) orelse s.pairs;
+        } else if (std.mem.eql(u8, key, "sidebar")) {
+            s.sidebar = flag(val) orelse s.sidebar;
         } else {
             const dot = std.mem.indexOfScalar(u8, key, '.') orelse continue;
             const theme = if (std.mem.eql(u8, key[0..dot], "light")) &s.light else if (std.mem.eql(u8, key[0..dot], "dark")) &s.dark else continue;
@@ -295,6 +299,8 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         \\wrap = {s}
         \\# Close brackets and quotes as you type them: on or off.
         \\pairs = {s}
+        \\# Show the folder's files on the left of the window: on or off.
+        \\sidebar = {s}
         \\
         \\# The theme for each of the Mac's modes: paper, ayu-light, one-light,
         \\# ink, ayu-dark or one-dark.
@@ -311,6 +317,7 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         decimal(&b, s.spacing),
         if (s.wrap) "on" else "off",
         if (s.pairs) "on" else "off",
+        if (s.sidebar) "on" else "off",
         schemes[s.light_scheme].key,
         schemes[s.dark_scheme].key,
     });
