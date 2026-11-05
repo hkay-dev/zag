@@ -95,6 +95,7 @@ pub fn utf8(ns: Id) []const u8 {
 }
 
 pub extern fn CFRelease(cf: *anyopaque) void;
+pub extern fn CFRetain(cf: *anyopaque) *anyopaque;
 pub extern fn CGContextSetRGBFillColor(ctx: Id, r: f64, g: f64, b: f64, a: f64) void;
 pub extern fn CGContextFillRect(ctx: Id, rect: Rect) void;
 pub extern fn CGPathCreateWithRoundedRect(rect: Rect, corner_w: f64, corner_h: f64, transform: ?*const anyopaque) ?*anyopaque;

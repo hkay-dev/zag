@@ -92,8 +92,9 @@ in beside it with a little bounce, and a **+** shows after the last one.
 
 - Click a tab to show its file. The active tab's highlight hops over to it.
 - The active tab, and any tab under the mouse, shows a **×** that closes it. A tab with unsaved
-  changes shows a dot there instead until you point at it. Closing one folds it shut and the tabs
-  after it slide over.
+  changes shows a dot there instead until you point at it. The dot grows in with a little bounce
+  when you first change the file and shrinks away as the **×** comes back when you save. Closing
+  one folds it shut and the tabs after it slide over.
 - **File > New Tab** (⌘T) or the **+** opens an untitled file in a new tab. It stays open, even
   while it's empty, until you close it. Its tab and the window take their name from its first
   line of text, and it's "Untitled" while it has none.
@@ -159,8 +160,9 @@ folder's row pushes it away. Click a pinned folder to scroll back to it.
 - ⌘-click a file to open it in a new window.
 - Drag a file onto a card's tabs to open it there as a new tab: the tabs slide apart to show
   where it goes. Drag it over a card's text to open it in a new card split off that card's nearest
-  edge, with a preview of the half it takes. A copy of the file's name follows the mouse. A file
-  already open in the window moves there instead.
+  edge, with a preview of the half it takes. A copy of the file's name follows the mouse while its
+  row dims. A file already open in the window moves there instead. Let go where it can't land and
+  the copy slides back to its row.
 - Right-click (or control-click) a file for **Open in New Tab**, **Open in New Split** (beside the
   focused card, or below it when there's no room beside), **Open in New Window**, **Reveal in
   Finder** and **Copy Path**. A folder has the last two. The row keeps a faint tinted outline in

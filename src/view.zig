@@ -478,6 +478,9 @@ const Slot = struct {
     /// 0 to 1 with a bounce on the way in; its width follows.
     grow: Spring = .{ .k = 280, .c = 19 },
     hov: Tween = .{ .dur = fade_time },
+    /// The unsaved dot, 0 to 1: it grows in with a little bounce and
+    /// shrinks away as it fades.
+    dot: Spring = .{ .k = 420, .c = 22 },
     /// Its file's name, made on first draw.
     line: Id = null,
     /// The name cut short with an ellipsis to `cut_w`, when the tab is squeezed.
@@ -944,7 +947,32 @@ const Win = struct {
     menu_card: ?*Doc = null,
     menu_tab: u32 = 0,
     menu_a: Tween = .{ .dur = menu_time },
+    /// The sidebar has drawn once, so later moves to the focused file glide.
+    side_drawn: bool = false,
+    /// A dragged copy finishing its trip after the mouse let go.
+    fly: ?Fly = null,
 };
+
+/// A dragged tab's or file's copy after the mouse lets go: it slides into
+/// the gap among the tabs it landed in, or back to where it came from when
+/// it landed nowhere, or fades where it landed on a card.
+const Fly = struct {
+    /// Retained: see `endFly`.
+    line: Id,
+    icon: Id,
+    w: f64,
+    from: Point,
+    to: Point,
+    t0: f64,
+    fade: bool = false,
+    /// The tab that stays faint until its copy is back, or the sidebar row
+    /// that stays dim until its copy is gone.
+    card: ?*Doc = null,
+    id: u32 = 0,
+    row: ?usize = null,
+};
+
+const fly_time = 0.3;
 
 /// Where a dragged tab lands: among a card's tabs, on the card itself, or
 /// in a new card split off one of its edges.
@@ -970,6 +998,8 @@ const TabDrag = struct {
     file: ?[:0]u8 = null,
     name: Id = null,
     cmd: bool = false,
+    /// The sidebar row it came from, which dims while it's out.
+    row: ?usize = null,
 };
 
 var wins: std.ArrayList(*Win) = .empty;
@@ -3113,6 +3143,12 @@ fn drawRow(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, i
             objc.CGContextRestoreGState(ctx);
         } else drawIcon(icon(if (tree.isOpen(row.rel)) .opened else .closed, dark, th), cx, cy, 12);
     }
+    // A row whose file is being dragged out dims, and comes back as its copy goes.
+    const lift = rowLift(w, i, CACurrentMediaTime());
+    if (lift > 0.01) {
+        objc.CGContextSaveGState(ctx);
+        objc.CGContextSetAlpha(ctx, 1 - 0.6 * lift);
+    }
     tile(iconFor(row.rel[row.base..], row.dir), x + 10, iy);
     const nx = x + 10 + s + 8;
     const room = side_w - nx - if (row.dir) @as(f64, 14) else 26;
@@ -3130,6 +3166,7 @@ fn drawRow(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, i
         break :plain l.*;
     };
     const nw = drawLine(ctx, line, th.fg, nx, y + side_base);
+    if (lift > 0.01) objc.CGContextRestoreGState(ctx);
     if (!row.dir and rowDirty(w, row.rel)) _ = k.text(" •", null, th, th.caret, nx + nw, y + side_base, 0, 2);
 }
 
@@ -3144,16 +3181,27 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
     const full_h = msg(Rect, w.view, "bounds", .{}).h;
     const view_h = full_h - lt;
     const cur = if (w.focus.path) |p| relOf(p) else null;
+    // The list glides to a focused file that's out of view, once it's
+    // been drawn; on the first draw it's just there.
+    const was = if (w.side_t.moving(now)) w.side_t.at(now) else w.side_y;
+    var glide = false;
     if (w.side_find) {
         w.side_find = false;
         if (cur) |c| for (rows, 0..) |row, i| if (std.mem.eql(u8, row.rel, c)) {
             const y = f(i) * side_h;
-            if (y < w.side_y or y + side_h > w.side_y + view_h) w.side_y = y - view_h / 3;
+            if (y < w.side_y or y + side_h > w.side_y + view_h) {
+                w.side_y = y - view_h / 3;
+                glide = w.side_drawn;
+            }
             break;
         };
     }
+    w.side_drawn = true;
     w.side_y = std.math.clamp(w.side_y, 0, @max(0, f(rows.len + 1) * side_h - view_h));
-    if (w.side_t.to != w.side_y) w.side_t.snap(w.side_y);
+    if (glide and was != w.side_y) {
+        w.side_t.snap(was);
+        w.side_t.aim(w.side_y, now);
+    } else if (w.side_t.to != w.side_y) w.side_t.snap(w.side_y);
     const sy = if (w.side_t.moving(now)) w.side_t.at(now) else w.side_y;
     if (side_lines.items.len < rows.len) side_lines.appendNTimes(gpa, null, rows.len - side_lines.items.len) catch return;
 
@@ -3338,7 +3386,7 @@ fn sideClick(w: *Win, p: Point, flags: usize) void {
     // A file opens when the mouse comes up, unless it's dragged to a card.
     const path = std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ root.?, row.rel }, 0) catch return;
     const ix = 16 + f(row.depth) * 16 + 10;
-    w.tdrag = .{ .from = null, .file = path, .cmd = flags & cmd_key != 0, .down = p, .at = p, .grab = p.x - ix + tab_pad, .name = uiLine(row.rel[row.base..], name_font, 1e5) };
+    w.tdrag = .{ .from = null, .file = path, .cmd = flags & cmd_key != 0, .down = p, .at = p, .grab = p.x - ix + tab_pad, .name = uiLine(row.rel[row.base..], name_font, 1e5), .row = i };
 }
 
 fn isDark(view: Id) bool {
@@ -3380,7 +3428,7 @@ fn draw(w: *Win, ctx: Id) void {
     for (&w.hot_t, 1..) |*t, i| t.aim(if (w.hot == i) 1 else 0, now);
     var busy = w.side_t.moving(now) or w.side_a.moving(now) or fold.t.moving(now) or fold.closing or cardsMoving(w.cards) or
         !w.sel.settled() or w.sel_a.moving(now) or w.hot_t[0].moving(now) or w.hot_t[1].moving(now) or
-        w.pv_a.moving(now) or w.ghost_a.moving(now) or w.menu_a.moving(now);
+        w.pv_a.moving(now) or w.ghost_a.moving(now) or w.menu_a.moving(now) or w.fly != null;
     for (w.pv) |s| busy = busy or !s.settled();
     var gliding = false;
     for (docs.items) |d| if (d.win == w) {
@@ -3779,7 +3827,7 @@ fn slotOf(d: *const Doc, id: u32) ?usize {
 fn tabsMoving(d: *const Doc, now: f64) bool {
     if (d.tabbed.moving(now) or d.tab_x.moving(now) or !d.hl[0].settled() or !d.hl[1].settled()) return true;
     if (!d.opening.settled()) return true;
-    for (d.slots.items) |s| if (s.gone or !s.grow.settled() or !s.shift.settled() or s.hov.moving(now)) return true;
+    for (d.slots.items) |s| if (s.gone or !s.grow.settled() or !s.shift.settled() or s.hov.moving(now) or !s.dot.settled()) return true;
     return false;
 }
 
@@ -3895,7 +3943,8 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
     for (0..2) |pass| {
         for (d.slots.items) |*s| {
             if ((s.id == top_id) != (pass == 1)) continue;
-            drawTab(d, s, ctx, th, dark, key, a, cap, x0, x1, now, dragged != null and dragged.?.out and s.id == dragged.?.id, pass == 1);
+            const back = if (d.win.fly) |fl| fl.card == d and fl.id == s.id else false;
+            drawTab(d, s, ctx, th, dark, key, a, cap, x0, x1, now, back or (dragged != null and dragged.?.out and s.id == dragged.?.id), pass == 1);
         }
     }
 
@@ -3991,10 +4040,14 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, key: bool, 
     // the close button's place with more; hovering trades it for the ×.
     const cx = shut_x + tab_shut * a / 2;
     const dirty = j != null and tabDirty(d, j.?);
-    const cross = a * if (on and !dirty) 1 else hv;
-    if (dirty and cross < 0.5) {
+    s.dot.aim(if (dirty) 1 else 0, now);
+    const dv = std.math.clamp(s.dot.step(now), 0, 1.3);
+    // On the active tab the × and the dot trade places as the dot comes and goes.
+    const cross = a * @max(hv, if (on) 1 - @min(dv, 1) else 0);
+    if (dv > 0.01 and cross < 0.5) {
         const dx = nx + nw + 9 + (cx - nx - nw - 9) * a;
-        pill(ctx, th.caret, 1 - 2 * cross, dx - 3, hy - 3, 6, 6, 3);
+        const r = 3 * dv;
+        pill(ctx, th.caret, (1 - 2 * cross) * @min(dv, 1), dx - r, hy - r, 2 * r, 2 * r, r);
     }
     if (cross > 0.01) {
         if (hovered and d.hover_x) pill(ctx, th.fg, 0.1 * a, cx - 8, hy - 8, 16, 16, 5);
@@ -4251,7 +4304,8 @@ fn placeFile(w: *Win, path: [:0]const u8, dr: Drop) void {
     focus(to);
 }
 
-/// The drop preview, and the dragged tab's copy under the mouse.
+/// The drop preview, the dragged tab's copy under the mouse, and a copy
+/// finishing its trip after the mouse let go.
 fn drawDrag(w: *Win, ctx: Id, th: *const Theme, now: f64) void {
     var r: [4]f64 = undefined;
     for (&w.pv, &r) |*s, *v| v.* = s.step(now);
@@ -4261,24 +4315,85 @@ fn drawDrag(w: *Win, ctx: Id, th: *const Theme, now: f64) void {
         pill(ctx, th.caret, 0.12 * pa, r[0], r[1], r[2], r[3], rad);
         ring(ctx, th.caret, 0.6 * pa, r[0], r[1], r[2], r[3], rad);
     }
-    const ga = w.ghost_a.at(now);
+    if (w.fly) |fl| {
+        const p = flyDone(fl, now);
+        if (p >= 1) return endFly(w);
+        const e = 1 - (1 - p) * (1 - p) * (1 - p);
+        // Back on its tab it just settles; into a gap or back to the
+        // sidebar it fades as it arrives; on a card it fades where it is.
+        const alpha = if (fl.fade) 1 - e else if (fl.card != null) 1 else std.math.clamp((1 - p) / 0.4, 0, 1);
+        ghost(ctx, th, fl.icon, fl.line, fl.w, fl.from.x + (fl.to.x - fl.from.x) * e, fl.from.y + (fl.to.y - fl.from.y) * e, alpha);
+    }
     const t = w.tdrag orelse return;
+    const ga = w.ghost_a.at(now);
     if (ga < 0.01) return;
     const g = ghostOf(&t) orelse return;
-    const ts = tileSize();
     const gw = ghostW(&t);
-    const x = t.at.x - std.math.clamp(t.grab, 10, gw - 10);
-    const y = t.at.y - 11;
+    ghost(ctx, th, g.icon, g.line, gw, t.at.x - std.math.clamp(t.grab, 10, gw - 10), t.at.y - 11, ga);
+}
+
+/// A tab's copy lifted off the page, `gw` wide with its top left at `x`, `y`.
+fn ghost(ctx: Id, th: *const Theme, img: Id, line: Id, gw: f64, x: f64, y: f64, alpha: f64) void {
+    const ts = tileSize();
     objc.CGContextSaveGState(ctx);
-    objc.CGContextSetAlpha(ctx, ga);
+    objc.CGContextSetAlpha(ctx, alpha);
     // A soft shadow under it, so it reads as lifted off the page.
     pill(ctx, th.fg, 0.06, x - 1, y + 2, gw + 2, 24, 8);
     pill(ctx, th.fg, 0.06, x, y + 1, gw, 22, 7);
     pill(ctx, th.header, 1, x, y, gw, 22, 7);
     ring(ctx, th.fg, 0.2, x, y, gw, 22, 7);
-    tile(g.icon, x + tab_pad, @round(y + 11 - ts / 2));
-    _ = drawLine(ctx, g.line, th.fg, x + tab_pad + ts + 7, @round(y + 11 + name_off));
+    tile(img, x + tab_pad, @round(y + 11 - ts / 2));
+    _ = drawLine(ctx, line, th.fg, x + tab_pad + ts + 7, @round(y + 11 + name_off));
     objc.CGContextRestoreGState(ctx);
+}
+
+/// Sets the dragged copy off on its last trip as drag `t` ends: into the
+/// gap among the tabs it's dropped on, back to its tab or sidebar row when
+/// it lands nowhere, or fading where it's dropped on a card.
+fn startFly(w: *Win, t: TabDrag) void {
+    endFly(w);
+    if (!t.live or !t.out) return;
+    const g = ghostOf(&t) orelse return;
+    const line = g.line orelse return;
+    const gw = ghostW(&t);
+    const left = std.math.clamp(t.grab, 10, gw - 10);
+    const at: Point = .{ .x = t.at.x - left, .y = t.at.y - 11 };
+    var fl: Fly = .{ .line = objc.CFRetain(line), .icon = g.icon, .w = gw, .from = at, .to = at, .t0 = CACurrentMediaTime(), .row = t.row };
+    if (t.drop) |dr| {
+        if (dr.zone == .tabs) {
+            const r = dropRect(dr, gw);
+            fl.to = .{ .x = r.x, .y = r.y };
+        } else fl.fade = true;
+    } else if (t.from) |d| {
+        if (slotOf(d, t.id)) |i| {
+            const s = d.slots.items[i];
+            fl.to = .{ .x = d.org.x + s.x + s.shift.x, .y = d.org.y + gap + head_h / 2 - 11 };
+            fl.card = d;
+            fl.id = t.id;
+        } else fl.fade = true;
+    } else fl.to = .{ .x = t.down.x - left, .y = t.down.y - 11 };
+    w.fly = fl;
+}
+
+fn endFly(w: *Win) void {
+    const fl = w.fly orelse return;
+    w.fly = null;
+    if (fl.line) |l| objc.CFRelease(l);
+    msg(void, w.view, "setNeedsDisplay:", .{true});
+}
+
+/// How far along its trip `fl` is, 0 to 1.
+fn flyDone(fl: Fly, now: f64) f64 {
+    const dur: f64 = if (fl.fade) fade_time * 1.5 else fly_time;
+    return std.math.clamp((now - fl.t0) / dur, 0, 1);
+}
+
+/// How far sidebar row `i` is dimmed, 0 to 1: while its file is dragged
+/// out, and until the copy is gone after.
+fn rowLift(w: *const Win, i: usize, now: f64) f64 {
+    if (w.tdrag) |t| if (t.row == i and t.live) return w.ghost_a.at(now);
+    if (w.fly) |fl| if (fl.row == i) return 1 - flyDone(fl, now);
+    return 0;
 }
 
 /// Zen hides the traffic lights; the window still closes, zooms and drags.
@@ -4482,6 +4597,7 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     w.side_down = true;
     w.grab = null;
     endDrag(w);
+    endFly(w);
     if (toolAt(w, p)) |t| {
         if (t == .sidebar) toggleSidebar() else newTab(w.focus);
         return;
@@ -4604,6 +4720,7 @@ fn mouseUp(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
     if (w.tdrag) |t| {
         w.tdrag = null;
+        startFly(w, t);
         dropTab(w, t);
         freeDrag(t);
         aimPreview(w, CACurrentMediaTime());
@@ -4966,6 +5083,7 @@ fn windowWillClose(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
     preview.close(w.window);
     endDrag(w);
+    endFly(w);
     if (menu_win == w) menu_win = null;
     msg(void, w.link, "invalidate", .{});
     setWin(self, null);

@@ -30,6 +30,11 @@ showing and hiding, and later tabs and split panes. A jump is a bug.
 - A tab dragged over another card's tabs opens a gap there (`Doc.opening`) that the tabs slide
   aside for. The drop preview springs between places and grows in from a little smaller; the
   tab's copy under the mouse fades in once it leaves its row.
+- A drag's copy doesn't vanish when the mouse lets go (`Win.fly`, zig-editor#3epv). Dropped on a
+  tab row it slides into the gap as the new tab grows there; dropped nowhere it slides back to its
+  tab or sidebar row over 0.3 s, the way Finder returns an icon; dropped on a card it fades where
+  it is. The tab or sidebar row it came from stays faint until it's back. The copy keeps its own
+  retained name line, since the tab it came from may be gone by then.
 - Focus mode crossfades instead of moving: when the caret moves to another sentence, line or
   paragraph, the old range dims and the new one brightens, every letter at once, at an even rate
   over 0.25 s (zig-editor#xgxf). Typing that only stretches the range doesn't fade.
