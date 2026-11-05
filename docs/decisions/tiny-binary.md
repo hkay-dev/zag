@@ -55,6 +55,11 @@ Ghostty's terminal core. ze drops all three.
 - **The command palette reads the menu bar** (zig-editor#2eb7). It lists the menus' items as it
   opens and runs a pick through `performActionForItemAtIndex:`, so every menu command is in it
   with no second list to keep in step.
+- **Focus fades glyph colors, not the page** (zig-editor#r2cb). Two existing tweens move the
+  range's byte endpoints; the glyph batch blends outside colors toward the background and leaves
+  selection alone. No overlay or second text pass. Line means the logical line, so wrapping
+  does not split it. On the split-card layout, release `__text` goes from 114,416 to 115,952
+  bytes (+1,536); the file goes from 221,488 to 221,968 bytes.
 - **No input methods and no accessibility.** ze is for US English typing on Apple Silicon only.
   It has no input method support (Chinese, Japanese or accented-letter composing), no VoiceOver
   or other accessibility support, and none is planned. Harsha set this on 2026-11-05, so new

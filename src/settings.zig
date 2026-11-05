@@ -147,6 +147,7 @@ pub const default_size = 14.0;
 
 /// Light or dark: `auto` follows the Mac.
 pub const Look = enum { auto, light, dark };
+pub const Focus = enum { off, line, sentence, paragraph };
 
 /// The sidebar's width in points: where it starts, and how far the edge drags.
 pub const sidebar_default = 250.0;
@@ -161,6 +162,7 @@ pub const Settings = struct {
     spacing: f64 = 1.75,
     wrap: bool = false,
     pairs: bool = true,
+    focus: Focus = .off,
     /// The folder tree on the left of folder windows.
     sidebar: bool = true,
     sidebar_width: f64 = sidebar_default,
@@ -286,6 +288,8 @@ pub fn parse(text: []const u8) Settings {
             s.wrap = flag(val) orelse s.wrap;
         } else if (std.mem.eql(u8, key, "pairs")) {
             s.pairs = flag(val) orelse s.pairs;
+        } else if (std.mem.eql(u8, key, "focus")) {
+            s.focus = std.meta.stringToEnum(Focus, val) orelse s.focus;
         } else if (std.mem.eql(u8, key, "sidebar")) {
             s.sidebar = flag(val) orelse s.sidebar;
         } else if (std.mem.eql(u8, key, "sidebar-width")) {
@@ -324,6 +328,8 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         \\wrap = {s}
         \\# Close brackets and quotes as you type them: on or off.
         \\pairs = {s}
+        \\# Fade text outside the caret's range: off, line, sentence or paragraph.
+        \\focus = {s}
         \\# Show the folder's files on the left of the window: on or off.
         \\sidebar = {s}
         \\# How wide the sidebar is, in points: drag its edge to change it.
@@ -347,6 +353,7 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         decimal(&b, s.spacing),
         if (s.wrap) "on" else "off",
         if (s.pairs) "on" else "off",
+        @tagName(s.focus),
         if (s.sidebar) "on" else "off",
         decimal(&wbuf, s.sidebar_width),
         @tagName(s.look),
@@ -451,7 +458,7 @@ test "settings read colors, flags and numbers and skip what they don't know" {
 }
 
 test "a written file reads back as the same settings" {
-    var s: Settings = .{ .size = 16, .wrap = true, .look = .dark, .sidebar_width = 320 };
+    var s: Settings = .{ .size = 16, .wrap = true, .focus = .sentence, .look = .dark, .sidebar_width = 320 };
     s.setFont("Menlo-Regular");
     s.dark.caret = .{ 1, 0, 0 };
     const text = try render(t.allocator, &s);
@@ -460,6 +467,7 @@ test "a written file reads back as the same settings" {
     try t.expectEqualStrings("Menlo-Regular", back.font());
     try t.expectEqual(s.size, back.size);
     try t.expect(back.wrap);
+    try t.expectEqual(s.focus, back.focus);
     try t.expectEqual(@as(f64, 320), back.sidebar_width);
     try t.expectEqual(Look.dark, back.look);
     try t.expectEqual(s.dark.caret, back.dark.caret);

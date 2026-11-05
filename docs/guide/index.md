@@ -181,6 +181,14 @@ window. ↑ and ↓ move by screen rows, and ⌘← and ⌘→ go to the start a
 ⌃E still go to the ends of the whole line. Resizing the window rewraps the text. The setting
 applies to every window and is remembered.
 
+## Focus
+
+**View > Focus** keeps the caret's range bright and fades the rest toward the page color:
+**Off**, **Line** (the whole logical line, including wrapped rows), **Sentence** or **Paragraph**.
+A sentence ends at `.`, `!` or `?`; a paragraph sits between blank lines. The bright range eases
+after the caret, while selected text and the caret keep their normal colors. The choice applies
+to every window and is remembered.
+
 ## Find and replace
 
 1. Press ⌘F. The prompt starts with the selected text or your last search.
@@ -261,6 +269,7 @@ size = 14
 line-height = 1.75       # as a multiple of the size
 wrap = off
 pairs = on               # auto-close brackets and quotes
+focus = off              # off, line, sentence or paragraph
 sidebar = on             # the folder's files on the left
 sidebar-width = 250      # in points, from 150 to 500
 appearance = auto        # auto, light or dark

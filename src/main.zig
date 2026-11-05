@@ -112,6 +112,10 @@ fn pickScheme(_: Id, _: Sel, sender: Id) callconv(.c) void {
     view.pickScheme(@intCast(msg(isize, sender, "tag", .{})));
 }
 
+fn pickFocus(_: Id, _: Sel, sender: Id) callconv(.c) void {
+    view.pickFocus(@intCast(msg(isize, sender, "tag", .{})));
+}
+
 /// Fills File > Open Recent each time it opens.
 fn fillRecent(_: Id, _: Sel, menu: Id) callconv(.c) void {
     msg(void, menu, "removeAllItems", .{});
@@ -217,6 +221,12 @@ fn buildMenu(delegate: Id) void {
     _ = item(v, "Show Next Tab", "nextTab:", "\t", ctrl);
     // ⇧Tab arrives as back tab, so that's the key to match.
     _ = item(v, "Show Previous Tab", "previousTab:", "\x19", ctrl | shift);
+    const focus = submenu(v, "Focus");
+    for ([_][]const u8{ "Off", "Line", "Sentence", "Paragraph" }, 0..) |title, i| {
+        const it = item(focus, title, "pickFocus:", "", 0);
+        msg(void, it, "setTag:", .{@as(isize, @intCast(i))});
+        view.focus_items[i] = it;
+    }
     separator(v);
     _ = item(v, "Split Right", "splitRight:", "d", cmd);
     _ = item(v, "Split Down", "splitDown:", "d", cmd | shift);
@@ -286,6 +296,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     d.method("previousTab:", @ptrCast(&previousTab), "v@:@");
     d.method("pickScheme:", @ptrCast(&pickScheme), "v@:@");
     d.method("pickAppearance:", @ptrCast(&pickAppearance), "v@:@");
+    d.method("pickFocus:", @ptrCast(&pickFocus), "v@:@");
     d.method("menuNeedsUpdate:", @ptrCast(&fillRecent), "v@:@");
     d.method("openRecent:", @ptrCast(&openRecent), "v@:@");
     d.method("clearRecent:", @ptrCast(&clearRecent), "v@:@");

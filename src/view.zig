@@ -119,6 +119,7 @@ var conf_stamp: ?files.Stamp = null;
 pub var wrap_item: Id = null;
 pub var pairs_item: Id = null;
 pub var sidebar_item: Id = null;
+pub var focus_items: [4]Id = @splat(null);
 /// View > Theme items, in `settings.schemes` order.
 pub var scheme_items: [settings.schemes.len]Id = @splat(null);
 /// View > Theme's Appearance items: Auto, Light, Dark.
@@ -232,6 +233,9 @@ const Ink = struct {
     glyphs: [512]u16 = undefined,
     pos: [512]Point = undefined,
     n: usize = 0,
+    focus: ?[2]f64 = null,
+    offset: usize = 0,
+    selected: [2]usize = .{ 0, 0 },
 
     fn put(k: *Ink, g: Fallback, color: Rgb, x: f64, y: f64) void {
         if (k.n == k.glyphs.len or g.font != k.font or !std.mem.eql(f64, &color, &k.color)) {
@@ -270,7 +274,14 @@ const Ink = struct {
             if (rel >= skip and s[i] >= 0x20 and s[i] != 0x7f) {
                 const cp: u21 = if (s[i] < 0x80) s[i] else editor.decode(s, i).cp;
                 const kind: syntax.Kind = if (kinds) |ks| ks[i] else .text;
-                const paint = if (kinds != null) th.kinds[@intFromEnum(kind)] else color;
+                var paint = if (kinds != null) th.kinds[@intFromEnum(kind)] else color;
+                if (k.focus) |range| {
+                    const at = k.offset + i;
+                    if (at < k.selected[0] or at >= k.selected[1]) {
+                        const a = 0.22 + 0.78 * std.math.clamp(@min(f(at) - range[0] + 1, range[1] - f(at)), 0, 1);
+                        for (&paint, th.bg) |*v, bg| v.* = bg + (v.* - bg) * a;
+                    }
+                }
                 k.put(glyph(cp, kind == .keyword), paint, x + f(rel - skip) * cw, y);
             }
             col += c.w;
@@ -538,7 +549,7 @@ fn blink(caret: Id) void {
 /// list still has frames to draw.
 fn scenery(d: *const Doc, now: f64) bool {
     const stretched = d.relax and (d.ov[0] != 0 or d.ov[1] != 0);
-    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.panel.moving(now) or d.lit.moving(now) or
+    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.focus_lo.moving(now) or d.focus_hi.moving(now) or d.panel.moving(now) or d.lit.moving(now) or
         d.prompt_t.moving(now) or d.plus_t.moving(now) or !d.pick_s.settled() or tabsMoving(d, now) or
         now < d.load_t + load_time or (d.had_sel and now < d.sel_t0 + fade_time) or now < d.bar_t0 + bar_hold + bar_time;
 }
@@ -687,6 +698,9 @@ const Doc = struct {
     /// The caret line's band, in page coordinates.
     band: Tween = .{ .dur = caret_time },
     band_on: bool = false,
+    focus_lo: Tween = .{ .dur = caret_time },
+    focus_hi: Tween = .{ .dur = caret_time },
+    focus_on: bool = false,
     had_sel: bool = false,
     sel_t0: f64 = 0,
     /// Height of the quick open list.
@@ -1756,6 +1770,9 @@ pub fn loadSettings() void {
     if (wrap_item != null) msg(void, wrap_item, "setState:", .{@as(isize, @intFromBool(conf.wrap))});
     if (pairs_item != null) msg(void, pairs_item, "setState:", .{@as(isize, @intFromBool(conf.pairs))});
     if (sidebar_item != null) msg(void, sidebar_item, "setState:", .{@as(isize, @intFromBool(conf.sidebar))});
+    for (focus_items, 0..) |it, i| {
+        if (it != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(i == @intFromEnum(conf.focus)))});
+    }
     dropIcons();
     for (scheme_items, 0..) |it, i| {
         if (it != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(i == conf.light_scheme or i == conf.dark_scheme))});
@@ -1811,6 +1828,10 @@ pub fn togglePairs() void {
 
 pub fn toggleSidebar() void {
     store("sidebar", if (conf.sidebar) "off" else "on");
+}
+
+pub fn pickFocus(i: usize) void {
+    if (i < focus_items.len) store("focus", @tagName(@as(settings.Focus, @enumFromInt(i))));
 }
 
 /// Makes built-in theme `i` the one for its own mode, light or dark.
@@ -2287,6 +2308,39 @@ fn center(d: *Doc) void {
 /// Redraws `d`'s window, which shows the dot of unsaved changes in its
 /// close button when any of its cards has some.
 fn refresh(d: *Doc) void {
+    if (conf.focus != .off) {
+        const b = &d.ed.buf;
+        const text = d.ed.text();
+        var lo = b.lineOf(d.ed.cur);
+        var hi = lo;
+        if (conf.focus != .line and std.mem.trim(u8, b.line(lo), " \t\r").len > 0) {
+            while (lo > 0 and std.mem.trim(u8, b.line(lo - 1), " \t\r").len > 0) lo -= 1;
+            while (hi + 1 < b.lines() and std.mem.trim(u8, b.line(hi + 1), " \t\r").len > 0) hi += 1;
+        }
+        var start = b.lineStart(lo);
+        var end = b.lineStart(hi) + b.line(hi).len;
+        if (conf.focus == .sentence) {
+            var i = start;
+            while (i < end) : (i += 1) {
+                if (std.mem.indexOfScalar(u8, ".!?", text[i]) == null) continue;
+                if (i >= d.ed.cur) {
+                    end = i + 1;
+                    break;
+                }
+                start = i + 1;
+            }
+            while (start < end and std.ascii.isWhitespace(text[start])) start += 1;
+        }
+        const now = CACurrentMediaTime();
+        if (d.focus_on) {
+            d.focus_lo.aim(f(start), now);
+            d.focus_hi.aim(f(end), now);
+        } else {
+            d.focus_lo.snap(f(start));
+            d.focus_hi.snap(f(end));
+        }
+    }
+    d.focus_on = conf.focus != .off;
     msg(void, d.view, "setNeedsDisplay:", .{true});
     var edited = false;
     for (docs.items) |o| if (o.win == d.win and o.dirty()) {
@@ -2963,6 +3017,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
 
     // Text.
     var k: Ink = .{ .ctx = ctx };
+    if (d.focus_on) k.focus = .{ d.focus_lo.at(now), d.focus_hi.at(now) };
+    k.selected = s;
     var lexed: usize = std.math.maxInt(usize);
     var kinds: ?[]const syntax.Kind = null;
     for (vis[0..nvis], first..) |v, row| {
@@ -2978,9 +3034,11 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
                 }
             }
         }
+        k.offset = b.lineStart(v.line);
         _ = k.run(l, v.seg.start, v.seg.end, v.seg.col, kinds, th, th.fg, ox, top_h + f(row) * lh - d.vy + baseline, skip, cols);
     }
     k.flush();
+    k.focus = null;
     objc.CGContextRestoreGState(ctx);
 
     // The overlay scroll bar shows while the page moves and fades out after.
