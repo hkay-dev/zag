@@ -40,8 +40,8 @@ pub const paper: Theme = .{
     .caret = rgb(0xE8590C),
     .match = rgb(0xF2D98A),
     .panel = rgb(0xECE7DB),
-    .rule = rgb(0xDDD6C7),
-    .header = rgb(0xEDE8DB),
+    .rule = rgb(0xD6CDB9),
+    .header = rgb(0xE3DBCA),
 };
 
 /// Ink in dark mode.
@@ -70,8 +70,8 @@ const ayu_light: Theme = .{
     .caret = rgb(0xFFAA33),
     .match = rgb(0xF5E1A8),
     .panel = rgb(0xF0F1F2),
-    .rule = rgb(0xE6E8EA),
-    .header = rgb(0xEEF0F2),
+    .rule = rgb(0xD6DADF),
+    .header = rgb(0xE4E7EB),
 };
 
 /// Ayu Dark.
@@ -100,8 +100,8 @@ const one_light: Theme = .{
     .caret = rgb(0x526FFF),
     .match = rgb(0xF2E2A6),
     .panel = rgb(0xEFEFF0),
-    .rule = rgb(0xDBDBDC),
-    .header = rgb(0xF0F0F1),
+    .rule = rgb(0xD5D5D8),
+    .header = rgb(0xE6E6E9),
 };
 
 /// One Dark, Atom's dark theme.

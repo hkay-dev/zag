@@ -1,8 +1,8 @@
 # ze
 
-A tiny native text editor for macOS on Apple Silicon, written in Zig. One window per file, no
-terminal, no file tree, no tabs (macOS window tabs still work). The release binary is about
-145 KB and links only AppKit, Core Animation, CoreText, CoreGraphics and libc.
+A tiny native text editor for macOS on Apple Silicon, written in Zig, with tabs, split cards and
+a file sidebar. The release binary is about 300 KB and links only Apple's own frameworks and
+libc.
 
 ![ze](docs/assets/mxc3-after-light.png)
 

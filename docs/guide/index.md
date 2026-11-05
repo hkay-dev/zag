@@ -107,9 +107,9 @@ in beside it with a little bounce, and a **+** shows after the last one.
   into its place when you let go.
 - Right-click (or control-click) a tab, or a card's lone file name, for **Close Tab**, **Close
   Other Tabs**, **Close Tabs to the Right**, **Split Right** and **Split Down** (which move the tab
-  into a new card beside or below), **Reveal in Finder** and **Copy Path**. The tab keeps an
-  outline in the caret's color while the menu is open. Closing several tabs asks about each one
-  with unsaved changes, and **Cancel** stops there.
+  into a new card beside or below), **Reveal in Finder** and **Copy Path**. The tab keeps a faint
+  tinted outline in the caret's color while the menu is open, fading in and out. Closing several
+  tabs asks about each one with unsaved changes, and **Cancel** stops there.
 
 When the tabs don't fit, they all get narrower and their names end in "…". Past that, the row
 scrolls to keep the active tab in view. Drag the header between and around the tabs to move the
@@ -163,8 +163,8 @@ folder's row pushes it away. Click a pinned folder to scroll back to it.
   already open in the window moves there instead.
 - Right-click (or control-click) a file for **Open in New Tab**, **Open in New Split** (beside the
   focused card, or below it when there's no room beside), **Open in New Window**, **Reveal in
-  Finder** and **Copy Path**. A folder has the last two. The row keeps an outline in the caret's
-  color while the menu is open, apart from the highlight on the file on show.
+  Finder** and **Copy Path**. A folder has the last two. The row keeps a faint tinted outline in
+  the caret's color while the menu is open, apart from the highlight on the file on show.
 - **View > Show Next Tab** (⌃Tab) and **Show Previous Tab** (⌃⇧Tab) step through the window's
   tabs.
 - **View > Sidebar** (⌘\) or the sidebar button by the traffic lights shows or hides the sidebar
@@ -352,8 +352,8 @@ names are `background` (the card; the window around it is a step darker), `text`
 header's fainter words), `keyword`, `string`, `comment`, `number`, `function`, `type`,
 `selection`, `line` (the caret's line), `caret`, `match` (other find matches), `panel` (the quick
 open list), `rule` (the line under the header and above the prompt line and the quick open list)
-and `header` (the card's header, a step lighter than the text on dark themes and a step darker on
-light ones).
+and `header` (the card's header, a step lighter than the text on dark themes and a few steps
+darker on light ones, so it stands apart from the text).
 Either mode can also use any theme from the file, so `light-theme = one-dark` keeps ze dark all
 the time. A line ze doesn't understand is skipped, and a missing line keeps its default. The menus,
 the size shortcuts and the Font panel rewrite their own line in the file and leave the rest of it

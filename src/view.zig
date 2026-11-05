@@ -507,6 +507,9 @@ const Slot = struct {
 const caret_time = 0.09;
 const fade_time = 0.12;
 const panel_time = 0.14;
+/// The outline on a right-clicked row or tab fades in and out this slowly,
+/// so it reads as easing off rather than blinking.
+const menu_time = 0.24;
 /// The sidebar slides in and out, and the card's left edge rides with it.
 const slide_time = 0.24;
 /// A newly shown file's text fades in over this long, rising this far.
@@ -940,7 +943,7 @@ const Win = struct {
     menu_gen: u32 = 0,
     menu_card: ?*Doc = null,
     menu_tab: u32 = 0,
-    menu_a: Tween = .{ .dur = fade_time },
+    menu_a: Tween = .{ .dur = menu_time },
 };
 
 /// Where a dragged tab lands: among a card's tabs, on the card itself, or
@@ -4764,8 +4767,10 @@ fn menuFile() [:0]const u8 {
 
 /// Outlines the row or tab the menu is open on while it's open. `self`
 /// hears when it closes, and the outline fades out.
-fn markMenu(self: Id, w: *Win, m: Id) Id {
+fn markMenu(self: Id, w: *Win, m: Id, same: bool) Id {
     menu_win = w;
+    // Another row or tab starts from nothing rather than taking over a fade.
+    if (!same) w.menu_a.snap(0);
     w.menu_a.aim(1, CACurrentMediaTime());
     msg(void, m, "setDelegate:", .{self});
     msg(void, self, "setNeedsDisplay:", .{true});
@@ -4779,12 +4784,11 @@ fn menuDidClose(_: Id, _: Sel, m: Id) callconv(.c) void {
     msg(void, w.view, "setNeedsDisplay:", .{true});
 }
 
-/// The right-click outline: an accent ring two points thick over a faint
-/// accent fill, `a` faded in.
+/// The right-click outline: a hairline ring in the accent over a faint
+/// accent wash, `a` faded in.
 fn menuMark(ctx: Id, th: *const Theme, a: f64, x: f64, y: f64, w: f64, h: f64, r: f64) void {
-    pill(ctx, th.caret, 0.1 * a, x, y, w, h, r);
-    ring(ctx, th.caret, 0.9 * a, x, y, w, h, r);
-    ring(ctx, th.caret, 0.9 * a, x + 1, y + 1, w - 2, h - 2, r - 1);
+    pill(ctx, th.caret, 0.07 * a, x, y, w, h, r);
+    ring(ctx, th.caret, 0.45 * a, x, y, w, h, r);
 }
 
 /// Right-click and control-click: Edit's commands over a card's text, which
@@ -4831,10 +4835,11 @@ fn menuForEvent(self: Id, _: Sel, ev: Id) callconv(.c) Id {
         side_menu = m;
     }
     for (side_items) |it| msg(void, it, "setEnabled:", .{!row.dir});
+    const same = w.menu_card == null and w.menu_row == i and w.menu_gen == tree_gen;
     w.menu_card = null;
     w.menu_row = i;
     w.menu_gen = tree_gen;
-    return markMenu(self, w, side_menu);
+    return markMenu(self, w, side_menu, same);
 }
 
 /// The menu for card `d`'s tab (or lone file name) under `lp`, in its pane.
@@ -4861,10 +4866,11 @@ fn tabMenu(self: Id, w: *Win, d: *Doc, lp: Point) Id {
     for (tab_items, on) |it, x| msg(void, it, "setEnabled:", .{x});
     menu_doc = d;
     menu_id = hit.id;
+    const same = w.menu_card == d and w.menu_tab == hit.id;
     w.menu_row = null;
     w.menu_card = d;
     w.menu_tab = hit.id;
-    return markMenu(self, w, tab_menu);
+    return markMenu(self, w, tab_menu, same);
 }
 
 /// The card and tab index the tab menu was opened on, while both are there.
