@@ -30,6 +30,8 @@ var tree: tree_mod.Tree = .init(gpa);
 pub fn setRoot(dir: []const u8) void {
     if (root) |r| gpa.free(r);
     root = dir;
+    // The header's folder is written relative to the open folder.
+    for (docs.items) |d| dropHead(d);
     for (tree.open.items) |o| gpa.free(o);
     tree.open.clearRetainingCapacity();
     for (wins.items) |w| w.side_y = 0;
@@ -70,16 +72,20 @@ const Theme = settings.Theme;
 
 const pad_x = 28.0;
 /// The text sits in a card with rounded corners, this far in from the
-/// window's edges and the sidebar.
+/// window's edges and the sidebar. The cards' corners nest inside the
+/// window's: their radius is the window's less the gap, read from AppKit
+/// on each draw (`fitTitlebar`).
 const gap = 8.0;
-const card_radius = 10.0;
+var card_radius: f64 = 18.0;
 /// The card's header holds the file's name; the text starts a little below it.
-const head_h = 30.0;
-const top_h = gap + head_h + 6;
-/// The traffic lights start here and sit centered on the header's line.
-const lights_x = 15.0;
-/// The sidebar button's center, right of the traffic lights.
-const toggle_x = 96.0;
+/// Its middle sits on the traffic lights' line, which the window's empty
+/// toolbar sets, so `fitTitlebar` measures it.
+var head_h: f64 = 36.0;
+var top_h: f64 = gap + 36.0 + 6;
+/// The sidebar button's center, right of the traffic lights, and where the
+/// header's tabs can start without one; both follow the lights.
+var toggle_x: f64 = 96.0;
+var tabs_from: f64 = 91.0;
 /// The sidebar's width, shared by every window and kept in the settings file.
 var side_w: f64 = settings.sidebar_default;
 /// While the sidebar's edge is dragged past a limit it stretches, `side_stretch`
@@ -178,6 +184,14 @@ var side_h: f64 = 30;
 var side_base: f64 = 19;
 /// From the header's middle line down to the baseline of its text.
 var name_off: f64 = 4;
+/// The header's fonts: tab names regular, the active one medium, with every
+/// tab as wide as its medium name so switching never moves a tab; the
+/// folder after a lone tab's name small and regular, `path_off` above its
+/// baseline like `name_off`.
+var tab_font: Id = null;
+var tab_bold: Id = null;
+var path_font: Id = null;
+var path_off: f64 = 3;
 
 fn barH() f64 {
     return lh + 12;
@@ -221,6 +235,11 @@ fn setFont() void {
     side_h = @round((conf.size - 1) * 2.3);
     side_base = @round((side_h - objc.CTFontGetAscent(side_font) - objc.CTFontGetDescent(side_font)) / 2 + objc.CTFontGetAscent(side_font));
     name_off = (objc.CTFontGetAscent(name_font) - objc.CTFontGetDescent(name_font)) / 2;
+    for ([_]*Id{ &tab_font, &tab_bold, &path_font }) |p| if (p.* != null) msg(void, p.*, "release", .{});
+    tab_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 1, @as(f64, 0) }), "retain", .{});
+    tab_bold = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 1, @as(f64, 0.23) }), "retain", .{});
+    path_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 3, @as(f64, 0) }), "retain", .{});
+    path_off = (objc.CTFontGetAscent(path_font) - objc.CTFontGetDescent(path_font)) / 2;
     dropSideLines();
     for (docs.items) |d| dropHead(d);
     var it = fallbacks.valueIterator();
@@ -577,16 +596,20 @@ const Spring = struct {
 /// stays to fold shut.
 const Slot = struct {
     id: u32,
-    /// 0 to 1 with a bounce on the way in; its width follows.
-    grow: Spring = .{ .k = 280, .c = 19 },
+    /// 0 to 1 with a little bounce on the way in; its width follows, and its
+    /// icon and name grow from 0.92 to full size on it.
+    grow: Spring = .{ .k = 280, .c = 25 },
     hov: Tween = .{ .dur = fade_time },
     /// The unsaved dot, 0 to 1: it grows in with a little bounce and
     /// shrinks away as it fades.
     dot: Spring = .{ .k = 420, .c = 22 },
-    /// Its file's name, made on first draw.
+    /// Its file's name in medium, which sets its width, and in regular for
+    /// while it isn't the active tab, made on first draw.
     line: Id = null,
-    /// The name cut short with an ellipsis to `cut_w`, when the tab is squeezed.
+    thin: Id = null,
+    /// The names cut short with an ellipsis to `cut_w`, when the tab is squeezed.
     cut: Id = null,
+    thin_cut: Id = null,
     cut_w: f64 = -1,
     /// Its file kind's icon, from `iconFor`.
     icon: Id = null,
@@ -594,6 +617,9 @@ const Slot = struct {
     /// Where it last laid out, before `shift`.
     x: f64 = 0,
     w: f64 = 0,
+    /// Its name's width, springing to a new name's instead of jumping.
+    wid: Spring = .{ .k = 420, .c = 34, .eps = 0.05 },
+    sized: bool = false,
     /// How far it's drawn from where it lays out: it slides into a new
     /// place after the tabs reorder, and follows the mouse while dragged.
     shift: Spring = .{ .k = 420, .c = 30, .eps = 0.05 },
@@ -601,7 +627,7 @@ const Slot = struct {
     flip: ?f64 = null,
 
     fn drop(s: *Slot) void {
-        for ([_]*Id{ &s.line, &s.cut }) |p| if (p.*) |l| {
+        for ([_]*Id{ &s.line, &s.thin, &s.cut, &s.thin_cut }) |p| if (p.*) |l| {
             objc.CFRelease(l);
             p.* = null;
         };
@@ -616,6 +642,8 @@ const caret_min = 0.07;
 const caret_max = 0.14;
 const fade_time = 0.12;
 const panel_time = 0.14;
+/// A button's fill after a click fades this slowly once the mouse lets go.
+const press_time = 0.15;
 /// The outline on a right-clicked row or tab fades in and out this slowly,
 /// so it reads as easing off rather than blinking.
 const menu_time = 0.24;
@@ -986,6 +1014,8 @@ const Doc = struct {
     /// The mouse is on that +, and its hover highlight.
     plus_on: bool = false,
     plus_t: Tween = .{ .dur = fade_time },
+    /// A click on the +: its fill shows at once and fades after the release.
+    plus_down: Tween = .{ .dur = press_time },
     /// Absolute path, or null while untitled.
     path: ?[:0]u8 = null,
     /// While untitled, where its draft is kept; see `Page.draft`.
@@ -1142,10 +1172,13 @@ const Doc = struct {
     /// been blank (-1 when it isn't).
     hint: Tween = .{ .dur = hint_in },
     blank_t0: f64 = -1,
-    /// The header's folder as a CoreText line, cut from the front with an
-    /// ellipsis to fit `head_w`, made on first draw.
+    /// The header's folder as a CoreText line fitting `head_w`, from
+    /// `headLine`, with the middles of the gaps between its folders, where
+    /// chevrons go, in `head_marks`.
     head: Id = null,
     head_w: f64 = -1,
+    head_marks: [max_marks]f64 = undefined,
+    head_n: usize = 0,
 
     /// An untitled file goes by its first line, kept in `title` as it's typed.
     title: [48]u8 = undefined,
@@ -1248,6 +1281,10 @@ const Win = struct {
     /// mouse, and each one's hover highlight.
     hot: u8 = 0,
     hot_t: [2]Tween = @splat(.{ .dur = fade_time }),
+    /// The button the mouse pressed, 1 or 2 like `hot`, and its fill, there
+    /// at once on the click and fading after the release.
+    press: u8 = 0,
+    press_t: Tween = .{ .dur = press_time },
     /// The tab the mouse is dragging, if any.
     tdrag: ?TabDrag = null,
     /// The drop preview, in the view: where it springs to (x, y, width,
@@ -1684,6 +1721,7 @@ fn keepOrDrop(d: *Doc) bool {
 /// titles the window after its file.
 fn named(d: *Doc) void {
     dropHead(d);
+    retitle(d);
     refresh(d);
     if (d.win.focus != d) return;
     msg(void, d.window, "setTitle:", .{objc.str(d.name())});
@@ -2090,6 +2128,13 @@ pub fn newDoc() ?*Doc {
     d.fin = d.size;
     msg(void, win, "setTitlebarAppearsTransparent:", .{true});
     msg(void, win, "setTitleVisibility:", .{@as(isize, 1)});
+    // An empty toolbar, so AppKit itself centers the traffic lights on the
+    // header's line and gives the window the corners the cards nest in.
+    const bar = msg(Id, msg(Id, objc.class("NSToolbar"), "alloc", .{}), "initWithIdentifier:", .{objc.str("ze")});
+    msg(void, win, "setToolbar:", .{bar});
+    msg(void, bar, "release", .{});
+    msg(void, win, "setToolbarStyle:", .{@as(isize, 3)});
+    msg(void, win, "setTitlebarSeparatorStyle:", .{@as(isize, 1)});
     msg(void, win, "setMinSize:", .{Point{ .x = 360, .y = 240 }});
     // The sidebar material sits behind the view, which paints its chrome
     // over it with some of the material showing through.
@@ -3320,13 +3365,15 @@ fn refresh(d: *Doc) void {
     msg(void, d.view, "setNeedsDisplay:", .{true});
     if (d.path == null) {
         if (d.ed.buf.changes != d.drafted) laterDrafts(d.view);
+        // An untitled file is renamed after its first line once typing
+        // pauses, or at once when the caret leaves that line, as Return
+        // does, so its tab doesn't change width with each letter.
         var nb: [48]u8 = undefined;
-        const nm = untitledName(&d.ed, &nb);
-        if (!std.mem.eql(u8, nm, d.name())) {
-            @memcpy(d.title[0..nm.len], nm);
-            d.title_len = nm.len;
-            if (slotOf(d, d.id)) |k| d.slots.items[k].drop();
-            if (d.win.focus == d) msg(void, d.window, "setTitle:", .{objc.str(nm)});
+        if (!std.mem.eql(u8, untitledName(&d.ed, &nb), d.name())) {
+            const row = nameRow(&d.ed);
+            const sel = objc.sel_registerName("retitle:");
+            msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:selector:object:", .{ d.view, sel, @as(Id, null) });
+            if (row != null and row.? != d.ed.buf.lineOf(d.ed.cur)) retitle(d) else msg(void, d.view, "performSelector:withObject:afterDelay:", .{ sel, @as(Id, null), @as(f64, 0.6) });
         }
     }
     preview.update(d, &conf);
@@ -3520,22 +3567,45 @@ fn syncStates(d: *Doc, upto: usize) void {
     }
 }
 
+/// The first line with words on it, which names an untitled file.
+fn nameRow(ed: *const Editor) ?usize {
+    const b = &ed.buf;
+    for (0..b.lines()) |i| if (std.mem.trim(u8, b.line(i), " \t\r#>*-").len > 0) return i;
+    return null;
+}
+
 /// An untitled file's name: its first line with words on it, cut short
 /// with an ellipsis, or "Untitled" while it has none.
 fn untitledName(ed: *const Editor, buf: *[48]u8) []const u8 {
-    const b = &ed.buf;
-    for (0..b.lines()) |i| {
-        const l = std.mem.trim(u8, b.line(i), " \t\r#>*-");
-        if (l.len == 0) continue;
-        var n = @min(l.len, 40);
-        while (n < l.len and n > 0 and l[n] & 0xC0 == 0x80) n -= 1;
-        @memcpy(buf[0..n], l[0..n]);
-        if (n == l.len) return buf[0..n];
-        const dots = "…";
-        @memcpy(buf[n..][0..dots.len], dots);
-        return buf[0 .. n + dots.len];
-    }
-    return "Untitled";
+    const i = nameRow(ed) orelse return "Untitled";
+    const l = std.mem.trim(u8, ed.buf.line(i), " \t\r#>*-");
+    var n = @min(l.len, 40);
+    while (n < l.len and n > 0 and l[n] & 0xC0 == 0x80) n -= 1;
+    @memcpy(buf[0..n], l[0..n]);
+    if (n == l.len) return buf[0..n];
+    const dots = "…";
+    @memcpy(buf[n..][0..dots.len], dots);
+    return buf[0 .. n + dots.len];
+}
+
+/// Gives an untitled `d` the name its text has now, in its tab and, when
+/// it's the focused card, the window's title.
+fn retitle(d: *Doc) void {
+    if (d.path != null) return;
+    var nb: [48]u8 = undefined;
+    const nm = untitledName(&d.ed, &nb);
+    if (std.mem.eql(u8, nm, d.name())) return;
+    @memcpy(d.title[0..nm.len], nm);
+    d.title_len = nm.len;
+    if (slotOf(d, d.id)) |k| d.slots.items[k].drop();
+    if (d.win.focus == d) msg(void, d.window, "setTitle:", .{objc.str(nm)});
+    msg(void, d.view, "setNeedsDisplay:", .{true});
+}
+
+/// The untitled cards in a window take their new names once typing has
+/// paused.
+fn retitleNow(self: Id, _: Sel, _: Id) callconv(.c) void {
+    for (docs.items) |d| if (d.view == self) retitle(d);
 }
 
 fn tabName(d: *const Doc, j: usize, buf: *[48]u8) []const u8 {
@@ -3545,9 +3615,9 @@ fn tabName(d: *const Doc, j: usize, buf: *[48]u8) []const u8 {
 
 // ---- sidebar ----
 
-const Icon = enum { closed, opened, sidebar, plus, close, folder, parents };
+const Icon = enum { closed, opened, sidebar, plus, close, folder, parents, crumb };
 /// SF Symbols, which come with macOS, so they cost ze no size.
-const icon_names = [_][:0]const u8{ "chevron.right", "chevron.down", "sidebar.left", "plus", "xmark", "folder.fill", "chevron.down" };
+const icon_names = [_][:0]const u8{ "chevron.right", "chevron.down", "sidebar.left", "plus", "xmark", "folder.fill", "chevron.down", "chevron.forward" };
 /// Symbol images for the light and dark themes, tinted and made on first use.
 var icons: [2][icon_names.len]Id = @splat(@splat(null));
 
@@ -3585,6 +3655,7 @@ fn icon(which: Icon, dark: bool, th: *const Theme) Id {
     const scale: f64, const weight: f64 = switch (which) {
         .closed, .opened => .{ 0.6, 0.3 },
         .close => .{ 0.55, 0.3 },
+        .crumb => .{ 0.64, 0.23 },
         .sidebar, .plus => .{ 1.0, 0 },
         .folder => .{ 15.0 / conf.size, 0 },
         .parents => .{ 9.0 / conf.size, 0.4 },
@@ -3617,10 +3688,97 @@ fn tileAt(img: Id, x: f64, y: f64, s: f64) void {
     if (img != null) msg(void, img, "drawInRect:fromRect:operation:fraction:respectFlipped:hints:", .{ Rect{ .x = x, .y = y, .w = s, .h = s }, Rect{}, @as(usize, 2), @as(f64, 1), true, @as(Id, null) });
 }
 
-/// A soft rounded square behind a button under the mouse, centered on
-/// `cx`, `cy`, at `a` of its full strength.
-fn hoverPill(ctx: Id, th: *const Theme, a: f64, cx: f64, cy: f64) void {
-    if (a > 0.01) pill(ctx, th.fg, 0.08 * a, cx - 13, cy - 12, 26, 24, 6);
+/// A capsule behind a button under the mouse, centered on `cx`, `cy`: `a`
+/// is how far the hover has faded in and `down` how much of a click's
+/// stronger fill is left.
+fn hoverPill(ctx: Id, th: *const Theme, a: f64, down: f64, cx: f64, cy: f64) void {
+    const alpha = @max(0.08 * a, 0.14 * down);
+    if (alpha > 0.001) pill(ctx, th.fg, alpha, cx - 14, cy - 14, 28, 28, 14);
+}
+
+/// At most this many chevrons in the header's folder.
+const max_marks = 8;
+
+/// The header's folder for `d`'s file as a line in `path_font` that fits
+/// `room`: relative to the open folder inside it, with the home folder as
+/// ~ outside it, and a gap between folders whose middle it notes in
+/// `d.head_marks` for a chevron. Too long a path loses its first folders
+/// to an ellipsis, keeping the ones nearest the file. Null for an untitled
+/// file or one at the top of the open folder.
+fn headLine(d: *Doc, room: f64) Id {
+    d.head_n = 0;
+    const p = d.path orelse return null;
+    const dir = std.fs.path.dirname(p) orelse "/";
+    var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+    var rel = tilde(&pbuf, dir);
+    if (root) |r| {
+        if (std.mem.eql(u8, dir, r)) return null;
+        if (dir.len > r.len and std.mem.startsWith(u8, dir, r) and dir[r.len] == '/') rel = dir[r.len + 1 ..];
+    }
+    // The folders, last first, then put in order.
+    var parts: [max_marks + 1][]const u8 = undefined;
+    var n: usize = 0;
+    var dropped = false;
+    var it = std.mem.splitBackwardsScalar(u8, rel, '/');
+    while (it.next()) |part| {
+        if (part.len == 0) continue;
+        if (n == parts.len) {
+            dropped = true;
+            break;
+        }
+        parts[n] = part;
+        n += 1;
+    }
+    if (n == 0) return null;
+    std.mem.reverse([]const u8, parts[0..n]);
+    const sep = "    ";
+    const sep_line = uiLine(sep, path_font, 1e9);
+    const sep_w = if (sep_line != null) objc.CTLineGetTypographicBounds(sep_line, null, null, null) else 0;
+    if (sep_line) |l| objc.CFRelease(l);
+    // Drop folders from the start until the rest fits, down to the last one.
+    var from: usize = if (dropped) 1 else 0;
+    var tbuf: [std.fs.max_path_bytes + 64]u8 = undefined;
+    while (true) : (from += 1) {
+        var len: usize = 0;
+        var marks: [max_marks]usize = undefined;
+        var m: usize = 0;
+        const lead = from > 0 and from < n;
+        if (lead) {
+            @memcpy(tbuf[0.."…".len], "…");
+            len = "…".len;
+        }
+        for (parts[@min(from, n - 1)..n], 0..) |part, i| {
+            if (i > 0 or lead) {
+                if (m < max_marks) {
+                    marks[m] = len;
+                    m += 1;
+                }
+                @memcpy(tbuf[len..][0..sep.len], sep);
+                len += sep.len;
+            }
+            @memcpy(tbuf[len..][0..part.len], part);
+            len += part.len;
+        }
+        const text = tbuf[0..len];
+        const last = from + 1 >= n;
+        const line = uiLine(text, path_font, if (last) room else 1e9);
+        if (line == null) return null;
+        if (!last and objc.CTLineGetTypographicBounds(line, null, null, null) > room) {
+            objc.CFRelease(line.?);
+            continue;
+        }
+        // The last try is cut at its end to fit; a chevron the cut reached goes too.
+        const lw = objc.CTLineGetTypographicBounds(line, null, null, null);
+        for (marks[0..m]) |at| {
+            const pre = uiLine(text[0..at], path_font, 1e9);
+            const x = if (pre != null) objc.CTLineGetTypographicBounds(pre, null, null, null) else 0;
+            if (pre) |l| objc.CFRelease(l);
+            if (x + sep_w > lw) break;
+            d.head_marks[d.head_n] = x + sep_w / 2;
+            d.head_n += 1;
+        }
+        return line;
+    }
 }
 
 /// Draws `img` centered in the square at `x`, `y` with side `s`.
@@ -4186,6 +4344,7 @@ fn dropSideLines() void {
 fn dropHead(d: *Doc) void {
     if (d.head) |l| objc.CFRelease(l);
     d.head = null;
+    d.head_w = -1;
     for (d.slots.items) |*s| if (!s.gone) s.drop();
 }
 
@@ -4272,7 +4431,7 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     const th = &themes[@intFromBool(dark)];
     const r = msg(Rect, w.view, "bounds", .{});
     dev_px = 1 / @max(1, msg(f64, w.window, "backingScaleFactor", .{}));
-    placeLights(w);
+    fitTitlebar(w);
     // A stretched sidebar edge springs back to its limit.
     if (side_stretch.x != 0 or side_stretch.v != 0) {
         _ = side_stretch.step(now);
@@ -4334,6 +4493,8 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
         !w.lift.settled() or w.key_a.moving(now) or !side_stretch.settled() or !w.z.settled();
     const side_busy = !w.sel.settled() or w.sel_a.moving(now) or w.hot_t[1].moving(now) or !w.hov.settled() or w.hov_a.moving(now);
     for (w.pv) |s| busy = busy or !s.settled();
+    busy = busy or w.press_t.moving(now);
+    const down = w.press_t.at(now);
     var gliding = false;
     for (docs.items) |d| if (d.win == w) {
         // A card springing in or folding away fades with its size.
@@ -4370,12 +4531,12 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
         objc.CGContextTranslateCTM(ctx, side_w * (slid - 1), 0);
         if (slid < 1) objc.CGContextSetAlpha(ctx, slid * slid);
         drawSide(w, ctx, th, &k, dark, key, chrome(th, dark), if (slid < 1) slid * slid else 1, now);
-        hoverPill(ctx, th, w.hot_t[1].at(now), side_w - gap - 20, hy);
+        hoverPill(ctx, th, w.hot_t[1].at(now), if (w.press == 2) down else 0, side_w - gap - 20, hy);
         drawIcon(icon(.plus, dark, th), side_w - gap - 30, hy - 10, 20);
         objc.CGContextRestoreGState(ctx);
     }
     if (root != null and !conf.zen) {
-        hoverPill(ctx, th, w.hot_t[0].at(now), toggle_x, hy);
+        hoverPill(ctx, th, w.hot_t[0].at(now), if (w.press == 1) down else 0, toggle_x, hy);
         drawIcon(icon(.sidebar, dark, th), toggle_x - 10, hy - 10, 20);
     }
     drawDrag(w, ctx, th, now);
@@ -4825,7 +4986,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         const right = card.x + card.w - 10;
         objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = @max(right - card.x, 0), .h = head_h });
         // The traffic lights and the sidebar button sit on a card at the window's top left.
-        const lights_end: f64 = if (root != null) toggle_x + 22 else lights_x + 76;
+        const lights_end: f64 = if (root != null) toggle_x + 22 else tabs_from;
         drawTabs(d, ctx, th, &k, dark, key, @max(card.x + 14, if (d.org.y < 1) lights_end - d.org.x else 0), right, mono_y, now);
         k.flush();
         if (zt > 0.001) objc.CGContextEndTransparencyLayer(ctx);
@@ -4859,17 +5020,17 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
 }
 
 /// The sidebar button by the traffic lights, or the + at the sidebar's
-/// top right, under `p` in the view.
+/// top right, under `p` in the view: anywhere on its capsule.
 fn toolAt(w: *const Win, p: Point) ?Icon {
-    if (conf.zen or @abs(p.y - (gap + head_h / 2)) > 12) return null;
-    if (root != null and @abs(p.x - toggle_x) <= 12) return .sidebar;
-    if (sideShown(w) and @abs(p.x - (side_w - gap - 20)) <= 12) return .plus;
+    if (conf.zen or @abs(p.y - (gap + head_h / 2)) > 14) return null;
+    if (root != null and @abs(p.x - toggle_x) <= 14) return .sidebar;
+    if (sideShown(w) and @abs(p.x - (side_w - gap - 20)) <= 14) return .plus;
     return null;
 }
 
 /// Whether `p`, in the card's pane, is on the + after its tabs.
 fn onTabPlus(d: *const Doc, p: Point) bool {
-    return !conf.zen and d.tabbed.to == 1 and @abs(p.y - (gap + head_h / 2)) <= 12 and @abs(p.x - d.plus_x) <= 12;
+    return !conf.zen and d.tabbed.to == 1 and @abs(p.y - (gap + head_h / 2)) <= 14 and @abs(p.x - d.plus_x) <= 14;
 }
 
 /// Brings the header's slots in line with the window's tabs: a new tab
@@ -4905,11 +5066,12 @@ fn slotOf(d: *const Doc, id: u32) ?usize {
     return null;
 }
 
-/// True while a tab pops, folds, fades or the highlight springs.
+/// True while a tab pops, folds, fades, resizes or the highlight springs,
+/// or the + after the tabs fades from a click.
 fn tabsMoving(d: *const Doc, now: f64) bool {
     if (d.tabbed.moving(now) or d.tab_x.moving(now) or !d.hl[0].settled() or !d.hl[1].settled()) return true;
-    if (!d.opening.settled()) return true;
-    for (d.slots.items) |s| if (s.gone or !s.grow.settled() or !s.shift.settled() or s.hov.moving(now) or !s.dot.settled()) return true;
+    if (!d.opening.settled() or d.plus_down.moving(now)) return true;
+    for (d.slots.items) |s| if (s.gone or !s.grow.settled() or !s.shift.settled() or s.hov.moving(now) or !s.dot.settled() or !s.wid.settled()) return true;
     return false;
 }
 
@@ -4920,9 +5082,10 @@ const tab_shut = 18.0;
 const tab_space = 4.0;
 
 /// A tab's width at rest: its padding, tile, name and close button, and
-/// with one tab the unsaved dot after the name.
+/// with one tab the unsaved dot after the name. The name's part springs
+/// (`Slot.wid`), so a renamed tab eases to its new width.
 fn tabWidth(d: *const Doc, s: *const Slot, a: f64) f64 {
-    const nw = if (s.line != null) objc.CTLineGetTypographicBounds(s.line, null, null, null) else 0;
+    const nw = s.wid.x;
     const j = tabIndex(d, s.id);
     const dot: f64 = if (j != null and !s.gone and tabDirty(d, j.?)) 14 * (1 - a) else 0;
     return 2 * tab_pad * a + tileSize() + 7 + nw + tab_shut * a + dot;
@@ -4941,13 +5104,21 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
     const ts = tileSize();
     const hy = gap + head_h / 2;
     const pad = tab_pad * a;
-    for (d.slots.items) |*s| if (s.line == null) {
-        const j = tabIndex(d, s.id) orelse continue;
-        var nb: [48]u8 = undefined;
-        const nm = tabName(d, j, &nb);
-        s.line = uiLine(nm, name_font, 1e5);
-        s.icon = iconFor(if (tabPath(d, j) != null) nm else "");
-    };
+    for (d.slots.items) |*s| {
+        if (s.line == null) {
+            if (tabIndex(d, s.id)) |j| {
+                var nb: [48]u8 = undefined;
+                const nm = tabName(d, j, &nb);
+                s.line = uiLine(nm, tab_bold, 1e5);
+                s.thin = uiLine(nm, tab_font, 1e5);
+                s.icon = iconFor(if (tabPath(d, j) != null) nm else "");
+            }
+        }
+        const nw = if (s.line != null) objc.CTLineGetTypographicBounds(s.line, null, null, null) else 0;
+        if (s.sized) s.wid.aim(nw, now) else s.wid.snap(nw);
+        s.sized = true;
+        _ = s.wid.step(now);
+    }
 
     // Squeeze the tabs to a common cap when they don't all fit, down to
     // enough for the tile and a few letters.
@@ -5036,22 +5207,21 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
     const plus_a = std.math.clamp(2 * a - 1, 0, 1);
     var nx = end + 8;
     if (folder_a > 0.01) {
-        // Too long a folder loses its start, keeping the part nearest the file.
         const note_w = if (d.note.len > 0) f(d.note.len + 2) * cw else 0;
         const head_room = @max(@floor(x1 - nx - note_w), 24);
-        if (d.head != null and d.head_w != head_room) {
-            objc.CFRelease(d.head.?);
-            d.head = null;
-        }
-        if (d.head == null) {
-            var pbuf: [std.fs.max_path_bytes]u8 = undefined;
-            const folder = if (d.path) |p| std.fs.path.dirname(p) orelse "/" else "";
-            d.head = uiLineCut(tilde(&pbuf, folder), side_font, head_room, 0);
+        // Made again when the room changes or `dropHead` clears it; a file
+        // at the top of the open folder has none.
+        if (d.head_w != head_room) {
+            if (d.head) |l| objc.CFRelease(l);
+            d.head = headLine(d, head_room);
             d.head_w = head_room;
         }
         objc.CGContextSaveGState(ctx);
         objc.CGContextSetAlpha(ctx, folder_a);
-        nx += drawLine(ctx, d.head, th.muted, nx + 6 * (1 - folder_a), @round(hy + name_off)) + 2 * cw;
+        const fx = nx + 6 * (1 - folder_a);
+        const fw = drawLine(ctx, d.head, th.muted, fx, @round(hy + path_off));
+        for (d.head_marks[0..d.head_n]) |m| drawIcon(icon(.crumb, dark, th), fx + m - 5, hy - 5, 10);
+        if (fw > 0) nx += fw + 2 * cw;
         objc.CGContextRestoreGState(ctx);
     }
     d.plus_x = if (a > 0.5) end + 14 else -100;
@@ -5060,7 +5230,7 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
         objc.CGContextSetAlpha(ctx, plus_a);
         d.plus_t.aim(if (d.plus_on) 1 else 0, now);
         const px = end + 4 - 8 * (1 - plus_a);
-        hoverPill(ctx, th, d.plus_t.at(now), px + 10, hy);
+        hoverPill(ctx, th, d.plus_t.at(now), d.plus_down.at(now), px + 10, hy);
         drawIcon(icon(.plus, dark, th), px, hy - 10, 20);
         objc.CGContextRestoreGState(ctx);
         nx = @max(nx, end + 36);
@@ -5071,11 +5241,12 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
 
 /// One tab of `d`'s header, where it lays out plus its slide; `a` is how
 /// far the header has turned into tabs and `cap` the squeezed tabs' width.
+/// Its name lights up, from regular at 0.62 to medium at full ink, as the
+/// active tab's highlight lands on it, and its contents grow in with it.
 fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, key: bool, a: f64, cap: f64, x0: f64, x1: f64, now: f64, faint: bool, lifted: bool) void {
     const hy = gap + head_h / 2;
     const ts = tileSize();
     const pad = tab_pad * a;
-    const ink = if (key) th.fg else th.muted;
     const sx = s.x + s.shift.x;
     if (s.w < 0.5 or sx > x1 or sx + s.w < x0 - pad) return;
     const j = if (s.gone) null else tabIndex(d, s.id);
@@ -5098,6 +5269,13 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, key: bool, 
         const ma = d.win.menu_a.at(now);
         if (ma > 0.01) menuMark(ctx, th, ma, sx, hy - 11, s.w, 22, 7);
     }
+    // The icon, name, dot and × grow from 0.92 on the tab's spring.
+    const sc = 0.92 + 0.08 * std.math.clamp(s.grow.x, 0, 1.2);
+    if (@abs(sc - 1) > 0.001) {
+        objc.CGContextTranslateCTM(ctx, sx + s.w / 2, hy);
+        objc.CGContextScaleCTM(ctx, sc, sc);
+        objc.CGContextTranslateCTM(ctx, -(sx + s.w / 2), -hy);
+    }
     tile(s.icon, sx + pad, @round(hy - ts / 2));
     const nx = sx + pad + ts + 7;
     const nw = if (s.line != null) objc.CTLineGetTypographicBounds(s.line, null, null, null) else 0;
@@ -5111,12 +5289,26 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, key: bool, 
     const room_w = @floor(cap - 2 * pad - ts - 7 - tab_shut * a);
     const squeezed = j != null and room_w + 1 < nw;
     if (squeezed and room_w != s.cut_w) {
-        if (s.cut) |l| objc.CFRelease(l);
+        for ([_]*Id{ &s.cut, &s.thin_cut }) |l| if (l.*) |old| objc.CFRelease(old);
         var nb: [48]u8 = undefined;
-        s.cut = uiLine(tabName(d, j.?, &nb), name_font, room_w);
+        const nm = tabName(d, j.?, &nb);
+        s.cut = uiLine(nm, tab_bold, room_w);
+        s.thin_cut = uiLine(nm, tab_font, room_w);
         s.cut_w = room_w;
     }
-    _ = drawLine(ctx, if (squeezed and s.cut != null) s.cut else s.line, if (on or hovered or a < 0.5) ink else th.muted, nx, @round(hy + name_off));
+    // How much the highlight covers this tab; a lone tab is the window's title.
+    const lit = if (a < 0.5) 1 else 1 - std.math.clamp(@abs(d.hl[0].x - sx) / @max(s.w, 1), 0, 1);
+    const ink_a = if (key) 0.62 + 0.38 * @max(lit, hv) else 1;
+    const ink = if (key) th.fg else th.muted;
+    const by = @round(hy + name_off);
+    if (lit < 0.99) {
+        objc.CGContextSetAlpha(ctx, alpha * ink_a * (1 - lit));
+        _ = drawLine(ctx, if (squeezed and s.thin_cut != null) s.thin_cut else s.thin, ink, nx, by);
+    }
+    if (lit > 0.01) {
+        objc.CGContextSetAlpha(ctx, alpha * ink_a * lit);
+        _ = drawLine(ctx, if (squeezed and s.cut != null) s.cut else s.line, ink, nx, by);
+    }
     objc.CGContextRestoreGState(ctx);
     // The unsaved dot sits after the name with one tab and slides into
     // the close button's place with more; hovering trades it for the ×.
@@ -5127,7 +5319,7 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, key: bool, 
     // On the active tab the × and the dot trade places as the dot comes and goes.
     const cross = a * @max(hv, if (on) 1 - @min(dv, 1) else 0);
     if (dv > 0.01 and cross < 0.5) {
-        const dx = nx + nw + 9 + (cx - nx - nw - 9) * a;
+        const dx = nx + s.wid.x + 9 + (cx - nx - s.wid.x - 9) * a;
         const r = 3 * dv;
         pill(ctx, th.caret, (1 - 2 * cross) * @min(dv, 1), dx - r, hy - r, 2 * r, 2 * r, r);
     }
@@ -5289,7 +5481,7 @@ fn dropRect(dr: Drop, gw: f64) Rect {
 fn titleSpot(dr: Drop) Point {
     const r = dropRect(dr, 0);
     // A card at the window's top left clears the traffic lights.
-    const lights_end: f64 = if (root != null) toggle_x + 22 else lights_x + 76;
+    const lights_end: f64 = if (root != null) toggle_x + 22 else tabs_from;
     const x = if (r.y < gap + 1) @max(r.x + 14, lights_end) else r.x + 14;
     return .{ .x = x, .y = r.y + head_h / 2 - 11 };
 }
@@ -5521,24 +5713,31 @@ fn setLights(w: *Win, a: f64) void {
     }
 }
 
-/// Moves the traffic lights in and down so they sit on the header's line.
-/// AppKit puts them back whenever it lays out the title bar, so every draw
-/// checks.
-fn placeLights(w: *Win) void {
+/// Reads where AppKit put the traffic lights, which it centers in the
+/// window's empty toolbar, so the header's middle sits on their line and
+/// its tabs start past them; and the window's corner radius, so the cards'
+/// corners nest inside it a gap in. Full screen keeps the last values.
+fn fitTitlebar(w: *Win) void {
     if (msg(usize, w.window, "styleMask", .{}) & (1 << 14) != 0) return;
-    const close = msg(Id, w.window, "standardWindowButton:", .{@as(usize, 0)});
-    if (close == null) return;
-    const at = msg(Rect, close, "frame", .{});
-    const bar = msg(Rect, msg(Id, close, "superview", .{}), "bounds", .{});
-    const dx = lights_x - at.x;
-    const dy = @round(bar.h - (gap + head_h / 2) - at.h / 2) - at.y;
-    if (dx == 0 and dy == 0) return;
-    for (0..3) |i| {
-        const btn = msg(Id, w.window, "standardWindowButton:", .{i});
-        if (btn == null) continue;
-        const fr = msg(Rect, btn, "frame", .{});
-        msg(void, btn, "setFrameOrigin:", .{Point{ .x = fr.x + dx, .y = fr.y + dy }});
-    }
+    const last = msg(Id, w.window, "standardWindowButton:", .{@as(usize, 2)});
+    if (last == null) return;
+    const at = msg(Rect, last, "convertRect:toView:", .{ msg(Rect, last, "bounds", .{}), w.view });
+    head_h = std.math.clamp(@round(2 * (at.y + at.h / 2 - gap)), 28, 44);
+    top_h = gap + head_h + 6;
+    toggle_x = at.x + at.w + 27;
+    tabs_from = at.x + at.w + 22;
+    // AppKit's own radius for this window, private, so asked for with care;
+    // macOS 26's radius for a window with a toolbar otherwise.
+    const frame = msg(Id, w.view, "superview", .{});
+    const ask = objc.sel_registerName("_getCachedWindowCornerRadius");
+    const asked: f64 = if (frame != null and msg(bool, frame, "respondsToSelector:", .{ask})) msg(f64, frame, "_getCachedWindowCornerRadius", .{}) else 0;
+    card_radius = std.math.clamp((if (asked >= 1) asked else 26) - gap, 6, 24);
+}
+
+/// In full screen the empty toolbar hides with the menu bar, so the cards
+/// keep the top of the screen.
+fn fullScreenOptions(_: Id, _: Sel, _: Id, proposed: usize) callconv(.c) usize {
+    return proposed | (1 << 11);
 }
 
 // ---- NSView methods ----
@@ -5724,6 +5923,8 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     endDrag(w);
     endFly(w);
     if (toolAt(w, p)) |t| {
+        w.press = if (t == .sidebar) 1 else 2;
+        w.press_t.snap(1);
         if (t == .sidebar) toggleSidebar() else newTab(w.focus);
         return;
     }
@@ -5757,7 +5958,10 @@ fn cardDown(d: *Doc, p: Point, ev: Id) void {
     const by = bottom(d);
     d.note = "";
     if (p.y < top_h) {
-        if (onTabPlus(d, p)) return newTab(d);
+        if (onTabPlus(d, p)) {
+            d.plus_down.snap(1);
+            return newTab(d);
+        }
         const hit = tabAt(d, p) orelse loneTab(d, p) orelse return titleStrip(d.win, ev);
         if (hit.close) return closeTab(d, hit.j);
         showTab(d, hit.j);
@@ -5898,10 +6102,23 @@ fn mouseExited(self: Id, _: Sel, _: Id) callconv(.c) void {
     }
 }
 
+/// The mouse lets go of a button it pressed: the button's fill fades.
+fn letGo(w: *Win) void {
+    const now = CACurrentMediaTime();
+    var held = w.press_t.to != 0;
+    w.press_t.aim(0, now);
+    for (docs.items) |d| if (d.win == w and d.plus_down.to != 0) {
+        held = true;
+        d.plus_down.aim(0, now);
+    };
+    if (held) msg(void, w.view, "setNeedsDisplay:", .{true});
+}
+
 /// Ends a drag of the sidebar's edge by saving the width, so new windows
 /// and the next launch use it, or of a gap between cards.
 fn mouseUp(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
+    letGo(w);
     if (w.tdrag) |t| {
         w.tdrag = null;
         startFly(w, t);
@@ -6537,6 +6754,8 @@ pub fn setup() void {
     c.method("performDragOperation:", @ptrCast(&performDrag), "c@:@");
     c.method("windowShouldClose:", @ptrCast(&windowShouldClose), "c@:@");
     c.method("windowWillClose:", @ptrCast(&windowWillClose), "v@:@");
+    c.method("window:willUseFullScreenPresentationOptions:", @ptrCast(&fullScreenOptions), "Q@:@Q");
+    c.method("retitle:", @ptrCast(&retitleNow), "v@:@");
     c.method("tick:", @ptrCast(&tick), "v@:@");
     c.method("barHold:", @ptrCast(&barHold), "v@:@");
     c.method("saveDrafts:", @ptrCast(&saveDraftsNow), "v@:@");
