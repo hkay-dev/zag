@@ -14,6 +14,8 @@ pub const Buffer = struct {
     redos: std.ArrayList(Edit) = .empty,
     seq: u64 = 0,
     saved: u64 = 0,
+    /// Counts every change to the text, undo and redo too.
+    changes: u64 = 0,
     /// The first line changed since the syntax cache last looked.
     touched: usize = 0,
     /// Screen rows of each line for soft wrap, kept by the view; empty while
@@ -140,6 +142,7 @@ pub const Buffer = struct {
         const first = b.lineOf(start);
         const last = b.lineOf(end);
         try b.text.replaceRange(gpa, start, end - start, new);
+        b.changes += 1;
 
         var added: std.ArrayList(u32) = .empty;
         defer added.deinit(gpa);

@@ -37,6 +37,7 @@ fn didFinishLaunching(_: Id, _: Sel, _: Id) callconv(.c) void {
         } else view.open(a, view.blankDoc());
     }
     if (view.count() == 0 and !view.restoreSession()) _ = view.newDoc();
+    view.adoptDrafts();
     // With no folder from the terminal or the last session, use the home folder.
     if (view.root == null) if (std.c.getenv("HOME")) |h| {
         if (view.gpa.dupe(u8, std.mem.span(h))) |dir| view.setRoot(dir) else |_| {}

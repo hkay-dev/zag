@@ -45,8 +45,9 @@ Ghostty's terminal core. ze drops all three.
   With settings, wrap, replace, motion, sessions and the sidebar in, the binary was about 162 KB;
   the command palette, appearance and the sidebar's system font took it to 183 KB (6 KB of code,
   the rest a page step).
-- **Icons are SF Symbols.** The sidebar's icons come from macOS through
-  `imageWithSystemSymbolName:`, tinted with the theme's colors, so ze ships no images for them.
+- **Icons come from macOS.** Files and folders show the Mac's own icons from `NSWorkspace`
+  (`iconForContentType:`, one per extension, kept) and the chevrons and buttons are SF Symbols
+  tinted with the theme's muted color, so ze ships no images for them (zig-editor#a8g8).
 - **The sidebar's names are off the grid** (zig-editor#5teh). They are `CTLine`s in the
   system font, made once per row and kept until the tree or the font changes, so a scroll frame
   draws them without laying anything out. They take the context's fill color, so a theme change

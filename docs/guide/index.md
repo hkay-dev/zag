@@ -13,10 +13,9 @@ ze is a small text editor. A window shows files on cards with rounded corners th
 in from the window's edges. A window starts with one card and can split into more, side by side
 or stacked (see Cards), and each card keeps the files you open in it as tabs.
 When you've opened a folder, a sidebar on the left lists its files. With one file, the card's
-header shows the file's kind as a small colored icon, its name, a dot when there are unsaved
-changes, its folder, and the line and column of the caret on the right. With more, it shows tabs
-instead (see Tabs). When you find, replace, jump to a line or open a file, a prompt line opens at
-the bottom of the card.
+header shows the file's icon, its name, a dot when there are unsaved changes, and its folder.
+With more, it shows tabs instead (see Tabs). When you find, replace, jump to a line or open a
+file, a prompt line opens at the bottom of the card.
 
 ze follows the Mac's light or dark setting unless you pick one, with a theme for each (see Themes). Things move
 a little instead of jumping: the caret glides to each new spot and blinks with a soft fade after a
@@ -95,7 +94,9 @@ in beside it with a little bounce, and a **+** shows after the last one.
 - The active tab, and any tab under the mouse, shows a **×** that closes it. A tab with unsaved
   changes shows a dot there instead until you point at it. Closing one folds it shut and the tabs
   after it slide over.
-- **File > New Tab** (⌘T) or the **+** opens an untitled file in a new tab.
+- **File > New Tab** (⌘T) or the **+** opens an untitled file in a new tab. It stays open, even
+  while it's empty, until you close it. Its tab and the window take their name from its first
+  line of text, and it's "Untitled" while it has none.
 - **File > Close Tab** (⌘W) closes the tab on show, asking first when it has unsaved changes. The
   tab to its right takes its place. Closing the last tab folds its card away, or closes the
   window when it's the only card.
@@ -137,9 +138,10 @@ The left side of each window lists the files of ze's folder, folders first. That
 started in from a terminal, or the one you opened last. Started from the Dock or Finder with no
 folder from last time, it's your home folder. At the top, a small line shows the folder that
 holds it, then the folder's own name in bold. Files and folders whose names start with a dot are
-left out. Each row has an icon for its kind on a small tile of the kind's color: folder, code,
-Markdown, data, image or plain text. Names are in the Mac's system font and end in "…" when they
-don't fit. The window's file is marked with a soft rounded highlight with a thin outline.
+left out. Each row has the Mac's own icon for a folder or for the file's kind, the same ones
+Finder shows. Names are in the Mac's system font and end in "…" when they don't fit. The file on
+show in the focused card is marked with a soft rounded highlight with a thin outline, and its
+name is in bold.
 
 The folder's parent and name stay pinned at the top while the rows scroll. An open folder whose
 files fill the top of the list pins under the name too, up to three levels deep, until the next
@@ -167,10 +169,18 @@ The sidebar reads the disk again when you come back to ze, so new and deleted fi
 When you quit ze with files open and later start it without naming a file (from the Dock, say),
 it reopens those files in the same windows, at the same sizes and places, and brings back the
 folder you had open. Each window comes back with its cards in the same places and sizes, each
-with its tabs in order and the same tab on show. Untitled tabs aren't kept, and a file that's gone
-drops out of its card.
+with its tabs in order and the same tab on show. A file that's gone drops out of its card.
 Starting it with a file, like `ze notes.txt`, opens just that file. Close every window before
 quitting and the next start gives you one empty window.
+
+### Drafts
+
+An untitled file saves itself as a draft a second after you stop typing, so there's no need to
+save a scratchpad. It shows no unsaved dot, quitting doesn't ask about it, and it comes back in
+its tab next time. If ze ever stops without quitting, its drafts come back as tabs in the front
+window at the next start, even when that start opens other files. Saving it to a file with ⌘S,
+or closing its tab and choosing **Don't Save**, deletes the draft. Drafts live in
+`~/Library/Application Support/ze/Drafts`.
 
 ## Edit
 
@@ -206,8 +216,9 @@ applies to every window and is remembered.
 
 **View > Focus** keeps the caret's range bright and fades the rest toward the page color:
 **Off**, **Line** (the whole logical line, including wrapped rows), **Sentence** or **Paragraph**.
-A sentence ends at `.`, `!` or `?`; a paragraph sits between blank lines. The bright range eases
-after the caret, while selected text and the caret keep their normal colors. The choice applies
+A sentence ends at `.`, `!` or `?`; a paragraph sits between blank lines. When the caret moves to
+another range, the old range fades out and the new one fades in, evenly and all at once, while
+selected text and the caret keep their normal colors. The choice applies
 to every window and is remembered.
 
 ## Typewriter scrolling
@@ -263,10 +274,12 @@ When another app changes a file that's open in ze, ze notices the next time you 
 it in, so a crash halfway through a save never leaves a half-written file. The file keeps its
 permissions.
 
-Closing a window, or quitting, with unsaved changes asks whether to save them first. When a
-window holds more than one unsaved file in its tabs, one question covers them all: **Save All**
-saves each one (asking for a name for any untitled file), **Don't Save** drops the changes, and
-**Cancel** keeps the window open.
+Closing a window with unsaved changes, or quitting with unsaved changes to files, asks whether to
+save them first. Closing also asks about untitled files with text in them, since their drafts go
+with the window; quitting keeps the drafts instead (see Drafts). When a window holds more than
+one of these in its tabs, one question covers them all: **Save All** saves each one (asking for a
+name for any untitled file), **Don't Save** drops the changes, and **Cancel** keeps the window
+open.
 
 ## Syntax colors
 
@@ -326,8 +339,7 @@ header's fainter words), `keyword`, `string`, `comment`, `number`, `function`, `
 `selection`, `line` (the caret's line), `caret`, `match` (other find matches), `panel` (the quick
 open list), `rule` (the line under the header and above the prompt line and the quick open list)
 and `header` (the card's header, a step lighter than the text on dark themes and a step darker on
-light ones). The sidebar's icon tiles take their colors from `function`, `string`, `keyword`,
-`number` and `type`.
+light ones).
 Either mode can also use any theme from the file, so `light-theme = one-dark` keeps ze dark all
 the time. A line ze doesn't understand is skipped, and a missing line keeps its default. The menus,
 the size shortcuts and the Font panel rewrite their own line in the file and leave the rest of it

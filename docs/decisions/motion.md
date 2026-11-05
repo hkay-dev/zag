@@ -30,6 +30,9 @@ showing and hiding, and later tabs and split panes. A jump is a bug.
 - A tab dragged over another card's tabs opens a gap there (`Doc.opening`) that the tabs slide
   aside for. The drop preview springs between places and grows in from a little smaller; the
   tab's copy under the mouse fades in once it leaves its row.
+- Focus mode crossfades instead of moving: when the caret moves to another sentence, line or
+  paragraph, the old range dims and the new one brightens, every letter at once, at an even rate
+  over 0.25 s (zig-editor#xgxf). Typing that only stretches the range doesn't fade.
 - `scenery()` says whether a window still has frames to draw. Each new animation adds its clause
   there; leaving it out shows as an animation that freezes until the next event.
 - Layout uses where things end up, and only drawing and hit tests use where they are now. The

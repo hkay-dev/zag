@@ -250,7 +250,7 @@ const Ink = struct {
     glyphs: [512]u16 = undefined,
     pos: [512]Point = undefined,
     n: usize = 0,
-    focus: ?[2]f64 = null,
+    focus: ?Focus = null,
     offset: usize = 0,
     selected: [2]usize = .{ 0, 0 },
 
@@ -292,10 +292,12 @@ const Ink = struct {
                 const cp: u21 = if (s[i] < 0x80) s[i] else editor.decode(s, i).cp;
                 const kind: syntax.Kind = if (kinds) |ks| ks[i] else .text;
                 var paint = if (kinds != null) th.kinds[@intFromEnum(kind)] else color;
-                if (k.focus) |range| {
+                if (k.focus) |fo| {
                     const at = k.offset + i;
                     if (at < k.selected[0] or at >= k.selected[1]) {
-                        const a = 0.22 + 0.78 * std.math.clamp(@min(f(at) - range[0] + 1, range[1] - f(at)), 0, 1);
+                        const in_new: f64 = if (at >= fo.new[0] and at < fo.new[1]) 1 else 0;
+                        const in_old: f64 = if (at >= fo.old[0] and at < fo.old[1]) 1 else 0;
+                        const a = 0.22 + 0.78 * (in_new * fo.t + in_old * (1 - fo.t));
                         for (&paint, th.bg) |*v, bg| v.* = bg + (v.* - bg) * a;
                     }
                 }
@@ -307,6 +309,12 @@ const Ink = struct {
         return (col - col0) -| skip;
     }
 };
+
+/// Focus mode's lit text: the byte range it's fading to, the one it's
+/// fading from, and how far along the fade is.
+const Focus = struct { new: [2]usize, old: [2]usize, t: f64 };
+/// Focus mode fades from one span to the next at an even rate.
+const focus_time = 0.25;
 
 fn f(n: usize) f64 {
     return @floatFromInt(n);
@@ -475,7 +483,8 @@ const Slot = struct {
     /// The name cut short with an ellipsis to `cut_w`, when the tab is squeezed.
     cut: Id = null,
     cut_w: f64 = -1,
-    which: Icon = .text,
+    /// Its file kind's icon, from `iconFor`.
+    icon: Id = null,
     gone: bool = false,
     /// Where it last laid out, before `shift`.
     x: f64 = 0,
@@ -572,7 +581,7 @@ fn blink(caret: Id) void {
 /// list still has frames to draw.
 fn scenery(d: *const Doc, now: f64) bool {
     const stretched = d.relax and (d.ov[0] != 0 or d.ov[1] != 0);
-    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.focus_lo.moving(now) or d.focus_hi.moving(now) or d.panel.moving(now) or d.lit.moving(now) or
+    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or now < d.focus_t0 + focus_time or d.panel.moving(now) or d.lit.moving(now) or
         d.prompt_t.moving(now) or d.plus_t.moving(now) or !d.pick_s.settled() or tabsMoving(d, now) or
         now < d.load_t + load_time or (d.had_sel and now < d.sel_t0 + fade_time) or now < d.bar_t0 + bar_hold + bar_time;
 }
@@ -660,10 +669,16 @@ const Page = struct {
     sy: f64,
     /// Its tab's id, which stays with the file while the window holds it.
     id: u32,
+    /// An untitled file's draft, saved as it changes, and the
+    /// `buf.changes` it last saved.
+    draft: ?[:0]u8 = null,
+    drafted: u64 = 0,
 
+    /// Closing its tab: an untitled file's draft goes too.
     fn deinit(p: *Page) void {
         p.ed.deinit(gpa);
         if (p.path) |s| gpa.free(s);
+        dropDraft(&p.draft);
     }
 };
 
@@ -706,6 +721,9 @@ const Doc = struct {
     plus_t: Tween = .{ .dur = fade_time },
     /// Absolute path, or null while untitled.
     path: ?[:0]u8 = null,
+    /// While untitled, where its draft is kept; see `Page.draft`.
+    draft: ?[:0]u8 = null,
+    drafted: u64 = 0,
     lang: *const syntax.Lang = &syntax.plain,
     /// The window it's a card in, and that window's NSWindow and view.
     win: *Win = undefined,
@@ -734,8 +752,10 @@ const Doc = struct {
     /// The caret line's band, in page coordinates.
     band: Tween = .{ .dur = caret_time },
     band_on: bool = false,
-    focus_lo: Tween = .{ .dur = caret_time },
-    focus_hi: Tween = .{ .dur = caret_time },
+    /// Focus mode's lit span, the one it's fading from, and when the fade began.
+    focus_new: [2]usize = .{ 0, 0 },
+    focus_old: [2]usize = .{ 0, 0 },
+    focus_t0: f64 = 0,
     focus_on: bool = false,
     had_sel: bool = false,
     sel_t0: f64 = 0,
@@ -815,20 +835,26 @@ const Doc = struct {
     head: Id = null,
     head_w: f64 = -1,
 
+    /// An untitled file goes by its first line, kept in `title` as it's typed.
+    title: [48]u8 = undefined,
+    title_len: usize = 0,
+
     fn name(d: *const Doc) []const u8 {
-        return if (d.path) |p| std.fs.path.basename(p) else "untitled";
+        return if (d.path) |p| std.fs.path.basename(p) else if (d.title_len > 0) d.title[0..d.title_len] else "Untitled";
     }
 
-    /// Unsaved changes in the file on show or any page.
+    /// Unsaved changes to a file, on show or in any page. Untitled files
+    /// keep themselves as drafts, so they don't count.
     fn dirty(d: *const Doc) bool {
-        if (d.ed.buf.dirty()) return true;
-        for (d.pages.items) |p| if (p.ed.buf.dirty()) return true;
+        if (d.path != null and d.ed.buf.dirty()) return true;
+        for (d.pages.items) |p| if (p.path != null and p.ed.buf.dirty()) return true;
         return false;
     }
 
     fn deinit(d: *Doc) void {
         d.ed.deinit(gpa);
         if (d.path) |p| gpa.free(p);
+        dropDraft(&d.draft);
         if (d.list) |*l| l.deinit();
         d.prompt.deinit(gpa);
         d.with.deinit(gpa);
@@ -886,6 +912,11 @@ const Win = struct {
     /// tree or the focused file changes), the row it marked last draw, where
     /// it springs to in the list, and how far it's faded in.
     sel_row: ?usize = null,
+    /// The selected row's name in bold, made for row `bold_row` of tree
+    /// `bold_gen`. Owned: CFRelease it.
+    bold: Id = null,
+    bold_row: usize = 0,
+    bold_gen: u32 = 0,
     sel_was: ?usize = null,
     sel_gen: u32 = 0,
     sel_id: u32 = 0,
@@ -1066,16 +1097,24 @@ fn isBlank(d: *const Doc) bool {
     return d.path == null and d.ed.text().len == 0;
 }
 
+/// The card's only tab is an empty untitled file, which the next file it
+/// opens takes the place of. An empty one beside other tabs stays until
+/// it's closed.
+fn replaceable(d: *const Doc) bool {
+    return isBlank(d) and d.pages.items.len == 0;
+}
+
 /// Sets the window's file aside as a page in its tab's place, for
 /// `install` to replace right after, which goes in a new tab to its right
-/// when `after`. An empty untitled file is dropped instead. False when it
+/// when `after`. A `replaceable` file is dropped instead. False when it
 /// can't.
 fn park(d: *Doc, after: bool) bool {
-    if (isBlank(d)) {
+    if (replaceable(d)) {
         d.ed.deinit(gpa);
+        dropDraft(&d.draft);
         return true;
     }
-    d.pages.insert(gpa, d.at, .{ .ed = d.ed, .path = d.path, .lang = d.lang, .stamp = d.stamp, .sx = d.sx, .sy = d.sy, .id = d.id }) catch return false;
+    d.pages.insert(gpa, d.at, asPage(d)) catch return false;
     rememberPlace(d);
     if (after) d.at += 1;
     return true;
@@ -1090,6 +1129,8 @@ fn install(d: *Doc, pg: Page) void {
     d.sx = pg.sx;
     d.sy = pg.sy;
     d.id = pg.id;
+    d.draft = pg.draft;
+    d.drafted = pg.drafted;
     d.center_at = std.math.maxInt(usize);
     d.states.clearRetainingCapacity();
     d.vfirst.clearRetainingCapacity();
@@ -1111,19 +1152,14 @@ fn install(d: *Doc, pg: Page) void {
     refreshAll();
 }
 
-/// Shows page `i` of the window. The file it had keeps its tab.
+/// Shows page `i` of the window. The file it had keeps its tab, even an
+/// empty untitled one: it's set aside while page `i` is still there, so
+/// `park` never drops it.
 fn showPage(d: *Doc, i: usize) void {
-    const at0 = d.at;
-    const tab = if (i < at0) i else i + 1;
-    const blank = isBlank(d);
-    const pg = d.pages.orderedRemove(i);
-    if (i < at0) d.at -= 1;
-    if (!park(d, false)) {
-        d.pages.insert(gpa, i, pg) catch {};
-        d.at = at0;
-        return;
-    }
-    d.at = if (blank and tab > at0) tab - 1 else tab;
+    const tab = if (i < d.at) i else i + 1;
+    if (!park(d, false)) return;
+    const pg = d.pages.orderedRemove(tab);
+    d.at = tab;
     install(d, pg);
     checkOutside(d);
 }
@@ -1143,12 +1179,33 @@ fn tabId(d: *const Doc, j: usize) u32 {
     return if (j == d.at) d.id else d.pages.items[pageOf(d, j)].id;
 }
 
+fn tabDraft(d: *const Doc, j: usize) ?[]const u8 {
+    return if (j == d.at) d.draft else d.pages.items[pageOf(d, j)].draft;
+}
+
+/// The file on show as a page, for moving it; the card still points at it.
+fn asPage(d: *const Doc) Page {
+    return .{ .ed = d.ed, .path = d.path, .lang = d.lang, .stamp = d.stamp, .sx = d.sx, .sy = d.sy, .id = d.id, .draft = d.draft, .drafted = d.drafted };
+}
+
 fn tabPath(d: *const Doc, j: usize) ?[]const u8 {
     return if (j == d.at) d.path else d.pages.items[pageOf(d, j)].path;
 }
 
+/// Tab `j` shows the dot of unsaved changes: a file with edits. An
+/// untitled file keeps itself as a draft, so it never does.
 fn tabDirty(d: *const Doc, j: usize) bool {
-    return if (j == d.at) d.ed.buf.dirty() else d.pages.items[pageOf(d, j)].ed.buf.dirty();
+    return tabPath(d, j) != null and if (j == d.at) d.ed.buf.dirty() else d.pages.items[pageOf(d, j)].ed.buf.dirty();
+}
+
+/// Closing tab `j` would lose something: edits to a file, or an untitled
+/// file's text, whose draft goes with it.
+fn tabLoses(d: *const Doc, j: usize) bool {
+    return if (j == d.at) loses(d.path, &d.ed) else loses(d.pages.items[pageOf(d, j)].path, &d.pages.items[pageOf(d, j)].ed);
+}
+
+fn loses(path: ?[:0]const u8, ed: *const Editor) bool {
+    return if (path == null) ed.text().len > 0 else ed.buf.dirty();
 }
 
 fn tabIndex(d: *const Doc, id: u32) ?usize {
@@ -1185,20 +1242,14 @@ fn newTab(d: *Doc) void {
 fn closeTab(d: *Doc, at: usize) void {
     if (tabCount(d) == 1) {
         if (d.win.cards.pane != null) return msg(void, d.window, "performClose:", .{@as(Id, null)});
-        if (d.ed.buf.dirty() and !keepOrDrop(d)) return;
+        if (loses(d.path, &d.ed) and !keepOrDrop(d)) return;
         return foldCard(d);
     }
     var j = at;
-    if (tabDirty(d, j)) {
+    if (tabLoses(d, j)) {
         showTab(d, j);
         j = d.at;
         if (!keepOrDrop(d)) return;
-        // Showing it dropped an empty untitled tab, so it was the last one.
-        if (tabCount(d) == 1) {
-            d.ed.buf.markSaved();
-            if (d.win.cards.pane != null) return msg(void, d.window, "performClose:", .{@as(Id, null)});
-            return foldCard(d);
-        }
     }
     if (j != d.at) {
         var pg = d.pages.orderedRemove(pageOf(d, j));
@@ -1210,6 +1261,7 @@ fn closeTab(d: *Doc, at: usize) void {
     d.ed.deinit(gpa);
     if (d.path) |p| gpa.free(p);
     d.path = null;
+    dropDraft(&d.draft);
     const next = if (d.at < d.pages.items.len) d.at else d.at - 1;
     const pg = d.pages.orderedRemove(next);
     d.at = next;
@@ -1324,8 +1376,9 @@ fn takeTab(d: *Doc, j: usize) ?Page {
     }
     var blank: ?Editor = null;
     if (tabCount(d) == 1) blank = Editor.init(gpa, "") catch return null;
-    const pg: Page = .{ .ed = d.ed, .path = d.path, .lang = d.lang, .stamp = d.stamp, .sx = d.sx, .sy = d.sy, .id = d.id };
+    const pg = asPage(d);
     d.path = null;
+    d.draft = null;
     if (blank) |ed| {
         install(d, .{ .ed = ed, .path = null, .lang = &syntax.plain, .stamp = null, .sx = 0, .sy = 0, .id = newId() });
     } else {
@@ -1633,16 +1686,18 @@ fn alert(text: []const u8, detail: []const u8) void {
 }
 
 /// Asks to save the window's unsaved files: the one on show and its pages.
+/// Closing the window asks about untitled files' text too, since their
+/// drafts go with it; quitting keeps the drafts for next time and doesn't.
 /// False when the user cancels.
-fn settle(d: *Doc) bool {
-    var n: usize = @intFromBool(d.ed.buf.dirty());
+fn settle(d: *Doc, quit: bool) bool {
+    var n: usize = @intFromBool(asks(quit, d.path, &d.ed));
     var page: usize = 0;
-    for (d.pages.items, 0..) |p, i| if (p.ed.buf.dirty()) {
+    for (d.pages.items, 0..) |*p, i| if (asks(quit, p.path, &p.ed)) {
         n += 1;
         page = i;
     };
     if (n == 0) return true;
-    if (n == 1 and !d.ed.buf.dirty()) showPage(d, page);
+    if (n == 1 and !asks(quit, d.path, &d.ed)) showPage(d, page);
     front(d);
     const a = objc.new("NSAlert");
     var buf: [300]u8 = undefined;
@@ -1658,27 +1713,31 @@ fn settle(d: *Doc) bool {
     const r = msg(isize, a, "runModal", .{});
     msg(void, a, "release", .{});
     return switch (r) {
-        1000 => saveAll(d),
+        1000 => saveAll(d, quit),
         1001 => true,
         else => false,
     };
 }
 
-/// Saves the file on show, then each unsaved page in turn.
-fn saveAll(d: *Doc) bool {
-    if (d.ed.buf.dirty() and !save(d, false)) return false;
+fn asks(quit: bool, path: ?[:0]const u8, ed: *const Editor) bool {
+    return if (quit) path != null and ed.buf.dirty() else loses(path, ed);
+}
+
+/// Saves the file on show, then each page `settle` asked about in turn.
+fn saveAll(d: *Doc, quit: bool) bool {
+    if (asks(quit, d.path, &d.ed) and !save(d, false)) return false;
     while (true) {
-        const i = for (d.pages.items, 0..) |p, j| {
-            if (p.ed.buf.dirty()) break j;
+        const i = for (d.pages.items, 0..) |*p, j| {
+            if (asks(quit, p.path, &p.ed)) break j;
         } else return true;
         showPage(d, i);
         if (!save(d, false)) return false;
     }
 }
 
-/// For quitting: every window with unsaved changes asks first.
+/// For quitting: every window with unsaved changes to files asks first.
 pub fn settleAll() bool {
-    for (docs.items) |d| if (!settle(d)) return false;
+    for (docs.items) |d| if (!settle(d, true)) return false;
     return true;
 }
 
@@ -1702,6 +1761,7 @@ fn save(d: *Doc, as: bool) bool {
         return false;
     };
     d.ed.buf.markSaved();
+    dropDraft(&d.draft);
     d.stamp = files.stamp(d.path.?);
     d.note = "saved";
     noteRecent(d.path.?);
@@ -1808,9 +1868,11 @@ fn placeOf(p: []const u8) ?Place {
 /// A window is its frame, then its layout, tab-separated: a split is
 /// `|r` or `|d` (side by side or one above the other) and the first
 /// card's share, followed by its two halves; a card is `#n,a,f` (n tabs,
-/// the tab on show, 1 when it has the focus) followed by its n files.
-/// Untitled tabs aren't kept.
+/// the tab on show, 1 when it has the focus) followed by its n files, an
+/// untitled one as `*` and its draft. Empty untitled tabs aren't kept.
 pub fn saveSession() void {
+    saveDrafts();
+    quitting = true;
     for (docs.items) |d| rememberPlace(d);
     const out = msg(Id, objc.class("NSMutableArray"), "array", .{});
     const order = msg(Id, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "orderedWindows", .{});
@@ -1838,15 +1900,16 @@ fn saveLayout(w: *const Win, n: *const Node, out: *std.ArrayList(u8)) !usize {
     if (n.pane) |d| {
         var kept: usize = 0;
         var on: usize = 0;
-        for (0..tabCount(d)) |j| if (tabPath(d, j) != null) {
+        for (0..tabCount(d)) |j| if (tabPath(d, j) != null or tabDraft(d, j) != null) {
             if (j == d.at) on = kept;
             kept += 1;
         };
         try out.print(gpa, "\t#{d},{d},{d}", .{ kept, on, @intFromBool(w.focus == d) });
-        for (0..tabCount(d)) |j| if (tabPath(d, j)) |p| {
-            try out.append(gpa, '\t');
-            try out.appendSlice(gpa, p);
-        };
+        for (0..tabCount(d)) |j| {
+            if (tabPath(d, j)) |p| {
+                try out.print(gpa, "\t{s}", .{p});
+            } else if (tabDraft(d, j)) |p| try out.print(gpa, "\t*{s}", .{p});
+        }
         return kept;
     }
     // A card folding away is already gone.
@@ -1919,13 +1982,16 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
     var on: ?usize = null;
     for (0..head[0]) |i| {
         const p = (if (i == 0) first else null) orelse it.next() orelse break;
-        const z = gpa.dupeSentinel(u8, p, 0) catch continue;
+        const draft = p.len > 0 and p[0] == '*';
+        const z = gpa.dupeSentinel(u8, if (draft) p[1..] else p, 0) catch continue;
         defer gpa.free(z);
         if (!files.exists(z)) continue;
-        const pg = loadPage(z) orelse continue;
+        var pg = (if (draft) loadDraft(z) else loadPage(z)) orelse continue;
         if (!park(d, true)) {
-            var x = pg;
-            x.deinit();
+            // A draft that can't open stays on disk for `adoptDrafts`.
+            if (pg.draft) |s| gpa.free(s);
+            pg.draft = null;
+            pg.deinit();
             continue;
         }
         install(d, pg);
@@ -1943,6 +2009,116 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
     };
     n.* = .{ .pane = d };
     return n;
+}
+
+// ---- drafts ----
+
+/// Untitled files keep their text in a draft file here as it changes, so
+/// it's never lost: `~/Library/Application Support/ze/Drafts`.
+fn draftsDir(buf: []u8) ?[:0]const u8 {
+    const home = std.mem.span(std.c.getenv("HOME") orelse return null);
+    return std.fmt.bufPrintSentinel(buf, "{s}/Library/Application Support/ze/Drafts", .{home}, 0) catch null;
+}
+
+/// Saves the drafts a second after the typing stops.
+fn laterDrafts(view: Id) void {
+    const sel = objc.sel_registerName("saveDrafts:");
+    msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:selector:object:", .{ view, sel, @as(Id, null) });
+    msg(void, view, "performSelector:withObject:afterDelay:", .{ sel, @as(Id, null), @as(f64, 1) });
+}
+
+fn saveDraftsNow(_: Id, _: Sel, _: Id) callconv(.c) void {
+    saveDrafts();
+}
+
+/// Writes every untitled file that changed since its draft last did. One
+/// that's empty again loses its draft.
+fn saveDrafts() void {
+    for (docs.items) |d| {
+        keepDraft(d.path, &d.ed, &d.draft, &d.drafted);
+        for (d.pages.items) |*p| keepDraft(p.path, &p.ed, &p.draft, &p.drafted);
+    }
+}
+
+fn keepDraft(path: ?[:0]u8, ed: *const Editor, draft: *?[:0]u8, drafted: *u64) void {
+    if (path != null or ed.buf.changes == drafted.*) return;
+    if (ed.text().len == 0) {
+        dropDraft(draft);
+        drafted.* = ed.buf.changes;
+        return;
+    }
+    if (draft.* == null) {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const dir = draftsDir(&buf) orelse return;
+        const secs: u64 = @intFromFloat(@max(msg(f64, objc.class("NSDate"), "timeIntervalSinceReferenceDate", .{}), 0));
+        draft.* = std.fmt.allocPrintSentinel(gpa, "{s}/{d}-{d}.txt", .{ dir, secs, newId() }, 0) catch return;
+        files.makeParent(draft.*.?) catch return;
+    }
+    files.write(draft.*.?, ed.text()) catch return;
+    drafted.* = ed.buf.changes;
+}
+
+/// Deletes a draft once its text is saved to a file or its tab is closed.
+/// Not while quitting, though: AppKit closes the windows on the way out,
+/// and their drafts are for next time.
+fn dropDraft(draft: *?[:0]u8) void {
+    const p = draft.* orelse return;
+    if (!quitting) _ = std.c.unlink(p);
+    gpa.free(p);
+    draft.* = null;
+}
+
+/// Set once the session is saved on the way out.
+var quitting = false;
+
+/// An untitled tab with the text of the draft at `abs`.
+fn loadDraft(abs: [:0]const u8) ?Page {
+    const bytes = files.read(gpa, abs) catch return null;
+    defer gpa.free(bytes);
+    var ed = Editor.init(gpa, bytes) catch return null;
+    const own = gpa.dupeSentinel(u8, abs, 0) catch {
+        ed.deinit(gpa);
+        return null;
+    };
+    return .{ .ed = ed, .path = null, .lang = &syntax.plain, .stamp = null, .sx = 0, .sy = 0, .id = newId(), .draft = own, .drafted = ed.buf.changes };
+}
+
+/// At launch: drafts that no tab holds, left by a crash or a start that
+/// opened files instead of the last session, come back as tabs in the front
+/// window.
+pub fn adoptDrafts() void {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = draftsDir(&buf) orelse return;
+    const dh = std.c.opendir(dir) orelse return;
+    defer _ = std.c.closedir(dh);
+    while (std.c.readdir(dh)) |e| {
+        const name = std.mem.sliceTo(&e.name, 0);
+        if (name.len == 0 or name[0] == '.' or !std.mem.endsWith(u8, name, ".txt")) continue;
+        var pb: [std.fs.max_path_bytes]u8 = undefined;
+        const abs = std.fmt.bufPrintSentinel(&pb, "{s}/{s}", .{ dir, name }, 0) catch continue;
+        if (draftHeld(abs)) continue;
+        var pg = loadDraft(abs) orelse continue;
+        const d = keyDoc() orelse (if (docs.items.len > 0) docs.items[0] else newDoc()) orelse {
+            if (pg.draft) |s| gpa.free(s);
+            pg.draft = null;
+            return pg.deinit();
+        };
+        if (!park(d, true)) {
+            if (pg.draft) |s| gpa.free(s);
+            pg.draft = null;
+            pg.deinit();
+            continue;
+        }
+        install(d, pg);
+    }
+}
+
+fn draftHeld(abs: []const u8) bool {
+    for (docs.items) |d| {
+        if (d.draft) |p| if (std.mem.eql(u8, p, abs)) return true;
+        for (d.pages.items) |pg| if (pg.draft) |p| if (std.mem.eql(u8, p, abs)) return true;
+    }
+    return false;
 }
 
 // ---- changes from outside ----
@@ -2622,17 +2798,31 @@ fn refresh(d: *Doc) void {
             }
             while (start < end and std.ascii.isWhitespace(text[start])) start += 1;
         }
-        const now = CACurrentMediaTime();
-        if (d.focus_on) {
-            d.focus_lo.aim(f(start), now);
-            d.focus_hi.aim(f(end), now);
-        } else {
-            d.focus_lo.snap(f(start));
-            d.focus_hi.snap(f(end));
-        }
+        // A new span fades in as the old one fades out; typing that only
+        // moves the span's end doesn't fade.
+        if (!d.focus_on) {
+            d.focus_new = .{ start, end };
+            d.focus_old = d.focus_new;
+            d.focus_t0 = 0;
+        } else if (start != d.focus_new[0]) {
+            d.focus_old = d.focus_new;
+            d.focus_new = .{ start, end };
+            d.focus_t0 = CACurrentMediaTime();
+        } else d.focus_new[1] = end;
     }
     d.focus_on = conf.focus != .off;
     msg(void, d.view, "setNeedsDisplay:", .{true});
+    if (d.path == null) {
+        if (d.ed.buf.changes != d.drafted) laterDrafts(d.view);
+        var nb: [48]u8 = undefined;
+        const nm = untitledName(&d.ed, &nb);
+        if (!std.mem.eql(u8, nm, d.name())) {
+            @memcpy(d.title[0..nm.len], nm);
+            d.title_len = nm.len;
+            if (slotOf(d, d.id)) |k| d.slots.items[k].drop();
+            if (d.win.focus == d) msg(void, d.window, "setTitle:", .{objc.str(nm)});
+        }
+    }
     preview.update(d, &conf);
     var edited = false;
     for (docs.items) |o| if (o.win == d.win and o.dirty()) {
@@ -2655,11 +2845,34 @@ fn syncStates(d: *Doc, upto: usize) void {
     }
 }
 
+/// An untitled file's name: its first line with words on it, cut short
+/// with an ellipsis, or "Untitled" while it has none.
+fn untitledName(ed: *const Editor, buf: *[48]u8) []const u8 {
+    const b = &ed.buf;
+    for (0..b.lines()) |i| {
+        const l = std.mem.trim(u8, b.line(i), " \t\r#>*-");
+        if (l.len == 0) continue;
+        var n = @min(l.len, 40);
+        while (n < l.len and n > 0 and l[n] & 0xC0 == 0x80) n -= 1;
+        @memcpy(buf[0..n], l[0..n]);
+        if (n == l.len) return buf[0..n];
+        const dots = "…";
+        @memcpy(buf[n..][0..dots.len], dots);
+        return buf[0 .. n + dots.len];
+    }
+    return "Untitled";
+}
+
+fn tabName(d: *const Doc, j: usize, buf: *[48]u8) []const u8 {
+    if (tabPath(d, j)) |p| return std.fs.path.basename(p);
+    return if (j == d.at) d.name() else untitledName(&d.pages.items[pageOf(d, j)].ed, buf);
+}
+
 // ---- sidebar ----
 
-const Icon = enum { closed, opened, folder, code, text, data, image, notes, sidebar, plus, close };
+const Icon = enum { closed, opened, sidebar, plus, close };
 /// SF Symbols, which come with macOS, so they cost ze no size.
-const icon_names = [_][:0]const u8{ "chevron.right", "chevron.down", "folder.fill", "chevron.left.forwardslash.chevron.right", "doc.text", "curlybraces", "photo", "text.alignleft", "sidebar.left", "plus", "xmark" };
+const icon_names = [_][:0]const u8{ "chevron.right", "chevron.down", "sidebar.left", "plus", "xmark" };
 /// Symbol images for the light and dark themes, tinted and made on first use.
 var icons: [2][icon_names.len]Id = @splat(@splat(null));
 
@@ -2671,31 +2884,30 @@ fn dropIcons() void {
     };
 }
 
-fn iconFor(name: []const u8, dir: bool) Icon {
-    if (dir) return .folder;
-    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return .text;
-    for ([_][]const u8{ ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".icns", ".heic" }) |e| {
-        if (std.ascii.eqlIgnoreCase(name[dot..], e)) return .image;
+/// The Mac's own icon for a file of `name`'s kind, or for a folder, the
+/// same ones Finder shows. Made on first use per extension and kept.
+fn iconFor(name: []const u8, dir: bool) Id {
+    if (dir) {
+        if (folder_icon == null) folder_icon = msg(Id, msg(Id, objc.class("NSImage"), "imageNamed:", .{objc.str("NSFolder")}), "retain", .{});
+        return folder_icon;
     }
-    const lang = syntax.forPath(name);
-    if (lang.markdown) return .notes;
-    if (lang.keys) return .data;
-    return if (lang == &syntax.plain) .text else .code;
+    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse 0;
+    var low: [16]u8 = undefined;
+    const ext = if (dot > 0 and name.len - dot - 1 <= low.len) name[dot + 1 ..] else "";
+    const key = std.ascii.lowerString(low[0..ext.len], ext);
+    if (kind_icons.get(key)) |img| return img;
+    const ut = objc.class("UTType");
+    const ty = if (key.len > 0) msg(Id, ut, "typeWithFilenameExtension:", .{objc.str(key)}) else null;
+    const ws = msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{});
+    const img = msg(Id, msg(Id, ws, "iconForContentType:", .{ty orelse msg(Id, ut, "typeWithIdentifier:", .{objc.str("public.plain-text")})}), "retain", .{});
+    const owned = gpa.dupe(u8, key) catch return img;
+    kind_icons.put(gpa, owned, img) catch gpa.free(owned);
+    return img;
 }
 
-/// A file kind's color: the folder's and the code's come from the theme's
-/// syntax colors, so every theme gets its own.
-fn iconColor(which: Icon, th: *const Theme) Rgb {
-    const kind: syntax.Kind = switch (which) {
-        .folder => .function,
-        .code => .string,
-        .notes => .keyword,
-        .data => .number,
-        .image => .type,
-        else => return th.muted,
-    };
-    return th.kinds[@intFromEnum(kind)];
-}
+var folder_icon: Id = null;
+/// By lowercase extension, "" for none.
+var kind_icons: std.StringHashMapUnmanaged(Id) = .empty;
 
 fn icon(which: Icon, dark: bool, th: *const Theme) Id {
     const slot = &icons[@intFromBool(dark)][@intFromEnum(which)];
@@ -2704,11 +2916,10 @@ fn icon(which: Icon, dark: bool, th: *const Theme) Id {
         .closed, .opened => .{ 0.6, 0.3 },
         .close => .{ 0.55, 0.3 },
         .sidebar, .plus => .{ 1.0, 0 },
-        else => .{ 0.62, 0.23 },
     };
     const cfg = objc.class("NSImageSymbolConfiguration");
     const sized = msg(Id, cfg, "configurationWithPointSize:weight:", .{ conf.size * scale, weight });
-    const tint = msg(Id, cfg, "configurationWithPaletteColors:", .{msg(Id, objc.class("NSArray"), "arrayWithObject:", .{nscolor(iconColor(which, th))})});
+    const tint = msg(Id, cfg, "configurationWithPaletteColors:", .{msg(Id, objc.class("NSArray"), "arrayWithObject:", .{nscolor(th.muted)})});
     const img = msg(Id, objc.class("NSImage"), "imageWithSystemSymbolName:accessibilityDescription:", .{ objc.str(icon_names[@intFromEnum(which)]), @as(Id, null) });
     if (img == null) return null;
     const made = msg(Id, img, "imageWithSymbolConfiguration:", .{msg(Id, sized, "configurationByApplyingConfiguration:", .{tint})});
@@ -2720,12 +2931,10 @@ fn tileSize() f64 {
     return @round(conf.size + 5);
 }
 
-/// A file kind's symbol on a small rounded square of its own color, with
-/// its top left at `x`, `y`.
-fn tile(ctx: Id, which: Icon, dark: bool, th: *const Theme, x: f64, y: f64) void {
+/// A file's icon from `iconFor`, `tileSize` square, with its top left at `x`, `y`.
+fn tile(img: Id, x: f64, y: f64) void {
     const s = tileSize();
-    pill(ctx, iconColor(which, th), if (dark) 0.2 else 0.14, x, y, s, s, 5);
-    drawIcon(icon(which, dark, th), x, y, s);
+    if (img != null) msg(void, img, "drawInRect:fromRect:operation:fraction:respectFlipped:hints:", .{ Rect{ .x = x, .y = y, .w = s, .h = s }, Rect{}, @as(usize, 2), @as(f64, 1), true, @as(Id, null) });
 }
 
 /// A soft rounded square behind a button under the mouse, centered on
@@ -2863,9 +3072,10 @@ fn selPill(ctx: Id, th: *const Theme, key: bool, y: f64) void {
     ring(ctx, th.fg, if (key) 0.09 else 0.05, side_inset, y, hw, side_h, side_radius);
 }
 
-/// One row of the tree with its top at `y`: chevron, tile, name and dot.
-/// `turn` is how far a folding folder's chevron has turned, 0 to 1.
-fn drawRow(w: *const Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, i: usize, y: f64, cur: ?[]const u8, turn: ?f64) void {
+/// One row of the tree with its top at `y`: chevron, icon, name and dot.
+/// `turn` is how far a folding folder's chevron has turned, 0 to 1. The file
+/// on show in the focused card has its name in bold.
+fn drawRow(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, i: usize, y: f64, cur: ?[]const u8, turn: ?f64) void {
     const row = tree.rows.items[i];
     const s = tileSize();
     const x = 16 + f(row.depth) * 16;
@@ -2883,11 +3093,23 @@ fn drawRow(w: *const Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: b
             objc.CGContextRestoreGState(ctx);
         } else drawIcon(icon(if (tree.isOpen(row.rel)) .opened else .closed, dark, th), cx, cy, 12);
     }
-    tile(ctx, iconFor(row.rel[row.base..], row.dir), dark, th, x + 10, iy);
+    tile(iconFor(row.rel[row.base..], row.dir), x + 10, iy);
     const nx = x + 10 + s + 8;
-    const line = &side_lines.items[i];
-    if (line.* == null) line.* = uiLine(row.rel[row.base..], side_font, side_w - nx - if (row.dir) @as(f64, 14) else 26);
-    const nw = drawLine(ctx, line.*, th.fg, nx, y + side_base);
+    const room = side_w - nx - if (row.dir) @as(f64, 14) else 26;
+    const line = if (!row.dir and w.sel_row == i) bold: {
+        if (w.bold == null or w.bold_row != i or w.bold_gen != tree_gen) {
+            if (w.bold) |l| objc.CFRelease(l);
+            w.bold = uiLine(row.rel[row.base..], name_font, room);
+            w.bold_row = i;
+            w.bold_gen = tree_gen;
+        }
+        break :bold w.bold;
+    } else plain: {
+        const l = &side_lines.items[i];
+        if (l.* == null) l.* = uiLine(row.rel[row.base..], side_font, room);
+        break :plain l.*;
+    };
+    const nw = drawLine(ctx, line, th.fg, nx, y + side_base);
     if (!row.dir and rowDirty(w, row.rel)) _ = k.text(" •", null, th, th.caret, nx + nw, y + side_base, 0, 2);
 }
 
@@ -3016,6 +3238,10 @@ var side_head: Id = null;
 var side_lines: std.ArrayList(Id) = .empty;
 
 fn dropSideLines() void {
+    for (wins.items) |w| if (w.bold) |l| {
+        objc.CFRelease(l);
+        w.bold = null;
+    };
     for ([_]*Id{ &side_label, &side_head }) |p| if (p.*) |l| {
         objc.CFRelease(l);
         p.* = null;
@@ -3170,7 +3396,7 @@ fn draw(w: *Win, ctx: Id) void {
         hoverPill(ctx, th, w.hot_t[0].at(now), toggle_x, hy);
         drawIcon(icon(.sidebar, dark, th), toggle_x - 10, hy - 10, 20);
     }
-    drawDrag(w, ctx, th, dark, now);
+    drawDrag(w, ctx, th, now);
     w.busy = busy;
     if (busy or gliding) msg(void, w.link, "setPaused:", .{false});
 }
@@ -3316,7 +3542,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
 
     // Text.
     var k: Ink = .{ .ctx = ctx };
-    if (d.focus_on) k.focus = .{ d.focus_lo.at(now), d.focus_hi.at(now) };
+    if (d.focus_on) k.focus = .{ .new = d.focus_new, .old = d.focus_old, .t = std.math.clamp((now - d.focus_t0) / focus_time, 0, 1) };
     k.selected = s;
     var lexed: usize = std.math.maxInt(usize);
     var kinds: ?[]const syntax.Kind = null;
@@ -3452,7 +3678,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     } else d.prompt_on = false;
 
     // The header, over any text scrolled under it: the file's name and
-    // folder, or the window's tabs, and the caret's line and column.
+    // folder, or the window's tabs.
     // The header has its own shade and a hairline under it, set apart from the text.
     // Zen keeps its room as a plain margin.
     if (conf.zen) fill(ctx, th.bg, card.x, card.y, card.w, top_h - gap) else {
@@ -3461,16 +3687,11 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         fill(ctx, th.bg, card.x, card.y + head_h + 1, card.w, top_h - gap - head_h - 1);
         const hy = gap + head_h / 2;
         const mono_y = @round(hy - lh / 2 + baseline);
-        const li = b.lineOf(d.ed.cur);
-        const col = editor.colOf(b.line(li), d.ed.cur - b.lineStart(li));
-        const spot = std.fmt.bufPrint(&buf, "{d}:{d}", .{ li + 1, col + 1 }) catch "";
-        const spot_x = card.x + card.w - 16 - f(spot.len) * cw;
-        _ = k.text(spot, null, th, th.muted, spot_x, mono_y, 0, 32);
-        k.flush();
-        objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = @max(spot_x - 16 - card.x, 0), .h = head_h });
+        const right = card.x + card.w - 10;
+        objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = @max(right - card.x, 0), .h = head_h });
         // The traffic lights and the sidebar button sit on a card at the window's top left.
         const lights_end: f64 = if (root != null) toggle_x + 22 else lights_x + 76;
-        drawTabs(d, ctx, th, &k, dark, key, @max(card.x + 14, if (d.org.y < 1) lights_end - d.org.x else 0), spot_x - 16, mono_y, now);
+        drawTabs(d, ctx, th, &k, dark, key, @max(card.x + 14, if (d.org.y < 1) lights_end - d.org.x else 0), right, mono_y, now);
     }
     objc.CGContextRestoreGState(ctx);
 
@@ -3570,9 +3791,10 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
     const pad = tab_pad * a;
     for (d.slots.items) |*s| if (s.line == null) {
         const j = tabIndex(d, s.id) orelse continue;
-        const nm = if (tabPath(d, j)) |p| std.fs.path.basename(p) else "untitled";
+        var nb: [48]u8 = undefined;
+        const nm = tabName(d, j, &nb);
         s.line = uiLine(nm, name_font, 1e5);
-        s.which = iconFor(nm, false);
+        s.icon = iconFor(if (tabPath(d, j) != null) nm else "", false);
     };
 
     // Squeeze the tabs to a common cap when they don't all fit, down to
@@ -3719,7 +3941,7 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, key: bool, 
         ring(ctx, th.fg, (if (key) @as(f64, 0.1) else 0.06) * a, sx, hy - 11, s.w, 22, 7);
     }
     if (hv > 0.01 and !on) pill(ctx, th.fg, 0.05 * hv, sx, hy - 11, s.w, 22, 7);
-    tile(ctx, s.which, dark, th, sx + pad, @round(hy - ts / 2));
+    tile(s.icon, sx + pad, @round(hy - ts / 2));
     const nx = sx + pad + ts + 7;
     const nw = if (s.line != null) objc.CTLineGetTypographicBounds(s.line, null, null, null) else 0;
     // The name stops short of the close button.
@@ -3733,7 +3955,8 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, key: bool, 
     const squeezed = j != null and room_w + 1 < nw;
     if (squeezed and room_w != s.cut_w) {
         if (s.cut) |l| objc.CFRelease(l);
-        s.cut = uiLine(if (tabPath(d, j.?)) |p| std.fs.path.basename(p) else "untitled", name_font, room_w);
+        var nb: [48]u8 = undefined;
+        s.cut = uiLine(tabName(d, j.?, &nb), name_font, room_w);
         s.cut_w = room_w;
     }
     _ = drawLine(ctx, if (squeezed and s.cut != null) s.cut else s.line, if (on or hovered or a < 0.5) ink else th.muted, nx, @round(hy + name_off));
@@ -3938,7 +4161,7 @@ fn dropTab(t: TabDrag) void {
 }
 
 /// The drop preview, and the dragged tab's copy under the mouse.
-fn drawDrag(w: *Win, ctx: Id, th: *const Theme, dark: bool, now: f64) void {
+fn drawDrag(w: *Win, ctx: Id, th: *const Theme, now: f64) void {
     var r: [4]f64 = undefined;
     for (&w.pv, &r) |*s, *v| v.* = s.step(now);
     const pa = w.pv_a.at(now);
@@ -3962,7 +4185,7 @@ fn drawDrag(w: *Win, ctx: Id, th: *const Theme, dark: bool, now: f64) void {
     pill(ctx, th.fg, 0.06, x, y + 1, gw, 22, 7);
     pill(ctx, th.header, 1, x, y, gw, 22, 7);
     ring(ctx, th.fg, 0.2, x, y, gw, 22, 7);
-    tile(ctx, s.which, dark, th, x + tab_pad, @round(y + 11 - ts / 2));
+    tile(s.icon, x + tab_pad, @round(y + 11 - ts / 2));
     _ = drawLine(ctx, s.line, th.fg, x + tab_pad + ts + 7, @round(y + 11 + name_off));
     objc.CGContextRestoreGState(ctx);
 }
@@ -4485,7 +4708,7 @@ fn copyPath(_: Id, _: Sel, _: Id) callconv(.c) void {
 /// Each card with unsaved changes asks first.
 fn windowShouldClose(self: Id, _: Sel, _: Id) callconv(.c) bool {
     const w = winOf(self) orelse return true;
-    for (docs.items) |d| if (d.win == w and !d.closing and !settle(d)) return false;
+    for (docs.items) |d| if (d.win == w and !d.closing and !settle(d, false)) return false;
     return true;
 }
 
@@ -4501,6 +4724,7 @@ fn windowWillClose(self: Id, _: Sel, _: Id) callconv(.c) void {
         if (docs.items[i].win == w) closePane(docs.items[i]);
     }
     freeNodes(w.cards);
+    if (w.bold) |l| objc.CFRelease(l);
     for (wins.items, 0..) |x, j| if (x == w) {
         _ = wins.orderedRemove(j);
         break;
@@ -4687,6 +4911,7 @@ pub fn setup() void {
     c.method("windowShouldClose:", @ptrCast(&windowShouldClose), "c@:@");
     c.method("windowWillClose:", @ptrCast(&windowWillClose), "v@:@");
     c.method("tick:", @ptrCast(&tick), "v@:@");
+    c.method("saveDrafts:", @ptrCast(&saveDraftsNow), "v@:@");
     c.method("changeFont:", @ptrCast(&changeFont), "v@:@");
     c.method("menuForEvent:", @ptrCast(&menuForEvent), "@@:@");
     c.method("openInNewWindow:", @ptrCast(&openInNewWindow), "v@:@");
