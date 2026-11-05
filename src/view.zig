@@ -2335,11 +2335,14 @@ fn rowEdge(d: *Doc, right: bool, extend: bool) bool {
 
 // ---- scrolling ----
 
+/// Lines of blank page that the scroll goes past the last row.
+const past_end = 3;
+
 /// The scroll's top and bottom. Typewriter mode lets the first and last
 /// rows reach the middle, so the top can be negative.
 fn scrollRange(d: *Doc) [2]f64 {
     const lo = if (conf.typewriter) (lh - textH(d)) / 2 else 0;
-    const hi = if (conf.typewriter) lo + f(totalRows(d) -| 1) * lh else f(totalRows(d)) * lh - textH(d) / 2;
+    const hi = if (conf.typewriter) lo + f(totalRows(d) -| 1) * lh else f(totalRows(d) + past_end) * lh - textH(d);
     return .{ lo, @max(lo, hi) };
 }
 

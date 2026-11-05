@@ -25,7 +25,8 @@ quick open list rises out of the prompt line, and the page eases into place when
 scrolls it. Scrolling with the trackpad or mouse follows your fingers exactly. Pull the trackpad
 past the top or bottom of the file (or the left edge) and the page stretches with some resistance,
 then springs back when you lift your fingers; momentum that hits an end overshoots a little and
-settles. A mouse wheel stops at the ends. Windows in the background don't show a caret, their
+settles. A mouse wheel stops at the ends. The bottom end leaves three blank lines under the last
+line. Windows in the background don't show a caret, their
 sidebar highlight fades and their header dims. The mouse pointer hides while you type and
 comes back when you move the mouse. The sidebar's highlight and the picked row in the quick open
 list hop to their new row with a little bounce, the prompt line's words rise in as it opens, and
