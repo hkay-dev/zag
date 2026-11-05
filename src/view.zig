@@ -575,8 +575,10 @@ fn scenery(d: *const Doc, now: f64) bool {
 const spring_k = 380.0;
 const spring_c = 33.0;
 /// AppKit's rubber band: the stretch grows at this share of finger travel,
-/// less as it nears a page's height.
+/// less as it nears its limit.
 const band_c = 0.55;
+/// The top and bottom stretch stays under this many lines.
+const band_lines = 3;
 
 /// Moves the stretch back to rest with a damped spring; settled values snap to 0.
 fn springBack(d: *Doc, now: f64) void {
@@ -598,15 +600,17 @@ fn springBack(d: *Doc, now: f64) void {
 }
 
 /// Applies a trackpad delta to one axis: inside the page it follows the
-/// fingers exactly, past an end it stretches with resistance.
+/// fingers exactly, past an end it stretches with resistance, never as far
+/// as `dim`.
 fn pull(pos: *f64, o: *f64, delta: f64, lo: f64, hi: f64, dim: f64) void {
+    const most = dim * 0.95;
     var rest = delta;
     if (o.* != 0) {
         const room = 1 - @abs(o.*) / dim;
         const k = band_c * room * room;
         const moved = rest * k;
         if (o.* * moved >= 0 or @abs(moved) < @abs(o.*)) {
-            o.* += moved;
+            o.* = std.math.clamp(o.* + moved, -most, most);
             return;
         }
         rest += o.* / k;
@@ -614,10 +618,10 @@ fn pull(pos: *f64, o: *f64, delta: f64, lo: f64, hi: f64, dim: f64) void {
     }
     pos.* += rest;
     if (pos.* < lo) {
-        o.* = (pos.* - lo) * band_c;
+        o.* = @max((pos.* - lo) * band_c, -most);
         pos.* = lo;
     } else if (pos.* > hi) {
-        o.* = (pos.* - hi) * band_c;
+        o.* = @min((pos.* - hi) * band_c, most);
         pos.* = hi;
     }
 }
@@ -3874,7 +3878,7 @@ fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
         d.ov_t = now;
         if (!wrapping()) pull(&d.sx, &d.ov[0], -dx, 0, std.math.inf(f64), @max(rightEdge(d) - gap, cw));
         const range = scrollRange(d);
-        pull(&d.sy, &d.ov[1], -dy, range[0], range[1], textH(d));
+        pull(&d.sy, &d.ov[1], -dy, range[0], range[1], band_lines * lh);
     } else {
         dx *= lh;
         dy *= lh;

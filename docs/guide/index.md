@@ -24,7 +24,8 @@ moment of rest, the band behind the caret's line slides after it, a new selectio
 quick open list rises out of the prompt line, and the page eases into place when the keyboard
 scrolls it. Scrolling with the trackpad or mouse follows your fingers exactly. Pull the trackpad
 past the top or bottom of the file (or the left edge) and the page stretches with some resistance,
-then springs back when you lift your fingers; momentum that hits an end overshoots a little and
+never more than three lines at the top or bottom, then springs back when you lift your fingers;
+momentum that hits an end overshoots a little and
 settles. A mouse wheel stops at the ends. The bottom end leaves three blank lines under the last
 line. Windows in the background don't show a caret, their
 sidebar highlight fades and their header dims. The mouse pointer hides while you type and
