@@ -526,9 +526,11 @@ const bar_alpha = 0.45;
 /// Keyboard scrolls this many rows or fewer (stepping past the edge) snap.
 const glide_rows = 3;
 
-/// Aims the caret. A new spot glides there; the same spot, a caret that was
-/// hidden, or a mouse drag snaps. In the text the caret lives in page
-/// coordinates, so it rides along with a gliding scroll.
+/// Aims the caret. A new spot glides there; a caret that was hidden, a
+/// mouse drag, or the same spot somewhere new (the text moved under it)
+/// snaps. A redraw with the caret where it's going leaves its glide alone.
+/// In the text the caret lives in page coordinates, so it rides along with
+/// a gliding scroll.
 fn placeCaret(d: *Doc, now: f64, x: f64, y: f64, in_text: bool, spot: [3]usize, show: bool) void {
     d.cy.dur = if (conf.typewriter and in_text) scroll_time else caret_time;
     const moved = !std.mem.eql(usize, &spot, &d.spot);
@@ -541,7 +543,7 @@ fn placeCaret(d: *Doc, now: f64, x: f64, y: f64, in_text: bool, spot: [3]usize, 
     if (moved and d.shown and show and !d.snap) {
         d.cx.aim(x, now);
         d.cy.aim(y, now);
-    } else {
+    } else if (moved or !d.shown or !show or d.snap or d.cx.to != x or d.cy.to != y) {
         d.cx.snap(x);
         d.cy.snap(y);
     }

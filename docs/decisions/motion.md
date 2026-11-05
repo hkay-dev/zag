@@ -38,6 +38,10 @@ showing and hiding, and later tabs and split panes. A jump is a bug.
 - Focus mode crossfades instead of moving: when the caret moves to another sentence, line or
   paragraph, the old range dims and the new one brightens, every letter at once, at an even rate
   over 0.25 s (zig-editor#xgxf). Typing that only stretches the range doesn't fade.
+- Drawing can happen on any frame, not just after an event: while anything in the window moves,
+  the display link redraws every frame. So a draw that finds a value already heading where it
+  should go must leave its glide alone. The caret used to snap on every such redraw, which is why
+  it stopped gliding while an untitled tab's name grew with each letter (zig-editor#258w).
 - `scenery()` says whether a window still has frames to draw. Each new animation adds its clause
   there; leaving it out shows as an animation that freezes until the next event.
 - Layout uses where things end up, and only drawing and hit tests use where they are now. The
