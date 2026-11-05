@@ -16,8 +16,10 @@ ze follows the Mac's light or dark setting unless you pick one, with a theme for
 a little instead of jumping: the caret glides to each new spot and blinks with a soft fade after a
 moment of rest, the band behind the caret's line slides after it, a new selection fades in, the
 quick open list rises out of the bottom line, and the page eases into place when the keyboard
-scrolls it. Scrolling with the trackpad or mouse follows your fingers exactly. Windows in the
-background don't show a caret.
+scrolls it. Scrolling with the trackpad or mouse follows your fingers exactly. Pull the trackpad
+past the top or bottom of the file (or the left edge) and the page stretches with some resistance,
+then springs back when you lift your fingers; momentum that hits an end overshoots a little and
+settles. A mouse wheel stops at the ends. Windows in the background don't show a caret.
 
 The window has no title bar, so the empty strip along its top stands in for one: drag it to move
 the window, and double-click it to zoom (or minimize, or nothing, as Desktop & Dock's "Double-click
