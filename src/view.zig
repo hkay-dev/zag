@@ -951,6 +951,14 @@ const Win = struct {
     side_drawn: bool = false,
     /// A dragged copy finishing its trip after the mouse let go.
     fly: ?Fly = null,
+    /// The sidebar row under the mouse (of tree `hov_gen`), the row the
+    /// hover highlight last went to, where it springs to in the list, and
+    /// how far it's faded in.
+    hov_row: ?usize = null,
+    hov_gen: u32 = 0,
+    hov_last: ?usize = null,
+    hov: Spring = .{ .k = 420, .c = 30, .eps = 0.05 },
+    hov_a: Tween = .{ .dur = fade_time },
 };
 
 /// A dragged tab's or file's copy after the mouse lets go: it slides into
@@ -3222,6 +3230,26 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
     const off = if (folding) (1 - p) * f(fold.n) * side_h else 0;
     const rest_at = if (folding) fold.at + fold.n + 1 else rows.len;
 
+    // A softer highlight follows the mouse down the list, sliding from row
+    // to row on the selection's spring. It fades in where the mouse comes
+    // in and fades out where it leaves.
+    const hov_a = w.hov_a.at(now);
+    if (w.hov_row != null and w.hov_gen == tree_gen and w.hov_row.? < rows.len) {
+        const i = w.hov_row.?;
+        const ty = f(i) * side_h - if (i >= rest_at) off else 0;
+        if (hov_a < 0.05) {
+            w.hov.snap(ty);
+        } else if (w.hov_last != i) {
+            w.hov.aim(ty, now);
+        } else {
+            w.hov.x += ty - w.hov.to;
+            w.hov.to = ty;
+        }
+        w.hov_last = i;
+        w.hov_a.aim(1, now);
+    } else w.hov_a.aim(0, now);
+    if (hov_a > 0.01) pill(ctx, th.fg, (if (key) @as(f64, 0.045) else 0.03) * hov_a * fade, side_inset, lt + w.hov.step(now) - sy, side_w - 2 * side_inset - 2, side_h, side_radius);
+
     // The selection hops from row to row with a little bounce, and rides
     // along when folders above it open or close.
     if (w.sel_gen != tree_gen or w.sel_id != w.focus.id) {
@@ -3428,7 +3456,8 @@ fn draw(w: *Win, ctx: Id) void {
     for (&w.hot_t, 1..) |*t, i| t.aim(if (w.hot == i) 1 else 0, now);
     var busy = w.side_t.moving(now) or w.side_a.moving(now) or fold.t.moving(now) or fold.closing or cardsMoving(w.cards) or
         !w.sel.settled() or w.sel_a.moving(now) or w.hot_t[0].moving(now) or w.hot_t[1].moving(now) or
-        w.pv_a.moving(now) or w.ghost_a.moving(now) or w.menu_a.moving(now) or w.fly != null;
+        w.pv_a.moving(now) or w.ghost_a.moving(now) or w.menu_a.moving(now) or w.fly != null or
+        !w.hov.settled() or w.hov_a.moving(now);
     for (w.pv) |s| busy = busy or !s.settled();
     var gliding = false;
     for (docs.items) |d| if (d.win == w) {
@@ -4695,6 +4724,24 @@ fn mouseMoved(self: Id, _: Sel, ev: Id) callconv(.c) void {
         const hit = if (d == over and lp.y < top_h) tabAt(d, lp) else null;
         setHover(d, if (hit) |h| h.id else 0, if (hit) |h| h.close else false, d == over and onTabPlus(d, lp));
     };
+    sideHover(w, p);
+}
+
+/// Points the sidebar's hover highlight at the row under `p`: a row of the
+/// list, not a pinned folder, the header or the sidebar's edge, and none
+/// while something's dragged.
+fn sideHover(w: *Win, p: Point) void {
+    var row: ?usize = null;
+    if (sideShown(w) and p.x < side_w - edge_grab and p.y >= listTop() and w.tdrag == null) {
+        const pinned = for (w.stuck_y[0..w.nstuck]) |y| {
+            if (p.y >= y and p.y < y + side_h) break true;
+        } else false;
+        if (!pinned) row = sideRow(w, p.y);
+    }
+    if (row == w.hov_row and w.hov_gen == tree_gen) return;
+    w.hov_row = row;
+    w.hov_gen = tree_gen;
+    refresh(w.focus);
 }
 
 fn setHover(d: *Doc, id: u32, shut: bool, plus: bool) void {
@@ -4712,6 +4759,10 @@ fn mouseExited(self: Id, _: Sel, _: Id) callconv(.c) void {
         refresh(w.focus);
     }
     for (docs.items) |d| if (d.win == w) setHover(d, 0, false, false);
+    if (w.hov_row != null) {
+        w.hov_row = null;
+        refresh(w.focus);
+    }
 }
 
 /// Ends a drag of the sidebar's edge by saving the width, so new windows
@@ -4768,6 +4819,7 @@ fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
     if (sideShown(w) and at.x < side_w) {
         const dy = msg(f64, ev, "scrollingDeltaY", .{});
         w.side_y -= if (msg(bool, ev, "hasPreciseScrollingDeltas", .{})) dy else dy * lh;
+        sideHover(w, at);
         return refresh(w.focus);
     }
     const d = paneAt(w, at) orelse return;

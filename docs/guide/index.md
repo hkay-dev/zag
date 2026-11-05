@@ -147,7 +147,8 @@ holds it, then the folder's own name in bold. Files and folders whose names star
 left out. Each row has the Mac's own icon for a folder or for the file's kind, the same ones
 Finder shows. Names are in the Mac's system font and end in "…" when they don't fit. The file on
 show in the focused card is marked with a soft rounded highlight with a thin outline, and its
-name is in bold.
+name is in bold. A fainter highlight follows the mouse down the list, sliding from row to row,
+and fades out when the mouse leaves.
 
 The folder's parent and name stay pinned at the top while the rows scroll. An open folder whose
 files fill the top of the list pins under the name too, up to three levels deep, until the next
