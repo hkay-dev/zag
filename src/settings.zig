@@ -13,7 +13,7 @@ pub const Theme = struct {
     fg: Rgb,
     muted: Rgb,
     /// Indexed by syntax.Kind; the first one is the text color.
-    kinds: [5]Rgb,
+    kinds: [7]Rgb,
     sel: Rgb,
     line: Rgb,
     caret: Rgb,
@@ -31,7 +31,7 @@ pub const paper: Theme = .{
     .bg = rgb(0xF5F2EA),
     .fg = rgb(0x2E2C28),
     .muted = rgb(0x9A958A),
-    .kinds = .{ rgb(0x2E2C28), rgb(0x9C3D26), rgb(0x4F7A3A), rgb(0xB3AEA3), rgb(0xA8642A) },
+    .kinds = .{ rgb(0x2E2C28), rgb(0x9C3D26), rgb(0x4F7A3A), rgb(0xB3AEA3), rgb(0xA8642A), rgb(0x2F6587), rgb(0x7D4E86) },
     .sel = rgb(0xE3D9BF),
     .line = rgb(0xEFEADF),
     .caret = rgb(0xE8590C),
@@ -45,7 +45,7 @@ pub const ink: Theme = .{
     .bg = rgb(0x17171B),
     .fg = rgb(0xD9D4C7),
     .muted = rgb(0x6E6A61),
-    .kinds = .{ rgb(0xD9D4C7), rgb(0xF08A6C), rgb(0xA7C080), rgb(0x5F5C56), rgb(0xE8B86B) },
+    .kinds = .{ rgb(0xD9D4C7), rgb(0xF08A6C), rgb(0xA7C080), rgb(0x5F5C56), rgb(0xE8B86B), rgb(0x8DB8D8), rgb(0xCFA3D8) },
     .sel = rgb(0x34343E),
     .line = rgb(0x1E1E24),
     .caret = rgb(0xFF8A3D),
@@ -79,7 +79,7 @@ pub const Settings = struct {
     }
 };
 
-const colors = [_][]const u8{ "background", "text", "muted", "keyword", "string", "comment", "number", "selection", "line", "caret", "match", "panel", "rule" };
+const colors = [_][]const u8{ "background", "text", "muted", "keyword", "string", "comment", "number", "function", "type", "selection", "line", "caret", "match", "panel", "rule" };
 
 fn slot(th: *Theme, name: []const u8) ?*Rgb {
     const i = for (colors, 0..) |c, j| {
@@ -89,12 +89,12 @@ fn slot(th: *Theme, name: []const u8) ?*Rgb {
         0 => &th.bg,
         1 => &th.fg,
         2 => &th.muted,
-        3...6 => &th.kinds[i - 2],
-        7 => &th.sel,
-        8 => &th.line,
-        9 => &th.caret,
-        10 => &th.match,
-        11 => &th.panel,
+        3...8 => &th.kinds[i - 2],
+        9 => &th.sel,
+        10 => &th.line,
+        11 => &th.caret,
+        12 => &th.match,
+        13 => &th.panel,
         else => &th.rule,
     };
 }

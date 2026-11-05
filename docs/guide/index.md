@@ -108,6 +108,17 @@ permissions.
 
 Closing a window, or quitting, with unsaved changes asks whether to save them first.
 
+## Syntax colors
+
+ze colors code by the file's extension, for Zig, C and its family (C++, Objective-C, Java,
+Kotlin, C#), JavaScript and TypeScript, Python, Rust, Go, Swift, shell, Ruby, Lua, JSON, TOML,
+YAML, INI, CSS and Markdown. Keywords are bold, and strings, comments and numbers each get a
+color. In code, a word right before `(` takes the function color, a Capitalized word the type
+color, and an ALL_CAPS word the number color. In data files, keys at the start of a line take the
+function color and `[sections]` the keyword color. In Markdown, headings, list markers and
+**strong** text take the keyword color, `code` and fenced blocks the string color, and links the
+function color with their address dimmed. Other files are plain text.
+
 ## Font and text size
 
 - **View > Font…** (⌘T) opens the Mac's Font panel. Pick any font; monospaced ones look best.
@@ -134,8 +145,8 @@ dark.caret = #FF8A3D
 ```
 
 Colors come in a light set and a dark set, with these names: `background`, `text`, `muted` (the
-bottom line's fainter words), `keyword`, `string`, `comment`, `number`, `selection`, `line` (the
-caret's line), `caret`, `match` (other find matches), `panel` (the quick open list) and `rule`
-(the line above the bottom line). A line ze doesn't understand is skipped, and a missing line
-keeps its default. The menu toggles, the size shortcuts and the Font panel rewrite their own line
-in the file and leave the rest of it alone.
+bottom line's fainter words), `keyword`, `string`, `comment`, `number`, `function`, `type`,
+`selection`, `line` (the caret's line), `caret`, `match` (other find matches), `panel` (the quick
+open list) and `rule` (the line above the bottom line). A line ze doesn't understand is skipped,
+and a missing line keeps its default. The menu toggles, the size shortcuts and the Font panel
+rewrite their own line in the file and leave the rest of it alone.

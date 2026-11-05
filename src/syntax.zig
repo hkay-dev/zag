@@ -1,11 +1,12 @@
-//! A small line lexer: comments, strings, numbers and keywords. One table
-//! row per language family; anything else is plain text.
+//! A small line lexer: comments, strings, numbers, keywords, function and
+//! type names, keys in data files, and Markdown. One table row per language
+//! family; anything else is plain text.
 const std = @import("std");
 
-pub const Kind = enum(u8) { text, keyword, string, comment, number };
+pub const Kind = enum(u8) { text, keyword, string, comment, number, function, type };
 
 /// What is still open at the end of a line.
-pub const State = enum(u8) { normal, block_comment, triple_double, triple_single, backtick };
+pub const State = enum(u8) { normal, block_comment, triple_double, triple_single, backtick, fence };
 
 pub const Lang = struct {
     line_comment: []const u8 = "",
@@ -16,12 +17,19 @@ pub const Lang = struct {
     backtick: bool = false,
     /// Zig's `\\` multiline string lines.
     line_string: []const u8 = "",
+    /// Words before `(` are functions, Capitalized words types and ALL_CAPS
+    /// words constants (in the number color).
+    names: bool = false,
+    /// `key:` and `key =` at the start of a line, and `"key":`, are keys (in
+    /// the function color); `[section]` lines are keywords.
+    keys: bool = false,
+    markdown: bool = false,
     keywords: []const []const u8 = &.{},
 };
 
 pub const plain: Lang = .{};
 
-const zig: Lang = .{ .line_comment = "//", .line_string = "\\\\", .keywords = &.{
+const zig: Lang = .{ .line_comment = "//", .line_string = "\\\\", .names = true, .keywords = &.{
     "const", "var", "fn", "pub", "return", "if", "else", "while", "for", "switch", "break",
     "continue", "defer", "errdefer", "try", "catch", "orelse", "and", "or", "struct", "enum",
     "union", "error", "comptime", "inline", "export", "extern", "test", "unreachable", "null",
@@ -30,7 +38,7 @@ const zig: Lang = .{ .line_comment = "//", .line_string = "\\\\", .keywords = &.
     "linksection", "usize", "isize", "u8", "u16", "u32", "u64", "i32", "i64", "f32", "f64",
 } };
 
-const c_like: Lang = .{ .line_comment = "//", .block_comment = true, .keywords = &.{
+const c_like: Lang = .{ .line_comment = "//", .block_comment = true, .names = true, .keywords = &.{
     "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",
     "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "return", "short",
     "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void",
@@ -41,7 +49,7 @@ const c_like: Lang = .{ .line_comment = "//", .block_comment = true, .keywords =
     "extends", "implements", "interface", "var", "val", "fun", "object",
 } };
 
-const js: Lang = .{ .line_comment = "//", .block_comment = true, .backtick = true, .keywords = &.{
+const js: Lang = .{ .line_comment = "//", .block_comment = true, .backtick = true, .names = true, .keywords = &.{
     "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete",
     "do", "else", "export", "extends", "finally", "for", "function", "if", "import", "in",
     "instanceof", "let", "new", "return", "super", "switch", "this", "throw", "try", "typeof",
@@ -50,27 +58,27 @@ const js: Lang = .{ .line_comment = "//", .block_comment = true, .backtick = tru
     "readonly", "static", "as", "from",
 } };
 
-const python: Lang = .{ .line_comment = "#", .triple = true, .keywords = &.{
+const python: Lang = .{ .line_comment = "#", .triple = true, .names = true, .keywords = &.{
     "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif",
     "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda",
     "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield", "True",
     "False", "None", "self", "match", "case",
 } };
 
-const rust: Lang = .{ .line_comment = "//", .block_comment = true, .keywords = &.{
+const rust: Lang = .{ .line_comment = "//", .block_comment = true, .names = true, .keywords = &.{
     "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
     "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move",
     "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true",
     "type", "unsafe", "use", "where", "while",
 } };
 
-const go: Lang = .{ .line_comment = "//", .block_comment = true, .backtick = true, .keywords = &.{
+const go: Lang = .{ .line_comment = "//", .block_comment = true, .backtick = true, .names = true, .keywords = &.{
     "break", "case", "chan", "const", "continue", "default", "defer", "else", "fallthrough",
     "for", "func", "go", "goto", "if", "import", "interface", "map", "package", "range",
     "return", "select", "struct", "switch", "type", "var", "true", "false", "nil",
 } };
 
-const swift: Lang = .{ .line_comment = "//", .block_comment = true, .keywords = &.{
+const swift: Lang = .{ .line_comment = "//", .block_comment = true, .names = true, .keywords = &.{
     "class", "struct", "enum", "protocol", "extension", "func", "var", "let", "if", "else",
     "guard", "return", "for", "in", "while", "repeat", "switch", "case", "default", "break",
     "continue", "import", "public", "private", "internal", "fileprivate", "open", "static",
@@ -83,20 +91,21 @@ const shell: Lang = .{ .line_comment = "#", .keywords = &.{
     "function", "in", "return", "export", "local", "readonly", "set", "unset", "exit",
 } };
 
-const ruby: Lang = .{ .line_comment = "#", .keywords = &.{
+const ruby: Lang = .{ .line_comment = "#", .names = true, .keywords = &.{
     "def", "end", "if", "elsif", "else", "unless", "while", "until", "for", "in", "do",
     "return", "class", "module", "self", "nil", "true", "false", "yield", "begin", "rescue",
     "ensure", "require",
 } };
 
-const lua: Lang = .{ .line_comment = "--", .keywords = &.{
+const lua: Lang = .{ .line_comment = "--", .names = true, .keywords = &.{
     "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in",
     "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
 } };
 
-const data: Lang = .{ .keywords = &.{ "true", "false", "null" } };
-const hash_data: Lang = .{ .line_comment = "#", .keywords = &.{ "true", "false", "null" } };
+const data: Lang = .{ .keys = true, .keywords = &.{ "true", "false", "null" } };
+const hash_data: Lang = .{ .line_comment = "#", .keys = true, .keywords = &.{ "true", "false", "null" } };
 const css: Lang = .{ .block_comment = true };
+const markdown: Lang = .{ .markdown = true };
 
 const by_ext = [_]struct { []const u8, *const Lang }{
     .{ "zig", &zig },       .{ "zon", &zig },        .{ "c", &c_like },       .{ "h", &c_like },
@@ -107,7 +116,8 @@ const by_ext = [_]struct { []const u8, *const Lang }{
     .{ "go", &go },         .{ "swift", &swift },    .{ "sh", &shell },       .{ "bash", &shell },
     .{ "zsh", &shell },     .{ "fish", &shell },     .{ "rb", &ruby },        .{ "lua", &lua },
     .{ "json", &data },     .{ "toml", &hash_data }, .{ "yaml", &hash_data }, .{ "yml", &hash_data },
-    .{ "ini", &hash_data }, .{ "conf", &hash_data }, .{ "css", &css },
+    .{ "ini", &hash_data }, .{ "conf", &hash_data }, .{ "css", &css },       .{ "md", &markdown },
+    .{ "markdown", &markdown },
 };
 
 pub fn forPath(path: []const u8) *const Lang {
@@ -126,8 +136,9 @@ fn isWord(c: u8) bool {
 /// Lexes one line that begins in `state`, writing a kind per byte into
 /// `out` when given, and returns the state the next line begins in.
 pub fn lexLine(lang: *const Lang, s: []const u8, state: State, out: ?[]Kind) State {
+    if (lang.markdown) return lexMarkdown(s, state, out);
     var st = state;
-    var i: usize = 0;
+    var i: usize = if (lang.keys and st == .normal) keyAt(lang, s, out) else 0;
     while (i < s.len) {
         const start = i;
         var kind: Kind = .text;
@@ -151,7 +162,7 @@ pub fn lexLine(lang: *const Lang, s: []const u8, state: State, out: ?[]Kind) Sta
                     st = .normal;
                 } else i = s.len;
             },
-            .normal => {
+            .normal, .fence => {
                 const c = s[i];
                 const rest = s[i..];
                 if (lang.line_comment.len > 0 and std.mem.startsWith(u8, rest, lang.line_comment) and
@@ -176,8 +187,10 @@ pub fn lexLine(lang: *const Lang, s: []const u8, state: State, out: ?[]Kind) Sta
                     st = .backtick;
                 } else if (c == '"' or (c == '\'' and lang.keywords.len > 0)) {
                     if (findClose(s, i + 1, s[i .. i + 1])) |e| {
-                        kind = .string;
                         i = e + 1;
+                        var j = i;
+                        while (j < s.len and s[j] == ' ') j += 1;
+                        kind = if (lang.keys and j < s.len and s[j] == ':') .function else .string;
                     } else i += 1;
                 } else if (std.ascii.isDigit(c) and (i == 0 or !isWord(s[i - 1]))) {
                     kind = .number;
@@ -185,18 +198,116 @@ pub fn lexLine(lang: *const Lang, s: []const u8, state: State, out: ?[]Kind) Sta
                 } else if (isWord(c) or c == '@') {
                     i += 1;
                     while (i < s.len and isWord(s[i])) i += 1;
-                    if (c == '@' or isKeyword(lang, s[start..i])) kind = .keyword;
+                    if (c == '@' or isKeyword(lang, s[start..i])) {
+                        kind = .keyword;
+                    } else if (lang.names) kind = nameKind(s[start..i], s, i);
                 } else i += 1;
             },
         }
-        if (out) |o| @memset(o[start..i], kind);
+        mark(out, start, i, kind);
     }
     return st;
+}
+
+fn mark(out: ?[]Kind, from: usize, to: usize, kind: Kind) void {
+    if (out) |o| @memset(o[from..to], kind);
 }
 
 fn isKeyword(lang: *const Lang, w: []const u8) bool {
     for (lang.keywords) |k| if (std.mem.eql(u8, k, w)) return true;
     return false;
+}
+
+/// Capitalized words are types and ALL_CAPS ones constants; a word right
+/// before `(` (or Rust's `!(`) is a function.
+fn nameKind(w: []const u8, s: []const u8, end: usize) Kind {
+    if (std.ascii.isUpper(w[0])) {
+        for (w) |ch| if (std.ascii.isLower(ch)) return .type;
+        return if (w.len > 1) .number else .type;
+    }
+    if (end < s.len and s[end] == '(') return .function;
+    if (end + 1 < s.len and s[end] == '!' and (s[end + 1] == '(' or s[end + 1] == '[')) return .function;
+    return .text;
+}
+
+/// Colors a `key:` or `key =` at the start of a data file's line, or a
+/// `[section]` line in one with `#` comments, and returns where lexing goes
+/// on from; 0 when the line starts with neither.
+fn keyAt(lang: *const Lang, s: []const u8, out: ?[]Kind) usize {
+    var i: usize = 0;
+    while (i < s.len and (s[i] == ' ' or s[i] == '\t')) i += 1;
+    if (i + 1 < s.len and s[i] == '-' and s[i + 1] == ' ') i += 2;
+    const from = i;
+    if (i < s.len and s[i] == '[' and lang.line_comment.len > 0) {
+        const e = std.mem.indexOfScalarPos(u8, s, i, ']') orelse return 0;
+        mark(out, 0, from, .text);
+        mark(out, from, e + 1, .keyword);
+        return e + 1;
+    }
+    while (i < s.len and (isWord(s[i]) or s[i] == '-' or s[i] == '.')) i += 1;
+    if (i == from) return 0;
+    var j = i;
+    while (j < s.len and s[j] == ' ') j += 1;
+    if (j == s.len or (s[j] != ':' and s[j] != '=')) return 0;
+    mark(out, 0, from, .text);
+    mark(out, from, i, .function);
+    return i;
+}
+
+/// Markdown: headings, list and quote markers, `code`, fenced blocks,
+/// **strong** text and [links](url).
+fn lexMarkdown(s: []const u8, state: State, out: ?[]Kind) State {
+    var i: usize = 0;
+    while (i < s.len and s[i] == ' ') i += 1;
+    const rest = s[i..];
+    const fence = std.mem.startsWith(u8, rest, "```") or std.mem.startsWith(u8, rest, "~~~");
+    if (state == .fence or fence) {
+        mark(out, 0, s.len, .string);
+        return if (fence == (state == .fence)) .normal else .fence;
+    }
+    mark(out, 0, s.len, .text);
+    if (rest.len > 0 and rest[0] == '#') {
+        var h = i;
+        while (h < s.len and s[h] == '#') h += 1;
+        if (h == s.len or s[h] == ' ') {
+            mark(out, 0, s.len, .keyword);
+            return .normal;
+        }
+    }
+    var p = i;
+    if (rest.len > 1 and rest[1] == ' ' and std.mem.indexOfScalar(u8, "-*+>", rest[0]) != null) {
+        p += 1;
+    } else {
+        while (p < s.len and std.ascii.isDigit(s[p])) p += 1;
+        if (p > i and p + 1 < s.len and (s[p] == '.' or s[p] == ')') and s[p + 1] == ' ') p += 1 else p = i;
+    }
+    mark(out, i, p, .keyword);
+    while (p < s.len) {
+        const end: ?usize = switch (s[p]) {
+            '`' => if (std.mem.indexOfScalarPos(u8, s, p + 1, '`')) |e| blk: {
+                mark(out, p, e + 1, .string);
+                break :blk e + 1;
+            } else null,
+            '[' => link(s, p, out),
+            '*', '_' => if (p + 1 < s.len and s[p + 1] == s[p]) (if (std.mem.indexOfPos(u8, s, p + 2, s[p .. p + 2])) |e| blk: {
+                mark(out, p, e + 2, .keyword);
+                break :blk e + 2;
+            } else null) else null,
+            else => null,
+        };
+        p = end orelse p + 1;
+    }
+    return .normal;
+}
+
+/// Colors a `[text](url)` link at `p` and returns where it ends.
+fn link(s: []const u8, p: usize, out: ?[]Kind) ?usize {
+    const e = std.mem.indexOfScalarPos(u8, s, p + 1, ']') orelse return null;
+    if (e + 1 >= s.len or s[e + 1] != '(') return null;
+    const q = std.mem.indexOfScalarPos(u8, s, e + 2, ')') orelse return null;
+    mark(out, p, e + 1, .function);
+    mark(out, e + 1, q + 1, .comment);
+    return q + 1;
 }
 
 /// Where `close` next appears from `i`, skipping backslash escapes.
@@ -237,4 +348,40 @@ test "an escaped quote stays inside the string" {
     _ = lexLine(&zig, "\"a\\\"b\" x", .normal, &k);
     try t.expectEqual(Kind.string, k[5]);
     try t.expectEqual(Kind.text, k[7]);
+}
+
+test "names: types, constants and calls" {
+    var k: [32]Kind = undefined;
+    _ = lexLine(&python, "x = Page(LIMIT, top(n))", .normal, &k);
+    try t.expectEqual(Kind.text, k[0]);
+    try t.expectEqual(Kind.type, k[4]);
+    try t.expectEqual(Kind.number, k[9]);
+    try t.expectEqual(Kind.function, k[16]);
+    try t.expectEqual(Kind.text, k[20]);
+}
+
+test "data keys only at the start of a line or before a colon" {
+    var k: [32]Kind = undefined;
+    _ = lexLine(&hash_data, "  - path: http://a", .normal, &k);
+    try t.expectEqual(Kind.text, k[2]);
+    try t.expectEqual(Kind.function, k[4]);
+    try t.expectEqual(Kind.text, k[10]);
+    try t.expectEqual(Kind.text, k[14]);
+    _ = lexLine(&data, "{\"a\": \"b\"}", .normal, &k);
+    try t.expectEqual(Kind.function, k[1]);
+    try t.expectEqual(Kind.string, k[6]);
+}
+
+test "markdown fences carry across lines and color nothing else inside" {
+    var k: [32]Kind = undefined;
+    const s1 = lexLine(&markdown, "```sh", .normal, &k);
+    try t.expectEqual(State.fence, s1);
+    try t.expectEqual(State.fence, lexLine(&markdown, "# not a heading", s1, &k));
+    try t.expectEqual(Kind.string, k[0]);
+    try t.expectEqual(State.normal, lexLine(&markdown, "```", s1, &k));
+    _ = lexLine(&markdown, "- see [x](y) and `z`", .normal, &k);
+    try t.expectEqual(Kind.keyword, k[0]);
+    try t.expectEqual(Kind.function, k[7]);
+    try t.expectEqual(Kind.comment, k[10]);
+    try t.expectEqual(Kind.string, k[18]);
 }
