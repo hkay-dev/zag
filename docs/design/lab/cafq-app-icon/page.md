@@ -21,7 +21,7 @@ takes:
 recommended: B
 approve: Install the picked icon
 round: 1
-status: making
+status: picked B
 ---
 
 ze has no icon yet, so the Dock and Finder show the blank app icon. All three use ze's own colors: warm paper, dark ink and the orange caret.
