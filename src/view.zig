@@ -2193,7 +2193,10 @@ fn draw(d: *Doc, ctx: Id) void {
 
     // The header, over any text scrolled under it: the file's kind, name,
     // unsaved dot, folder and note, and the caret's line and column.
-    fill(ctx, th.bg, card.x, card.y, card.w, top_h - gap);
+    // The header has its own shade and a hairline under it, set apart from the text.
+    fill(ctx, th.header, card.x, card.y, card.w, head_h);
+    fill(ctx, th.rule, card.x, card.y + head_h, card.w, 1);
+    fill(ctx, th.bg, card.x, card.y + head_h + 1, card.w, top_h - gap - head_h - 1);
     const hy = gap + head_h / 2;
     const mono_y = @round(hy - lh / 2 + baseline);
     const li = b.lineOf(d.ed.cur);

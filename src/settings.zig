@@ -20,6 +20,9 @@ pub const Theme = struct {
     match: Rgb,
     panel: Rgb,
     rule: Rgb,
+    /// The card's header: a step lighter than the text's background on dark
+    /// themes and a step darker on light ones.
+    header: Rgb,
 };
 
 fn rgb(comptime v: u24) Rgb {
@@ -38,6 +41,7 @@ pub const paper: Theme = .{
     .match = rgb(0xF2D98A),
     .panel = rgb(0xECE7DB),
     .rule = rgb(0xDDD6C7),
+    .header = rgb(0xEDE8DB),
 };
 
 /// Ink in dark mode.
@@ -52,6 +56,7 @@ pub const ink: Theme = .{
     .match = rgb(0x5A4A24),
     .panel = rgb(0x202027),
     .rule = rgb(0x2A2A31),
+    .header = rgb(0x212128),
 };
 
 /// Ayu Light, from the ayu theme family.
@@ -66,6 +71,7 @@ const ayu_light: Theme = .{
     .match = rgb(0xF5E1A8),
     .panel = rgb(0xF0F1F2),
     .rule = rgb(0xE6E8EA),
+    .header = rgb(0xEEF0F2),
 };
 
 /// Ayu Dark.
@@ -80,6 +86,7 @@ const ayu_dark: Theme = .{
     .match = rgb(0x4A3B1A),
     .panel = rgb(0x0F131A),
     .rule = rgb(0x1B1F29),
+    .header = rgb(0x151A23),
 };
 
 /// One Light, Atom's light theme.
@@ -94,6 +101,7 @@ const one_light: Theme = .{
     .match = rgb(0xF2E2A6),
     .panel = rgb(0xEFEFF0),
     .rule = rgb(0xDBDBDC),
+    .header = rgb(0xF0F0F1),
 };
 
 /// One Dark, Atom's dark theme.
@@ -108,6 +116,7 @@ const one_dark: Theme = .{
     .match = rgb(0x314365),
     .panel = rgb(0x21252B),
     .rule = rgb(0x181A1F),
+    .header = rgb(0x31363F),
 };
 
 pub const Scheme = struct {
@@ -175,7 +184,7 @@ pub const Settings = struct {
     }
 };
 
-const colors = [_][]const u8{ "background", "text", "muted", "keyword", "string", "comment", "number", "function", "type", "selection", "line", "caret", "match", "panel", "rule" };
+const colors = [_][]const u8{ "background", "text", "muted", "keyword", "string", "comment", "number", "function", "type", "selection", "line", "caret", "match", "panel", "rule", "header" };
 
 fn slot(th: *Theme, name: []const u8) ?*Rgb {
     const i = for (colors, 0..) |c, j| {
@@ -191,7 +200,8 @@ fn slot(th: *Theme, name: []const u8) ?*Rgb {
         11 => &th.caret,
         12 => &th.match,
         13 => &th.panel,
-        else => &th.rule,
+        14 => &th.rule,
+        else => &th.header,
     };
 }
 
@@ -328,7 +338,8 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         \\
         \\# Change one color of a theme with a line like light.keyword = #9C3D26.
         \\# The names are background, text, muted, keyword, string, comment,
-        \\# number, function, type, selection, line, caret, match, panel and rule.
+        \\# number, function, type, selection, line, caret, match, panel, rule
+        \\# and header.
         \\
     , .{
         if (s.font_len == 0) "system" else s.font(),

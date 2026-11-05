@@ -221,8 +221,10 @@ A `light.` or `dark.` line changes one color of that mode's theme, whichever the
 names are `background` (the card; the window around it is a step darker), `text`, `muted` (the
 header's fainter words), `keyword`, `string`, `comment`, `number`, `function`, `type`,
 `selection`, `line` (the caret's line), `caret`, `match` (other find matches), `panel` (the quick
-open list) and `rule` (the line above the prompt line and the quick open list). The sidebar's
-icon tiles take their colors from `function`, `string`, `keyword`, `number` and `type`.
+open list), `rule` (the line under the header and above the prompt line and the quick open list)
+and `header` (the card's header, a step lighter than the text on dark themes and a step darker on
+light ones). The sidebar's icon tiles take their colors from `function`, `string`, `keyword`,
+`number` and `type`.
 Either mode can also use any theme from the file, so `light-theme = one-dark` keeps ze dark all
 the time. A line ze doesn't understand is skipped, and a missing line keeps its default. The menus,
 the size shortcuts and the Font panel rewrite their own line in the file and leave the rest of it
