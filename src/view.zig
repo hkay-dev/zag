@@ -5292,19 +5292,21 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, key: bool, 
         s.thin_cut = uiLine(nm, tab_font, room_w);
         s.cut_w = room_w;
     }
-    // How much the highlight covers this tab; a lone tab is the window's title.
-    const lit = if (a < 0.5) 1 else 1 - std.math.clamp(@abs(d.hl[0].x - sx) / @max(s.w, 1), 0, 1);
+    // How much the highlight covers this tab, so a tab that it only sits
+    // next to stays unlit; a lone tab is the window's title.
+    const cover = @min(d.hl[0].x + d.hl[1].x, sx + s.w) - @max(d.hl[0].x, sx);
+    const lit = if (a < 0.5) 1 else std.math.clamp(cover / @max(s.w, d.hl[1].x, 1), 0, 1);
     const ink_a = if (key) 0.62 + 0.38 * @max(lit, hv) else 1;
     const ink = if (key) th.fg else th.muted;
     const by = @round(hy + name_off);
-    if (lit < 0.99) {
-        objc.CGContextSetAlpha(ctx, alpha * ink_a * (1 - lit));
-        _ = drawLine(ctx, if (squeezed and s.thin_cut != null) s.thin_cut else s.thin, ink, nx, by);
-    }
-    if (lit > 0.01) {
-        objc.CGContextSetAlpha(ctx, alpha * ink_a * lit);
-        _ = drawLine(ctx, if (squeezed and s.cut != null) s.cut else s.line, ink, nx, by);
-    }
+    // The weight switches halfway while the ink brightens: the two weights
+    // have different widths, so drawing both at once smears the name.
+    objc.CGContextSetAlpha(ctx, alpha * ink_a);
+    const name = if (lit >= 0.5)
+        (if (squeezed and s.cut != null) s.cut else s.line)
+    else
+        (if (squeezed and s.thin_cut != null) s.thin_cut else s.thin);
+    _ = drawLine(ctx, name, ink, nx, by);
     objc.CGContextRestoreGState(ctx);
     // The unsaved dot sits after the name with one tab and slides into
     // the close button's place with more; hovering trades it for the ×.
