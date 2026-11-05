@@ -585,6 +585,19 @@ fn blink(caret: Id) void {
     msg(void, caret, "addAnimation:forKey:", .{ a, objc.str("blink") });
 }
 
+/// A tap on a Force Touch trackpad, felt only while a finger presses it:
+/// `.alignment` when something snaps or hits a limit, `.level` when a drag
+/// crosses into a new kind of drop. It lands with the next frame. Never for
+/// typing, clicks or scrolling.
+fn haptic(kind: enum { alignment, level }) void {
+    const p = msg(Id, objc.class("NSHapticFeedbackManager"), "defaultPerformer", .{});
+    const pattern: isize = switch (kind) {
+        .alignment => 1,
+        .level => 2,
+    };
+    msg(void, p, "performFeedbackPattern:performanceTime:", .{ pattern, @as(usize, 2) });
+}
+
 /// True while scrolling, the line band, a selection fade or the quick open
 /// list still has frames to draw.
 fn scenery(d: *const Doc, now: f64) bool {
