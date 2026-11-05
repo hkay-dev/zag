@@ -122,6 +122,12 @@ fn run(_: Id, _: Sel, _: Id) callconv(.c) void {
         settle();
     }
 
+    // ze coming forward: the recheck of settings, files and folders, and the frame after.
+    for (0..40) |_| {
+        step("activate_ms", false, view.recheckAll, .{});
+        settle();
+    }
+
     put("proc_cpu_ms", (cpuNow() - cpu0) * 1000);
     put("main_cpu_ms", (threadCpu() - main0) * 1000);
     memory("footprint_mb", "peak_mb");
