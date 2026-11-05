@@ -42,12 +42,24 @@ pub const Tree = struct {
         t.open.append(gpa, z) catch gpa.free(z);
     }
 
-    /// Opens every folder above `rel`, so a file deep down shows.
-    pub fn reveal(t: *Tree, gpa: Allocator, rel: []const u8) void {
+    /// Opens every folder above `rel`, so a file deep down shows. True when
+    /// it opened one, so the rows need a rebuild.
+    pub fn reveal(t: *Tree, gpa: Allocator, rel: []const u8) bool {
+        var opened = false;
         var i: usize = 0;
         while (std.mem.indexOfScalarPos(u8, rel, i, '/')) |slash| : (i = slash + 1) {
-            if (!t.isOpen(rel[0..slash])) t.toggle(gpa, rel[0..slash]);
+            if (!t.isOpen(rel[0..slash])) {
+                t.toggle(gpa, rel[0..slash]);
+                opened = true;
+            }
         }
+        return opened;
+    }
+
+    /// Whether a row for `rel` is on the list.
+    pub fn has(t: *const Tree, rel: []const u8) bool {
+        for (t.rows.items) |r| if (std.mem.eql(u8, r.rel, rel)) return true;
+        return false;
     }
 
     /// Re-reads `root` and every open folder under it.

@@ -1572,8 +1572,9 @@ fn install(d: *Doc, pg: Page) void {
     d.rise = pg.fresh;
     d.caret_fade = true;
     if (d.path) |p| if (relOf(p)) |rel| {
-        tree.reveal(gpa, rel);
-        rebuildTree();
+        // The folders are only read again when one had to open or the file
+        // isn't listed yet (made since the last read).
+        if (tree.reveal(gpa, rel) or !tree.has(rel)) rebuildTree();
         if (d.win.focus == d) d.win.side_find = true;
     };
     named(d);
