@@ -60,6 +60,11 @@ Ghostty's terminal core. ze drops all three.
   selection alone. No overlay or second text pass. Line means the logical line, so wrapping
   does not split it. On the split-card layout, release `__text` goes from 114,416 to 115,952
   bytes (+1,536); the file goes from 221,488 to 221,968 bytes.
+- **Typewriter reuses the scroll tween** (zig-editor#ftkg). Its bounds let the first and last
+  rows reach the middle, so the scroll goes negative at the top. The caret and line band take
+  the scroll's timing so they move with the page. A wheel scroll alone doesn't recenter; a
+  caret move, an edit or a new card height does. Release `__text` goes from 115,952 to 116,684
+  bytes (+732); the file goes from 221,968 to 221,760 bytes.
 - **No input methods and no accessibility.** ze is for US English typing on Apple Silicon only.
   It has no input method support (Chinese, Japanese or accented-letter composing), no VoiceOver
   or other accessibility support, and none is planned. Harsha set this on 2026-11-05, so new

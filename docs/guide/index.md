@@ -189,6 +189,14 @@ A sentence ends at `.`, `!` or `?`; a paragraph sits between blank lines. The br
 after the caret, while selected text and the caret keep their normal colors. The choice applies
 to every window and is remembered.
 
+## Typewriter scrolling
+
+**View > Typewriter Scrolling** keeps the caret's row halfway down the card. Moving the caret or
+typing glides the page instead, even at the start and end of a file, where blank space fills the
+card above the first line or below the last. Scrolling with the mouse or trackpad is still free;
+the next caret move brings the row back to the middle. It works with soft wrap and Focus too.
+The choice applies to every window and is remembered.
+
 ## Find and replace
 
 1. Press ⌘F. The prompt starts with the selected text or your last search.
@@ -270,6 +278,7 @@ line-height = 1.75       # as a multiple of the size
 wrap = off
 pairs = on               # auto-close brackets and quotes
 focus = off              # off, line, sentence or paragraph
+typewriter = off         # keep the caret's row in the middle
 sidebar = on             # the folder's files on the left
 sidebar-width = 250      # in points, from 150 to 500
 appearance = auto        # auto, light or dark

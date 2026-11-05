@@ -120,6 +120,7 @@ pub var wrap_item: Id = null;
 pub var pairs_item: Id = null;
 pub var sidebar_item: Id = null;
 pub var focus_items: [4]Id = @splat(null);
+pub var typewriter_item: Id = null;
 /// View > Theme items, in `settings.schemes` order.
 pub var scheme_items: [settings.schemes.len]Id = @splat(null);
 /// View > Theme's Appearance items: Auto, Light, Dark.
@@ -493,6 +494,7 @@ const glide_rows = 3;
 /// hidden, or a mouse drag snaps. In the text the caret lives in page
 /// coordinates, so it rides along with a gliding scroll.
 fn placeCaret(d: *Doc, now: f64, x: f64, y: f64, in_text: bool, spot: [3]usize, show: bool) void {
+    d.cy.dur = if (conf.typewriter and in_text) scroll_time else caret_time;
     const moved = !std.mem.eql(usize, &spot, &d.spot);
     if (in_text != d.c_text) {
         const sign: f64 = if (in_text) 1 else -1;
@@ -581,7 +583,7 @@ fn springBack(d: *Doc, now: f64) void {
 
 /// Applies a trackpad delta to one axis: inside the page it follows the
 /// fingers exactly, past an end it stretches with resistance.
-fn pull(pos: *f64, o: *f64, delta: f64, hi: f64, dim: f64) void {
+fn pull(pos: *f64, o: *f64, delta: f64, lo: f64, hi: f64, dim: f64) void {
     var rest = delta;
     if (o.* != 0) {
         const room = 1 - @abs(o.*) / dim;
@@ -595,9 +597,9 @@ fn pull(pos: *f64, o: *f64, delta: f64, hi: f64, dim: f64) void {
         o.* = 0;
     }
     pos.* += rest;
-    if (pos.* < 0) {
-        o.* = pos.* * band_c;
-        pos.* = 0;
+    if (pos.* < lo) {
+        o.* = (pos.* - lo) * band_c;
+        pos.* = lo;
     } else if (pos.* > hi) {
         o.* = (pos.* - hi) * band_c;
         pos.* = hi;
@@ -693,6 +695,9 @@ const Doc = struct {
     sy: f64 = 0,
     vx: f64 = 0,
     vy: f64 = 0,
+    /// Typewriter mode last centered on this caret offset and text height.
+    center_at: usize = std.math.maxInt(usize),
+    center_h: f64 = 0,
     xs: Tween = .{ .dur = scroll_time },
     ys: Tween = .{ .dur = scroll_time },
     /// The caret line's band, in page coordinates.
@@ -1017,6 +1022,7 @@ fn install(d: *Doc, pg: Page) void {
     d.sx = pg.sx;
     d.sy = pg.sy;
     d.id = pg.id;
+    d.center_at = std.math.maxInt(usize);
     d.states.clearRetainingCapacity();
     d.vfirst.clearRetainingCapacity();
     d.cols = 0;
@@ -1770,6 +1776,7 @@ pub fn loadSettings() void {
     if (wrap_item != null) msg(void, wrap_item, "setState:", .{@as(isize, @intFromBool(conf.wrap))});
     if (pairs_item != null) msg(void, pairs_item, "setState:", .{@as(isize, @intFromBool(conf.pairs))});
     if (sidebar_item != null) msg(void, sidebar_item, "setState:", .{@as(isize, @intFromBool(conf.sidebar))});
+    if (typewriter_item != null) msg(void, typewriter_item, "setState:", .{@as(isize, @intFromBool(conf.typewriter))});
     for (focus_items, 0..) |it, i| {
         if (it != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(i == @intFromEnum(conf.focus)))});
     }
@@ -1828,6 +1835,10 @@ pub fn togglePairs() void {
 
 pub fn toggleSidebar() void {
     store("sidebar", if (conf.sidebar) "off" else "on");
+}
+
+pub fn toggleTypewriter() void {
+    store("typewriter", if (conf.typewriter) "off" else "on");
 }
 
 pub fn pickFocus(i: usize) void {
@@ -2277,18 +2288,32 @@ fn rowEdge(d: *Doc, right: bool, extend: bool) bool {
 
 // ---- scrolling ----
 
+/// The scroll's top and bottom. Typewriter mode lets the first and last
+/// rows reach the middle, so the top can be negative.
+fn scrollRange(d: *Doc) [2]f64 {
+    const lo = if (conf.typewriter) (lh - textH(d)) / 2 else 0;
+    const hi = if (conf.typewriter) lo + f(totalRows(d) -| 1) * lh else f(totalRows(d)) * lh - textH(d) / 2;
+    return .{ lo, @max(lo, hi) };
+}
+
 fn clampScroll(d: *Doc) void {
-    d.sy = std.math.clamp(d.sy, 0, @max(0, f(totalRows(d)) * lh - textH(d) / 2));
+    const range = scrollRange(d);
+    d.sy = std.math.clamp(d.sy, range[0], range[1]);
     d.sx = if (conf.wrap) 0 else @max(d.sx, 0);
 }
 
-/// Scrolls just enough to show the caret.
+/// Centers the caret's row in typewriter mode; otherwise scrolls just
+/// enough to show it.
 fn reveal(d: *Doc) void {
     const c = caretRow(d);
     const y = f(c.row) * lh;
     const th = textH(d);
-    if (y < d.sy) d.sy = y;
-    if (y + lh > d.sy + th) d.sy = y + lh - th;
+    if (conf.typewriter) {
+        d.sy = y - (th - lh) / 2;
+    } else {
+        if (y < d.sy) d.sy = y;
+        if (y + lh > d.sy + th) d.sy = y + lh - th;
+    }
     if (!conf.wrap) {
         const x = f(c.col) * cw;
         const tw = rightEdge(d) - gap - 2 * pad_x;
@@ -2308,6 +2333,10 @@ fn center(d: *Doc) void {
 /// Redraws `d`'s window, which shows the dot of unsaved changes in its
 /// close button when any of its cards has some.
 fn refresh(d: *Doc) void {
+    // Typewriter mode recenters when the caret moves or the text changes,
+    // but not after a wheel scroll alone.
+    if (conf.typewriter and (d.center_at != d.ed.cur or d.ed.buf.touched != std.math.maxInt(usize))) reveal(d);
+    d.center_at = d.ed.cur;
     if (conf.focus != .off) {
         const b = &d.ed.buf;
         const text = d.ed.text();
@@ -2895,13 +2924,16 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     d.lit.aim(if (focused and many and win_key) 1 else 0, now);
     const b = &d.ed.buf;
     layout(d);
+    if (conf.typewriter and d.center_h != textH(d)) reveal(d);
+    d.center_h = textH(d);
+    d.band.dur = if (conf.typewriter) scroll_time else caret_time;
     clampScroll(d);
     // Jumps glide the scroll. Stepping past the edge a few rows at a time and
     // live resizing snap it (the trackpad snaps in scrollWheel), and the caret
     // and band move with the page so they don't bounce back to the edge.
     const resizing = msg(bool, d.view, "inLiveResize", .{});
     if (d.sy != d.ys.to) {
-        if (resizing or (!d.ys.moving(now) and @abs(d.sy - d.ys.to) <= glide_rows * lh)) {
+        if (resizing or (!conf.typewriter and !d.ys.moving(now) and @abs(d.sy - d.ys.to) <= glide_rows * lh)) {
             const by = d.sy - d.ys.at(now);
             d.ys.snap(d.sy);
             d.band.shift(by);
@@ -3044,7 +3076,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // The overlay scroll bar shows while the page moves and fades out after.
     // Nothing draws or waits when the whole file fits.
     const bar_room = textH(d);
-    const bar_span = f(total) * lh - bar_room / 2;
+    const range = scrollRange(d);
+    const bar_span = range[1] - range[0];
     if (bar_span > 0) {
         if (d.vy != d.bar_vy) {
             d.bar_vy = d.vy;
@@ -3056,7 +3089,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         if (alpha > 0.01) {
             const track = bar_room - 4;
             const knob = @min(@max(@round(track * bar_room / (bar_span + bar_room)), 24), track);
-            const at_y = @round((track - knob) * std.math.clamp(d.vy / bar_span, 0, 1));
+            const at_y = @round((track - knob) * std.math.clamp((d.vy - range[0]) / bar_span, 0, 1));
             pill(ctx, th.fg, bar_alpha * alpha, card.x + card.w - bar_w - 3, top_h + 2 + at_y, bar_w, knob, bar_w * 0.5);
         }
     }
@@ -3777,8 +3810,9 @@ fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
         d.relax = msg(usize, ev, "phase", .{}) & touching == 0;
         if (!d.relax) d.ov_v = .{ 0, 0 };
         d.ov_t = now;
-        if (!conf.wrap) pull(&d.sx, &d.ov[0], -dx, std.math.inf(f64), @max(rightEdge(d) - gap, cw));
-        pull(&d.sy, &d.ov[1], -dy, @max(0, f(totalRows(d)) * lh - textH(d) / 2), textH(d));
+        if (!conf.wrap) pull(&d.sx, &d.ov[0], -dx, 0, std.math.inf(f64), @max(rightEdge(d) - gap, cw));
+        const range = scrollRange(d);
+        pull(&d.sy, &d.ov[1], -dy, range[0], range[1], textH(d));
     } else {
         dx *= lh;
         dy *= lh;
