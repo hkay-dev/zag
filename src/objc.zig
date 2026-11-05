@@ -107,6 +107,7 @@ pub extern fn CGContextRestoreGState(ctx: Id) void;
 pub extern fn CGContextClipToRect(ctx: Id, rect: Rect) void;
 pub extern fn CGContextTranslateCTM(ctx: Id, tx: f64, ty: f64) void;
 pub extern fn CGContextRotateCTM(ctx: Id, angle: f64) void;
+pub extern fn CGContextScaleCTM(ctx: Id, sx: f64, sy: f64) void;
 pub extern fn CGContextSetAlpha(ctx: Id, alpha: f64) void;
 pub extern fn CGContextBeginTransparencyLayer(ctx: Id, info: ?*anyopaque) void;
 pub extern fn CGContextEndTransparencyLayer(ctx: Id) void;
