@@ -2330,32 +2330,61 @@ fn fields(s: []const u8, comptime n: usize) ?[n + 1][]const u8 {
     return out;
 }
 
+/// Where the caret and scroll were in recent files, newest first, as
+/// "cur\tsy\tpath" lines, at most 100. Read from the defaults on first use
+/// and written back a second after a change (and at quit), so switching
+/// tabs doesn't rewrite the defaults each time.
+var places: std.ArrayList([]u8) = .empty;
+var places_read = false;
+var places_due = false;
+
+extern var _dispatch_main_q: anyopaque;
+extern fn dispatch_time(when: u64, delta: i64) u64;
+extern fn dispatch_after_f(when: u64, queue: *anyopaque, ctx: ?*anyopaque, work: *const fn (?*anyopaque) callconv(.c) void) void;
+
+fn loadPlaces() void {
+    if (places_read) return;
+    places_read = true;
+    const list = msg(Id, defaults(), "stringArrayForKey:", .{objc.str("places")});
+    if (list == null) return;
+    for (0..msg(usize, list, "count", .{})) |i| {
+        const s = objc.utf8(msg(Id, list, "objectAtIndex:", .{i}));
+        if (fields(s, 2) == null) continue;
+        const own = gpa.dupe(u8, s) catch return;
+        places.append(gpa, own) catch return gpa.free(own);
+    }
+}
+
 /// Remembers where the caret and scroll were in `d`'s file, newest first.
 fn rememberPlace(d: *const Doc) void {
     const p = d.path orelse return;
-    const ud = defaults();
-    const old = msg(Id, ud, "stringArrayForKey:", .{objc.str("places")});
-    const out = msg(Id, objc.class("NSMutableArray"), "array", .{});
+    loadPlaces();
     var buf: [64]u8 = undefined;
     const head = std.fmt.bufPrint(&buf, "{d}\t{d}\t", .{ d.ed.cur, @as(i64, @intFromFloat(d.sy)) }) catch return;
     const entry = std.mem.concat(gpa, u8, &.{ head, p }) catch return;
-    defer gpa.free(entry);
-    msg(void, out, "addObject:", .{objc.str(entry)});
-    const n = if (old != null) msg(usize, old, "count", .{}) else 0;
-    for (0..n) |i| {
-        if (msg(usize, out, "count", .{}) >= 100) break;
-        const s = msg(Id, old, "objectAtIndex:", .{i});
-        const fs = fields(objc.utf8(s), 2) orelse continue;
-        if (!std.mem.eql(u8, fs[2], p)) msg(void, out, "addObject:", .{s});
+    var i: usize = 0;
+    while (i < places.items.len) {
+        if (std.mem.eql(u8, fields(places.items[i], 2).?[2], p)) gpa.free(places.orderedRemove(i)) else i += 1;
     }
-    msg(void, ud, "setObject:forKey:", .{ out, objc.str("places") });
+    places.insert(gpa, 0, entry) catch return gpa.free(entry);
+    while (places.items.len > 100) gpa.free(places.pop().?);
+    if (places_due) return;
+    places_due = true;
+    dispatch_after_f(dispatch_time(0, std.time.ns_per_s), &_dispatch_main_q, null, writePlaces);
+}
+
+/// Puts `places` in the defaults.
+fn writePlaces(_: ?*anyopaque) callconv(.c) void {
+    places_due = false;
+    const out = msg(Id, objc.class("NSMutableArray"), "arrayWithCapacity:", .{places.items.len});
+    for (places.items) |s| msg(void, out, "addObject:", .{objc.str(s)});
+    msg(void, defaults(), "setObject:forKey:", .{ out, objc.str("places") });
 }
 
 fn placeOf(p: []const u8) ?Place {
-    const list = msg(Id, defaults(), "stringArrayForKey:", .{objc.str("places")});
-    if (list == null) return null;
-    for (0..msg(usize, list, "count", .{})) |i| {
-        const fs = fields(objc.utf8(msg(Id, list, "objectAtIndex:", .{i})), 2) orelse continue;
+    loadPlaces();
+    for (places.items) |s| {
+        const fs = fields(s, 2).?;
         if (!std.mem.eql(u8, fs[2], p)) continue;
         return .{
             .cur = std.fmt.parseInt(usize, fs[0], 10) catch 0,
@@ -2375,6 +2404,7 @@ pub fn saveSession() void {
     saveDrafts();
     quitting = true;
     for (docs.items) |d| rememberPlace(d);
+    if (places_due) writePlaces(null);
     const out = msg(Id, objc.class("NSMutableArray"), "array", .{});
     const order = msg(Id, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "orderedWindows", .{});
     var line: std.ArrayList(u8) = .empty;
