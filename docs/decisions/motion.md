@@ -16,6 +16,9 @@ showing and hiding, and later tabs and split panes. A jump is a bug.
   a draw that reads it. `Tween` holds one: `aim` starts a glide from wherever it is now, `snap`
   jumps, `at(now)` reads it. Aiming again mid-glide keeps the speed, so a quick second click turns
   the motion around instead of restarting it.
+- Playful motion uses `Spring` instead: a damped spring that overshoots a little and settles.
+  A new tab's width and the active tab's highlight ride one, so tabs pop in and the highlight
+  hops. Things that leave (a closing tab) get a critically damped spring and don't bounce.
 - `scenery()` says whether a window still has frames to draw. Each new animation adds its clause
   there; leaving it out shows as an animation that freezes until the next event.
 - Layout uses where things end up, and only drawing and hit tests use where they are now. The

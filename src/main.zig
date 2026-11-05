@@ -96,8 +96,12 @@ fn toggleSidebar(_: Id, _: Sel, _: Id) callconv(.c) void {
     view.toggleSidebar();
 }
 
-fn previousFile(_: Id, _: Sel, _: Id) callconv(.c) void {
-    view.previousFile();
+fn nextTab(_: Id, _: Sel, _: Id) callconv(.c) void {
+    view.stepTab(1);
+}
+
+fn previousTab(_: Id, _: Sel, _: Id) callconv(.c) void {
+    view.stepTab(-1);
 }
 
 fn pickAppearance(_: Id, _: Sel, sender: Id) callconv(.c) void {
@@ -171,12 +175,14 @@ fn buildMenu(delegate: Id) void {
 
     const file = submenu(bar, "File");
     _ = item(file, "New", "newDocument:", "n", cmd);
+    _ = item(file, "New Tab", "newTab:", "t", cmd);
     _ = item(file, "Open…", "openDocument:", "o", cmd);
     const recent = submenu(file, "Open Recent");
     msg(void, recent, "setDelegate:", .{delegate});
     _ = item(file, "Quick Open…", "quickOpen:", "p", cmd);
     separator(file);
-    _ = item(file, "Close", "performClose:", "w", cmd);
+    _ = item(file, "Close Tab", "closeTab:", "w", cmd);
+    _ = item(file, "Close Window", "performClose:", "w", cmd | shift);
     _ = item(file, "Save", "saveDocument:", "s", cmd);
     _ = item(file, "Save As…", "saveDocumentAs:", "s", cmd | shift);
 
@@ -199,7 +205,7 @@ fn buildMenu(delegate: Id) void {
     const v = submenu(bar, "View");
     _ = item(v, "Command Palette…", "commandPalette:", "k", cmd);
     separator(v);
-    const fonts = item(v, "Font…", "orderFrontFontPanel:", "t", cmd);
+    const fonts = item(v, "Font…", "orderFrontFontPanel:", "t", cmd | shift);
     msg(void, fonts, "setTarget:", .{msg(Id, objc.class("NSFontManager"), "sharedFontManager", .{})});
     _ = item(v, "Bigger", "zoomIn:", "=", cmd);
     _ = item(v, "Smaller", "zoomOut:", "-", cmd);
@@ -208,7 +214,9 @@ fn buildMenu(delegate: Id) void {
     view.wrap_item = item(v, "Soft Wrap", "toggleWrap:", "z", opt);
     view.pairs_item = item(v, "Auto-Close Brackets", "togglePairs:", "", 0);
     view.sidebar_item = item(v, "Sidebar", "toggleSidebar:", "\\", cmd);
-    _ = item(v, "Previous File", "previousFile:", "\t", ctrl);
+    _ = item(v, "Show Next Tab", "nextTab:", "\t", ctrl);
+    // ⇧Tab arrives as back tab, so that's the key to match.
+    _ = item(v, "Show Previous Tab", "previousTab:", "\x19", ctrl | shift);
     const themes = submenu(v, "Theme");
     msg(void, item(themes, "Appearance", "", "", 0), "setEnabled:", .{false});
     for ([_][]const u8{ "Auto", "Light", "Dark" }, 0..) |title, i| {
@@ -246,7 +254,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     const pool = objc.objc_autoreleasePoolPush();
     const nsapp = app();
     _ = msg(bool, nsapp, "setActivationPolicy:", .{@as(isize, 0)});
-    // No window tabs, so ⌃Tab reaches Previous File.
+    // No window tabs, so ⌃Tab reaches ze's own tabs.
     msg(void, objc.class("NSWindow"), "setAllowsAutomaticWindowTabbing:", .{false});
 
     // From a terminal, quick open and the sidebar use the folder ze started
@@ -269,7 +277,8 @@ pub fn main(init: std.process.Init.Minimal) void {
     d.method("toggleWrap:", @ptrCast(&toggleWrap), "v@:@");
     d.method("togglePairs:", @ptrCast(&togglePairs), "v@:@");
     d.method("toggleSidebar:", @ptrCast(&toggleSidebar), "v@:@");
-    d.method("previousFile:", @ptrCast(&previousFile), "v@:@");
+    d.method("nextTab:", @ptrCast(&nextTab), "v@:@");
+    d.method("previousTab:", @ptrCast(&previousTab), "v@:@");
     d.method("pickScheme:", @ptrCast(&pickScheme), "v@:@");
     d.method("pickAppearance:", @ptrCast(&pickAppearance), "v@:@");
     d.method("menuNeedsUpdate:", @ptrCast(&fillRecent), "v@:@");

@@ -390,6 +390,79 @@ const Tween = struct {
 };
 
 const scroll_time = 0.16;
+/// The header turning from a file's name into tabs and back.
+const tab_time = 0.22;
+
+/// A value that springs to its target, overshooting a little before it
+/// settles, for motion that should feel playful: a tab popping in, the
+/// active tab's highlight hopping over.
+const Spring = struct {
+    x: f64 = 0,
+    v: f64 = 0,
+    to: f64 = 0,
+    t: f64 = 0,
+    k: f64 = 300,
+    c: f64 = 24,
+    /// Close enough to call it settled.
+    eps: f64 = 0.002,
+
+    fn aim(s: *Spring, to: f64, now: f64) void {
+        if (s.settled()) s.t = now;
+        s.to = to;
+    }
+
+    fn snap(s: *Spring, to: f64) void {
+        s.x = to;
+        s.to = to;
+        s.v = 0;
+    }
+
+    /// Moves it on to `now` and returns where it is.
+    fn step(s: *Spring, now: f64) f64 {
+        var dt = std.math.clamp(now - s.t, 0, 1.0 / 20.0);
+        s.t = now;
+        while (dt > 0) {
+            const h = @min(dt, 1.0 / 240.0);
+            dt -= h;
+            s.v += (-s.k * (s.x - s.to) - s.c * s.v) * h;
+            s.x += s.v * h;
+        }
+        if (s.settled()) s.snap(s.to);
+        return s.x;
+    }
+
+    fn settled(s: Spring) bool {
+        return @abs(s.x - s.to) < s.eps and @abs(s.v) < s.eps * 10;
+    }
+};
+
+/// A tab in the header as drawn. It pops in, and when its file goes it
+/// stays to fold shut.
+const Slot = struct {
+    id: u32,
+    /// 0 to 1 with a bounce on the way in; its width follows.
+    grow: Spring = .{ .k = 280, .c = 19 },
+    hov: Tween = .{ .dur = fade_time },
+    /// Its file's name, made on first draw.
+    line: Id = null,
+    /// The name cut short with an ellipsis to `cut_w`, when the tab is squeezed.
+    cut: Id = null,
+    cut_w: f64 = -1,
+    which: Icon = .text,
+    gone: bool = false,
+    /// Where it last drew.
+    x: f64 = 0,
+    w: f64 = 0,
+
+    fn drop(s: *Slot) void {
+        for ([_]*Id{ &s.line, &s.cut }) |p| if (p.*) |l| {
+            objc.CFRelease(l);
+            p.* = null;
+        };
+        s.cut_w = -1;
+    }
+};
+
 const caret_time = 0.09;
 const fade_time = 0.12;
 const panel_time = 0.14;
@@ -466,7 +539,7 @@ fn blink(caret: Id) void {
 /// list still has frames to draw.
 fn scenery(d: *const Doc, now: f64) bool {
     const stretched = d.relax and (d.ov[0] != 0 or d.ov[1] != 0);
-    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.panel.moving(now) or d.side_t.moving(now) or d.side_a.moving(now) or fold.t.moving(now) or fold.closing or now < d.load_t + load_time or (d.had_sel and now < d.sel_t0 + fade_time) or now < d.bar_t0 + bar_hold + bar_time;
+    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.panel.moving(now) or d.side_t.moving(now) or d.side_a.moving(now) or fold.t.moving(now) or fold.closing or tabsMoving(d, now) or now < d.load_t + load_time or (d.had_sel and now < d.sel_t0 + fade_time) or now < d.bar_t0 + bar_hold + bar_time;
 }
 
 const spring_k = 380.0;
@@ -534,8 +607,7 @@ fn tick(self: Id, _: Sel, _: Id) callconv(.c) void {
 const Mode = enum { edit, find, line, open, replace, command };
 const Drag = enum { char, word, line };
 
-/// A file a window holds but isn't showing: the sidebar and quick open
-/// switch files inside a window and keep the others, edits and all.
+/// A file a window holds but isn't showing: its other tabs, edits and all.
 const Page = struct {
     ed: Editor,
     path: ?[:0]u8,
@@ -543,6 +615,8 @@ const Page = struct {
     stamp: ?files.Stamp,
     sx: f64,
     sy: f64,
+    /// Its tab's id, which stays with the file while the window holds it.
+    id: u32,
 
     fn deinit(p: *Page) void {
         p.ed.deinit(gpa);
@@ -550,8 +624,34 @@ const Page = struct {
     }
 };
 
+/// Tabs, pages and windows get ids from here.
+var next_id: u32 = 1;
+
+fn newId() u32 {
+    next_id += 1;
+    return next_id;
+}
+
 const Doc = struct {
     ed: Editor,
+    /// The file on show's tab, and where it sits among the window's tabs:
+    /// `pages` are the others, in tab order with this one taken out.
+    id: u32 = 0,
+    at: usize = 0,
+    /// The header's tabs as drawn, folding ones included, and the active
+    /// tab's highlight (x and width), which springs from tab to tab.
+    slots: std.ArrayList(Slot) = .empty,
+    hl: [2]Spring = @splat(.{ .k = 420, .c = 30, .eps = 0.05 }),
+    /// 1 with two tabs or more, 0 with one, when the header is just the file's name.
+    tabbed: Tween = .{ .dur = tab_time },
+    /// How far the tabs are scrolled when they don't fit.
+    tab_x: Tween = .{ .dur = scroll_time },
+    slots_seen: bool = false,
+    /// The tab under the mouse, and whether it's over its close button.
+    hover: u32 = 0,
+    hover_x: bool = false,
+    /// Where the + after the tabs last drew.
+    plus_x: f64 = -100,
     /// Absolute path, or null while untitled.
     path: ?[:0]u8 = null,
     lang: *const syntax.Lang = &syntax.plain,
@@ -629,7 +729,7 @@ const Doc = struct {
     shown: bool = false,
     /// Place the caret without gliding (mouse drags).
     snap: bool = false,
-    /// Other files this window holds, the last shown at the end.
+    /// The window's other files, in tab order.
     pages: std.ArrayList(Page) = .empty,
     /// How far the sidebar is scrolled.
     side_y: f64 = 0,
@@ -652,8 +752,8 @@ const Doc = struct {
     side_seen: bool = false,
     /// When the window's file was last swapped in, for its text to fade in.
     load_t: f64 = -1,
-    /// The header's file name and folder as CoreText lines, made on first draw.
-    head: [2]Id = .{ null, null },
+    /// The header's folder as a CoreText line, made on first draw.
+    head: Id = null,
 
     fn name(d: *const Doc) []const u8 {
         return if (d.path) |p| std.fs.path.basename(p) else "untitled";
@@ -679,6 +779,8 @@ const Doc = struct {
         dropHead(d);
         for (d.pages.items) |*p| p.deinit();
         d.pages.deinit(gpa);
+        for (d.slots.items) |*s| s.drop();
+        d.slots.deinit(gpa);
     }
 };
 
@@ -708,8 +810,8 @@ fn pageLines(d: *const Doc) usize {
     return @max(@as(usize, @intFromFloat(textH(d) / lh)), 2) - 1;
 }
 
-/// Opens `path` (a file or a folder). A file shows in `into`, which keeps
-/// the file it had as a page, or else in a new window. A file that a window
+/// Opens `path` (a file or a folder). A file shows in `into`, in a new tab
+/// right of the one on show, or else in a new window. A file that a window
 /// already holds comes forward there.
 pub fn open(path: []const u8, into: ?*Doc) void {
     const abs = files.absolute(gpa, path) catch return;
@@ -729,7 +831,7 @@ pub fn open(path: []const u8, into: ?*Doc) void {
     }
     var pg = loadPage(abs) orelse return;
     const d = into orelse newDoc() orelse return pg.deinit();
-    if (!park(d)) return pg.deinit();
+    if (!park(d, true)) return pg.deinit();
     install(d, pg);
     noteRecent(abs);
     front(d);
@@ -765,7 +867,7 @@ fn loadPage(abs: [:0]const u8) ?Page {
         ed.select(c, c);
         sy = pl.sy;
     }
-    return .{ .ed = ed, .path = z, .lang = syntax.forPath(abs), .stamp = files.stamp(abs), .sx = 0, .sy = sy };
+    return .{ .ed = ed, .path = z, .lang = syntax.forPath(abs), .stamp = files.stamp(abs), .sx = 0, .sy = sy, .id = newId() };
 }
 
 fn pageIndex(d: *const Doc, abs: []const u8) ?usize {
@@ -773,15 +875,22 @@ fn pageIndex(d: *const Doc, abs: []const u8) ?usize {
     return null;
 }
 
-/// Sets the window's file aside as a page, for `install` to replace right
-/// after. An empty untitled file is dropped instead. False when it can't.
-fn park(d: *Doc) bool {
-    if (d.path == null and d.ed.text().len == 0) {
+fn isBlank(d: *const Doc) bool {
+    return d.path == null and d.ed.text().len == 0;
+}
+
+/// Sets the window's file aside as a page in its tab's place, for
+/// `install` to replace right after, which goes in a new tab to its right
+/// when `after`. An empty untitled file is dropped instead. False when it
+/// can't.
+fn park(d: *Doc, after: bool) bool {
+    if (isBlank(d)) {
         d.ed.deinit(gpa);
         return true;
     }
-    d.pages.append(gpa, .{ .ed = d.ed, .path = d.path, .lang = d.lang, .stamp = d.stamp, .sx = d.sx, .sy = d.sy }) catch return false;
+    d.pages.insert(gpa, d.at, .{ .ed = d.ed, .path = d.path, .lang = d.lang, .stamp = d.stamp, .sx = d.sx, .sy = d.sy, .id = d.id }) catch return false;
     rememberPlace(d);
+    if (after) d.at += 1;
     return true;
 }
 
@@ -793,6 +902,7 @@ fn install(d: *Doc, pg: Page) void {
     d.stamp = pg.stamp;
     d.sx = pg.sx;
     d.sy = pg.sy;
+    d.id = pg.id;
     d.states.clearRetainingCapacity();
     d.vfirst.clearRetainingCapacity();
     d.cols = 0;
@@ -813,21 +923,123 @@ fn install(d: *Doc, pg: Page) void {
     refreshAll();
 }
 
-/// Shows page `i` of the window and keeps the file it had as a page.
+/// Shows page `i` of the window. The file it had keeps its tab.
 fn showPage(d: *Doc, i: usize) void {
+    const at0 = d.at;
+    const tab = if (i < at0) i else i + 1;
+    const blank = isBlank(d);
     const pg = d.pages.orderedRemove(i);
-    if (!park(d)) {
+    if (i < at0) d.at -= 1;
+    if (!park(d, false)) {
         d.pages.insert(gpa, i, pg) catch {};
+        d.at = at0;
         return;
     }
+    d.at = if (blank and tab > at0) tab - 1 else tab;
     install(d, pg);
     checkOutside(d);
 }
 
-/// ⌃Tab: back to the file the front window showed before.
-pub fn previousFile() void {
+// ---- tabs ----
+
+fn tabCount(d: *const Doc) usize {
+    return d.pages.items.len + 1;
+}
+
+/// The page that tab `j` holds; the active tab has none.
+fn pageOf(d: *const Doc, j: usize) usize {
+    return if (j < d.at) j else j - 1;
+}
+
+fn tabId(d: *const Doc, j: usize) u32 {
+    return if (j == d.at) d.id else d.pages.items[pageOf(d, j)].id;
+}
+
+fn tabPath(d: *const Doc, j: usize) ?[]const u8 {
+    return if (j == d.at) d.path else d.pages.items[pageOf(d, j)].path;
+}
+
+fn tabDirty(d: *const Doc, j: usize) bool {
+    return if (j == d.at) d.ed.buf.dirty() else d.pages.items[pageOf(d, j)].ed.buf.dirty();
+}
+
+fn tabIndex(d: *const Doc, id: u32) ?usize {
+    for (0..tabCount(d)) |j| if (tabId(d, j) == id) return j;
+    return null;
+}
+
+fn showTab(d: *Doc, j: usize) void {
+    if (j != d.at) showPage(d, pageOf(d, j));
+}
+
+/// ⌃Tab and ⌃⇧Tab: the next or previous tab, around the ends.
+pub fn stepTab(by: isize) void {
     const d = keyDoc() orelse return;
-    if (d.pages.items.len > 0) showPage(d, d.pages.items.len - 1);
+    const n: isize = @intCast(tabCount(d));
+    showTab(d, @intCast(@mod(@as(isize, @intCast(d.at)) + by, n)));
+}
+
+/// ⌘T: an untitled file in a new tab right of the one on show.
+fn newTab(d: *Doc) void {
+    if (isBlank(d)) return;
+    const ed = Editor.init(gpa, "") catch return;
+    if (!park(d, true)) {
+        var e = ed;
+        return e.deinit(gpa);
+    }
+    install(d, .{ .ed = ed, .path = null, .lang = &syntax.plain, .stamp = null, .sx = 0, .sy = 0, .id = newId() });
+}
+
+/// Closes tab `j`, asking first when it has unsaved changes. The window's
+/// last tab closes the window. The tab to the right takes the active
+/// one's place, or the one to the left at the end.
+fn closeTab(d: *Doc, at: usize) void {
+    if (tabCount(d) == 1) return msg(void, d.window, "performClose:", .{@as(Id, null)});
+    var j = at;
+    if (tabDirty(d, j)) {
+        showTab(d, j);
+        j = d.at;
+        if (!keepOrDrop(d)) return;
+        // Showing it dropped an empty untitled tab, so it was the last one.
+        if (tabCount(d) == 1) {
+            d.ed.buf.markSaved();
+            return msg(void, d.window, "performClose:", .{@as(Id, null)});
+        }
+    }
+    if (j != d.at) {
+        var pg = d.pages.orderedRemove(pageOf(d, j));
+        pg.deinit();
+        if (j < d.at) d.at -= 1;
+        return refreshAll();
+    }
+    rememberPlace(d);
+    d.ed.deinit(gpa);
+    if (d.path) |p| gpa.free(p);
+    d.path = null;
+    const next = if (d.at < d.pages.items.len) d.at else d.at - 1;
+    const pg = d.pages.orderedRemove(next);
+    d.at = next;
+    install(d, pg);
+    checkOutside(d);
+}
+
+/// Asks whether to save the file on show before it goes. False to keep it.
+fn keepOrDrop(d: *Doc) bool {
+    front(d);
+    const a = objc.new("NSAlert");
+    var buf: [300]u8 = undefined;
+    msg(void, a, "setMessageText:", .{objc.str(std.fmt.bufPrint(&buf, "Save changes to {s}?", .{d.name()}) catch "Save changes?")});
+    msg(void, a, "setInformativeText:", .{objc.str("Your changes are lost if you don't save them.")});
+    _ = msg(Id, a, "addButtonWithTitle:", .{objc.str("Save")});
+    _ = msg(Id, a, "addButtonWithTitle:", .{objc.str("Don't Save")});
+    _ = msg(Id, a, "addButtonWithTitle:", .{objc.str("Cancel")});
+    const r = msg(isize, a, "runModal", .{});
+    msg(void, a, "release", .{});
+    return switch (r) {
+        1000 => save(d, false),
+        1001 => true,
+        else => false,
+    };
 }
 
 fn named(d: *Doc) void {
@@ -857,7 +1069,7 @@ pub fn count() usize {
 
 pub fn newDoc() ?*Doc {
     const d = gpa.create(Doc) catch return null;
-    d.* = .{ .ed = Editor.init(gpa, "") catch return null };
+    d.* = .{ .ed = Editor.init(gpa, "") catch return null, .id = newId() };
     docs.append(gpa, d) catch return null;
 
     const frame: Rect = .{ .w = 880, .h = 720 };
@@ -869,6 +1081,11 @@ pub fn newDoc() ?*Doc {
     d.view = view;
     msg(void, view, "setWantsLayer:", .{true});
     msg(void, view, "registerForDraggedTypes:", .{msg(Id, objc.class("NSArray"), "arrayWithObject:", .{NSPasteboardTypeFileURL})});
+    // Hovering a tab lights it and shows its close button: mouse moves and
+    // exits while ze is in front, over the whole view at any size.
+    const area = msg(Id, msg(Id, objc.class("NSTrackingArea"), "alloc", .{}), "initWithRect:options:owner:userInfo:", .{ Rect{}, @as(usize, 0x01 | 0x02 | 0x40 | 0x200), view, @as(Id, null) });
+    msg(void, view, "addTrackingArea:", .{area});
+    msg(void, area, "release", .{});
     d.caret = msg(Id, objc.class("CALayer"), "layer", .{});
     msg(void, d.caret, "setCornerRadius:", .{@as(f64, 1)});
     msg(void, d.caret, "setHidden:", .{true});
@@ -1386,7 +1603,7 @@ fn keysOf(a: std.mem.Allocator, it: Id) ![]const u8 {
     if (mods & opt_key != 0) try out.appendSlice(a, "⌥");
     if (mods & shift_key != 0) try out.appendSlice(a, "⇧");
     if (mods & cmd_key != 0) try out.appendSlice(a, "⌘");
-    if (std.mem.eql(u8, key, "\t")) {
+    if (std.mem.eql(u8, key, "\t") or std.mem.eql(u8, key, "\x19")) {
         try out.appendSlice(a, "⇥");
     } else for (key) |ch| try out.append(a, std.ascii.toUpper(ch));
     return out.items;
@@ -1736,9 +1953,9 @@ fn syncStates(d: *Doc, upto: usize) void {
 
 // ---- sidebar ----
 
-const Icon = enum { closed, opened, folder, code, text, data, image, notes, sidebar, plus };
+const Icon = enum { closed, opened, folder, code, text, data, image, notes, sidebar, plus, close };
 /// SF Symbols, which come with macOS, so they cost ze no size.
-const icon_names = [_][:0]const u8{ "chevron.right", "chevron.down", "folder.fill", "chevron.left.forwardslash.chevron.right", "doc.text", "curlybraces", "photo", "text.alignleft", "sidebar.left", "plus" };
+const icon_names = [_][:0]const u8{ "chevron.right", "chevron.down", "folder.fill", "chevron.left.forwardslash.chevron.right", "doc.text", "curlybraces", "photo", "text.alignleft", "sidebar.left", "plus", "xmark" };
 /// Symbol images for the light and dark themes, tinted and made on first use.
 var icons: [2][icon_names.len]Id = @splat(@splat(null));
 
@@ -1781,6 +1998,7 @@ fn icon(which: Icon, dark: bool, th: *const Theme) Id {
     if (slot.* != null) return slot.*;
     const scale: f64, const weight: f64 = switch (which) {
         .closed, .opened => .{ 0.6, 0.3 },
+        .close => .{ 0.55, 0.3 },
         .sidebar, .plus => .{ 1.0, 0 },
         else => .{ 0.62, 0.23 },
     };
@@ -2055,11 +2273,12 @@ fn dropSideLines() void {
     side_lines.clearRetainingCapacity();
 }
 
+/// Drops the header's folder and the tabs' names, made again on next draw.
+/// Folding tabs keep theirs, having no file left to make it from.
 fn dropHead(d: *Doc) void {
-    for (&d.head) |*p| if (p.*) |l| {
-        objc.CFRelease(l);
-        p.* = null;
-    };
+    if (d.head) |l| objc.CFRelease(l);
+    d.head = null;
+    for (d.slots.items) |*s| if (!s.gone) s.drop();
 }
 
 /// `s` as a line in `fnt` that takes the context's fill color, cut with an
@@ -2385,8 +2604,8 @@ fn draw(d: *Doc, ctx: Id) void {
         k.flush();
     }
 
-    // The header, over any text scrolled under it: the file's kind, name,
-    // unsaved dot, folder and note, and the caret's line and column.
+    // The header, over any text scrolled under it: the file's name and
+    // folder, or the window's tabs, and the caret's line and column.
     // The header has its own shade and a hairline under it, set apart from the text.
     fill(ctx, th.header, card.x, card.y, card.w, head_h);
     fill(ctx, th.rule, card.x, card.y + head_h, card.w, 1);
@@ -2400,22 +2619,7 @@ fn draw(d: *Doc, ctx: Id) void {
     _ = k.text(spot, null, th, th.muted, spot_x, mono_y, 0, 32);
     k.flush();
     objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = @max(spot_x - 16 - card.x, 0), .h = head_h });
-    var hx: f64 = @max(card.x + 14, if (root != null) @as(f64, toggle_x + 22) else lights_x + 76);
-    const ts = tileSize();
-    tile(ctx, iconFor(d.name(), false), dark, th, hx, @round(hy - ts / 2));
-    hx += ts + 8;
-    if (d.head[0] == null) d.head[0] = uiLine(d.name(), name_font, 1e5);
-    if (d.head[1] == null) {
-        var pbuf: [std.fs.max_path_bytes]u8 = undefined;
-        const folder = if (d.path) |p| std.fs.path.dirname(p) orelse "/" else "";
-        d.head[1] = uiLine(tilde(&pbuf, folder), side_font, 1e5);
-    }
-    hx += drawLine(ctx, d.head[0], ink, hx, @round(hy + name_off));
-    if (b.dirty()) hx += f(k.text(" •", null, th, th.caret, hx, mono_y, 0, 4)) * cw;
-    k.flush();
-    hx += drawLine(ctx, d.head[1], th.muted, hx + 8, @round(hy + name_off)) + 8;
-    if (d.note.len > 0) _ = k.text(d.note, null, th, th.muted, hx + 2 * cw, mono_y, 0, 200);
-    k.flush();
+    drawTabs(d, ctx, th, &k, dark, key, @max(card.x + 14, if (root != null) @as(f64, toggle_x + 22) else lights_x + 76), spot_x - 16, mono_y, now);
     objc.CGContextRestoreGState(ctx);
 
     // Outside the card: its outline, the sidebar, and the buttons by the
@@ -2436,11 +2640,220 @@ fn draw(d: *Doc, ctx: Id) void {
     if (d.busy or d.cx.moving(now) or d.cy.moving(now)) msg(void, d.link, "setPaused:", .{false});
 }
 
-/// The button by the traffic lights under `p`, if any.
+/// The button by the traffic lights, or the + after the tabs, under `p`.
 fn toolAt(d: *const Doc, p: Point) ?Icon {
     if (@abs(p.y - (gap + head_h / 2)) > 12) return null;
     if (root != null and @abs(p.x - toggle_x) <= 12) return .sidebar;
     if (sideShown(d) and @abs(p.x - (side_w - gap - 20)) <= 12) return .plus;
+    if (d.tabbed.to == 1 and @abs(p.x - d.plus_x) <= 12) return .plus;
+    return null;
+}
+
+/// Brings the header's slots in line with the window's tabs: a new tab
+/// pops in right after the tab before it, and a closed one folds away.
+fn syncSlots(d: *Doc, now: f64) void {
+    for (d.slots.items) |*s| if (!s.gone and tabIndex(d, s.id) == null) {
+        s.gone = true;
+        // Folding shut doesn't bounce.
+        s.grow.c = 2 * @sqrt(s.grow.k);
+        s.grow.aim(0, now);
+    };
+    for (0..tabCount(d)) |j| {
+        const id = tabId(d, j);
+        if (slotOf(d, id) != null) continue;
+        const pos = if (j == 0) 0 else slotOf(d, tabId(d, j - 1)).? + 1;
+        var s: Slot = .{ .id = id };
+        if (d.slots_seen) s.grow.aim(1, now) else s.grow.snap(1);
+        d.slots.insert(gpa, pos, s) catch return;
+    }
+    d.slots_seen = true;
+    var i: usize = 0;
+    while (i < d.slots.items.len) {
+        const s = &d.slots.items[i];
+        if (s.gone and s.grow.settled()) {
+            s.drop();
+            _ = d.slots.orderedRemove(i);
+        } else i += 1;
+    }
+}
+
+fn slotOf(d: *const Doc, id: u32) ?usize {
+    for (d.slots.items, 0..) |s, i| if (s.id == id and !s.gone) return i;
+    return null;
+}
+
+/// True while a tab pops, folds, fades or the highlight springs.
+fn tabsMoving(d: *const Doc, now: f64) bool {
+    if (d.tabbed.moving(now) or d.tab_x.moving(now) or !d.hl[0].settled() or !d.hl[1].settled()) return true;
+    for (d.slots.items) |s| if (s.gone or !s.grow.settled() or s.hov.moving(now)) return true;
+    return false;
+}
+
+/// Room the header keeps in a tab for the close button, either side of
+/// it, and between tabs; with one tab, none.
+const tab_pad = 10.0;
+const tab_shut = 18.0;
+const tab_space = 4.0;
+
+/// A tab's width at rest: its padding, tile, name and close button, and
+/// with one tab the unsaved dot after the name.
+fn tabWidth(d: *const Doc, s: *const Slot, a: f64) f64 {
+    const nw = if (s.line != null) objc.CTLineGetTypographicBounds(s.line, null, null, null) else 0;
+    const j = tabIndex(d, s.id);
+    const dot: f64 = if (j != null and !s.gone and tabDirty(d, j.?)) 14 * (1 - a) else 0;
+    return 2 * tab_pad * a + tileSize() + 7 + nw + tab_shut * a + dot;
+}
+
+/// The header's left side, from `x0` to `x1`. With one tab it's the file's
+/// name, unsaved dot and folder; with more, a row of tabs and a + after
+/// them, which the one tab grows into. The active tab's highlight springs
+/// from tab to tab, and the row scrolls to keep it in view.
+fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, x0: f64, x1: f64, mono_y: f64, now: f64) void {
+    const n = tabCount(d);
+    const want: f64 = if (n > 1) 1 else 0;
+    if (d.slots_seen) d.tabbed.aim(want, now) else d.tabbed.snap(want);
+    syncSlots(d, now);
+    const a = std.math.clamp(d.tabbed.at(now), 0, 1);
+    const ink = if (key) th.fg else th.muted;
+    const ts = tileSize();
+    const hy = gap + head_h / 2;
+    const pad = tab_pad * a;
+    for (d.slots.items) |*s| if (s.line == null) {
+        const j = tabIndex(d, s.id) orelse continue;
+        const nm = if (tabPath(d, j)) |p| std.fs.path.basename(p) else "untitled";
+        s.line = uiLine(nm, name_font, 1e5);
+        s.which = iconFor(nm, false);
+    };
+
+    // Squeeze the tabs to a common cap when they don't all fit, down to
+    // enough for the tile and a few letters.
+    const room = x1 - x0 - 28 * a;
+    var cap: f64 = 1e9;
+    if (n > 1) {
+        var lo: f64 = 2 * pad + ts + tab_shut * a + 36;
+        var hi: f64 = 1e4;
+        for (0..24) |_| {
+            const mid = (lo + hi) / 2;
+            var sum: f64 = 0;
+            for (d.slots.items) |*s| if (!s.gone) {
+                sum += @min(tabWidth(d, s, a), mid) + tab_space * a;
+            };
+            if (sum <= room) lo = mid else hi = mid;
+        }
+        cap = lo;
+    }
+
+    // Where each tab sits, popping ones at their bounce.
+    const off = d.tab_x.at(now);
+    var x = x0 - pad - off;
+    var act: [2]f64 = .{ x, 0 };
+    for (d.slots.items) |*s| {
+        const g = @max(s.grow.step(now), 0);
+        s.x = x;
+        s.w = @min(tabWidth(d, s, a), cap) * g;
+        if (!s.gone and s.id == d.id) act = .{ s.x, s.w };
+        x += s.w + tab_space * a * @min(g, 1);
+    }
+    const end = x;
+    const span = end + off - (x0 - pad);
+    d.tab_x.aim(std.math.clamp(act[0] + off - (x0 - pad) + act[1] / 2 - room / 2, 0, @max(span - room, 0)), now);
+
+    // The active tab's highlight, with one tab sitting on it unseen.
+    for (&d.hl, act) |*h, v| if (a < 0.01) h.snap(v) else h.aim(v, now);
+    const hx = d.hl[0].step(now);
+    const hw = d.hl[1].step(now);
+    if (a > 0.01) {
+        pill(ctx, th.fg, (if (key) @as(f64, 0.08) else 0.05) * a, hx, hy - 11, hw, 22, 7);
+        ring(ctx, th.fg, (if (key) @as(f64, 0.1) else 0.06) * a, hx, hy - 11, hw, 22, 7);
+    }
+
+    for (d.slots.items) |*s| {
+        if (s.w < 0.5 or s.x > x1 or s.x + s.w < x0 - pad) continue;
+        const j = if (s.gone) null else tabIndex(d, s.id);
+        const on = j != null and j.? == d.at;
+        const hovered = j != null and s.id == d.hover;
+        s.hov.aim(if (hovered) 1 else 0, now);
+        const hv = s.hov.at(now) * a;
+        const g = std.math.clamp(s.grow.x, 0, 1);
+        objc.CGContextSaveGState(ctx);
+        objc.CGContextClipToRect(ctx, .{ .x = s.x, .y = hy - 12, .w = s.w, .h = 24 });
+        if (g < 1) objc.CGContextSetAlpha(ctx, g);
+        if (hv > 0.01 and !on) pill(ctx, th.fg, 0.05 * hv, s.x, hy - 11, s.w, 22, 7);
+        tile(ctx, s.which, dark, th, s.x + pad, @round(hy - ts / 2));
+        const nx = s.x + pad + ts + 7;
+        const nw = if (s.line != null) objc.CTLineGetTypographicBounds(s.line, null, null, null) else 0;
+        // The name stops short of the close button.
+        const shut_x = s.x + s.w - pad - tab_shut * a;
+        objc.CGContextSaveGState(ctx);
+        const fit = shut_x - nx;
+        objc.CGContextClipToRect(ctx, .{ .x = nx, .y = hy - 12, .w = @max(fit + 1, 0), .h = 24 });
+        // A squeezed tab's name ends in an ellipsis; one popping in or
+        // folding away is just cut off.
+        const room_w = @floor(cap - 2 * pad - ts - 7 - tab_shut * a);
+        const squeezed = j != null and room_w + 1 < nw;
+        if (squeezed and room_w != s.cut_w) {
+            if (s.cut) |l| objc.CFRelease(l);
+            s.cut = uiLine(if (tabPath(d, j.?)) |p| std.fs.path.basename(p) else "untitled", name_font, room_w);
+            s.cut_w = room_w;
+        }
+        _ = drawLine(ctx, if (squeezed and s.cut != null) s.cut else s.line, if (on or hovered or a < 0.5) ink else th.muted, nx, @round(hy + name_off));
+        objc.CGContextRestoreGState(ctx);
+        // The unsaved dot sits after the name with one tab and slides into
+        // the close button's place with more; hovering trades it for the ×.
+        const cx = shut_x + tab_shut * a / 2;
+        const dirty = j != null and tabDirty(d, j.?);
+        const cross = a * if (on and !dirty) 1 else hv;
+        if (dirty and cross < 0.5) {
+            const dx = nx + nw + 9 + (cx - nx - nw - 9) * a;
+            pill(ctx, th.caret, 1 - 2 * cross, dx - 3, hy - 3, 6, 6, 3);
+        }
+        if (cross > 0.01) {
+            if (hovered and d.hover_x) pill(ctx, th.fg, 0.1 * a, cx - 8, hy - 8, 16, 16, 5);
+            objc.CGContextSetAlpha(ctx, g * cross);
+            drawIcon(icon(.close, dark, th), cx - 6, hy - 6, 12);
+        }
+        objc.CGContextRestoreGState(ctx);
+    }
+
+    // With one tab, the folder after the name; with more, the + after the
+    // tabs. One goes before the other comes, so they never overlap.
+    const folder_a = std.math.clamp(1 - 2 * a, 0, 1);
+    const plus_a = std.math.clamp(2 * a - 1, 0, 1);
+    var nx = end + 8;
+    if (folder_a > 0.01) {
+        if (d.head == null) {
+            var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+            const folder = if (d.path) |p| std.fs.path.dirname(p) orelse "/" else "";
+            d.head = uiLine(tilde(&pbuf, folder), side_font, 1e5);
+        }
+        objc.CGContextSaveGState(ctx);
+        objc.CGContextSetAlpha(ctx, folder_a);
+        nx += drawLine(ctx, d.head, th.muted, nx + 6 * (1 - folder_a), @round(hy + name_off)) + 2 * cw;
+        objc.CGContextRestoreGState(ctx);
+    }
+    d.plus_x = if (a > 0.5) end + 14 else -100;
+    if (plus_a > 0.01) {
+        objc.CGContextSaveGState(ctx);
+        objc.CGContextSetAlpha(ctx, plus_a);
+        drawIcon(icon(.plus, dark, th), end + 4 - 8 * (1 - plus_a), hy - 10, 20);
+        objc.CGContextRestoreGState(ctx);
+        nx = @max(nx, end + 36);
+    }
+    if (d.note.len > 0) _ = k.text(d.note, null, th, th.muted, nx, mono_y, 0, 200);
+    k.flush();
+}
+
+const TabHit = struct { j: usize, id: u32, close: bool };
+
+/// The tab under `p`, and whether it's over the tab's close button. Only
+/// with two tabs or more; one is the window's title.
+fn tabAt(d: *const Doc, p: Point) ?TabHit {
+    if (d.tabbed.to != 1 or @abs(p.y - (gap + head_h / 2)) > 12) return null;
+    for (d.slots.items) |s| {
+        if (s.gone or p.x < s.x or p.x >= s.x + s.w) continue;
+        const j = tabIndex(d, s.id) orelse return null;
+        return .{ .j = j, .id = s.id, .close = p.x >= s.x + s.w - tab_pad - tab_shut };
+    }
     return null;
 }
 
@@ -2638,8 +3051,12 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     d.note = "";
     if (p.y < top_h) {
         d.side_down = true;
-        const t = toolAt(d, p) orelse return titleStrip(d, ev);
-        if (t == .sidebar) toggleSidebar() else _ = newDoc();
+        if (toolAt(d, p)) |t| {
+            if (t == .sidebar) toggleSidebar() else newTab(d);
+            return;
+        }
+        const hit = tabAt(d, p) orelse return titleStrip(d, ev);
+        if (hit.close) closeTab(d, hit.j) else showTab(d, hit.j);
         return;
     }
     if (sideShown(d) and @abs(p.x - side_w) <= edge_grab) {
@@ -2684,6 +3101,27 @@ fn resizeSide(d: *Doc, x: f64) void {
     side_w = w;
     dropSideLines();
     refreshAll();
+}
+
+/// Lights the tab under the mouse and its close button.
+fn mouseMoved(self: Id, _: Sel, ev: Id) callconv(.c) void {
+    const d = docOf(self) orelse return;
+    const p = local(self, ev);
+    const hit = if (p.y < top_h) tabAt(d, p) else null;
+    const id = if (hit) |h| h.id else 0;
+    const shut = if (hit) |h| h.close else false;
+    if (id == d.hover and shut == d.hover_x) return;
+    d.hover = id;
+    d.hover_x = shut;
+    refresh(d);
+}
+
+fn mouseExited(self: Id, _: Sel, _: Id) callconv(.c) void {
+    const d = docOf(self) orelse return;
+    if (d.hover == 0) return;
+    d.hover = 0;
+    d.hover_x = false;
+    refresh(d);
 }
 
 /// Ends a sidebar drag by saving the width, so new windows and the next
@@ -2973,6 +3411,10 @@ fn palette(d: *Doc) void {
     startPrompt(d, .command);
 }
 
+fn closeActive(d: *Doc) void {
+    closeTab(d, d.at);
+}
+
 fn comment(d: *Doc) void {
     if (d.mode != .edit) return;
     d.ed.toggleComment(gpa, d.lang.line_comment) catch {};
@@ -3022,6 +3464,8 @@ pub fn setup() void {
     c.method("mouseDown:", @ptrCast(&mouseDown), "v@:@");
     c.method("mouseDragged:", @ptrCast(&mouseDragged), "v@:@");
     c.method("mouseUp:", @ptrCast(&mouseUp), "v@:@");
+    c.method("mouseMoved:", @ptrCast(&mouseMoved), "v@:@");
+    c.method("mouseExited:", @ptrCast(&mouseExited), "v@:@");
     c.method("scrollWheel:", @ptrCast(&scrollWheel), "v@:@");
     c.method("resetCursorRects", @ptrCast(&resetCursorRects), "v@:");
     c.method("viewDidChangeEffectiveAppearance", @ptrCast(&appearanceChanged), "v@:");
@@ -3045,7 +3489,7 @@ pub fn setup() void {
         .{ "findNext:", findNext },         .{ "findPrevious:", findPrev }, .{ "gotoLine:", gotoLine },
         .{ "quickOpen:", quickOpen },       .{ "toggleComment:", comment }, .{ "zoomIn:", zoomIn },
         .{ "zoomOut:", zoomOut },           .{ "zoomReset:", zoomReset },   .{ "findAndReplace:", findReplace },
-        .{ "commandPalette:", palette },
+        .{ "commandPalette:", palette },    .{ "newTab:", newTab },         .{ "closeTab:", closeActive },
     };
     inline for (actions) |a| c.method(a[0], action(a[1]), "v@:@");
     view_class = c.finish();

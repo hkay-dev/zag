@@ -8,11 +8,12 @@ since: 2026-11-04
 ---
 
 ze is a small text editor. A window shows one file at a time, on a card with rounded corners
-that sits a little in from the window's edges. When you've opened a folder, a sidebar on the
-left lists its files. The card's header shows the file's kind as a small colored icon, its name,
-a dot when there are unsaved changes, its folder, and the line and column of the caret on the
-right. When you find, replace, jump to a line or open a file, a prompt line opens at the bottom
-of the card.
+that sits a little in from the window's edges, and keeps the other files you open in it as tabs.
+When you've opened a folder, a sidebar on the left lists its files. With one file, the card's
+header shows the file's kind as a small colored icon, its name, a dot when there are unsaved
+changes, its folder, and the line and column of the caret on the right. With more, it shows tabs
+instead (see Tabs). When you find, replace, jump to a line or open a file, a prompt line opens at
+the bottom of the card.
 
 ze follows the Mac's light or dark setting unless you pick one, with a theme for each (see Themes). Things move
 a little instead of jumping: the caret glides to each new spot and blinks with a soft fade after a
@@ -34,7 +35,7 @@ Right-click (or control-click) in the text for **Cut**, **Copy**, **Paste**, **S
 
 The window has no title bar of its own. The traffic lights sit at the top of the sidebar, in line
 with the header, next to a sidebar button that shows or hides the sidebar and a **+** button
-at the sidebar's right that opens a new window. With the sidebar hidden, the traffic lights and
+at the sidebar's right that opens a new tab. With the sidebar hidden, the traffic lights and
 the sidebar button sit on the header. Drag the header or the empty band above the sidebar to
 move the window, and double-click it to zoom (or minimize, or nothing, as Desktop & Dock's
 "Double-click a window's title bar" setting says).
@@ -61,10 +62,32 @@ points at the matching command in its menu. Press Return to run it.
 - **File > Quick Open…** (⌘P) lists every file in ze's folder (see Sidebar). Type a few letters
   of the name, use ↑ and ↓ to pick, and press Return.
 - Opening a file that's already open in another window brings that window forward. Quick open
-  and the sidebar show the new file in the same window, which keeps the file it had (see Sidebar).
+  and the sidebar show the new file in a new tab, right of the one on show (see Tabs).
 - A file opens where you left it: the caret and the scroll come back to where they were the last
   time you closed it.
 - Files that look binary don't open.
+
+## Tabs
+
+Every file a window has shown stays in it as a tab, with its unsaved changes and undo, so
+switching never asks you to save. With one file the header is just its name and folder. Open a
+second and the header turns into a row of tabs: the name becomes the first tab, the new one pops
+in beside it with a little bounce, and a **+** shows after the last one.
+
+- Click a tab to show its file. The active tab's highlight hops over to it.
+- The active tab, and any tab under the mouse, shows a **×** that closes it. A tab with unsaved
+  changes shows a dot there instead until you point at it. Closing one folds it shut and the tabs
+  after it slide over.
+- **File > New Tab** (⌘T) or the **+** opens an untitled file in a new tab.
+- **File > Close Tab** (⌘W) closes the tab on show, asking first when it has unsaved changes. The
+  tab to its right takes its place. Closing the last tab closes the window.
+- **File > Close Window** (⇧⌘W) closes the window and all its tabs.
+- **View > Show Next Tab** (⌃Tab) and **Show Previous Tab** (⌃⇧Tab) step through the tabs and go
+  around at the ends.
+
+When the tabs don't fit, they all get narrower and their names end in "…". Past that, the row
+scrolls to keep the active tab in view. Drag the header between and around the tabs to move the
+window.
 
 ## Sidebar
 
@@ -82,13 +105,13 @@ folder's row pushes it away. Click a pinned folder to scroll back to it.
 
 - Click a folder to open or close it. Its files fade in or out while the rows below slide to make
   room, and its arrow turns.
-- Click a file to show it in the same window, where its text fades in. The window keeps every file it has shown, with
-  its unsaved changes and undo, so switching never asks you to save. A dot next to a file in the
+- Click a file to show it in a new tab, where its text fades in. A dot next to a file in the
   sidebar means it has unsaved changes.
 - ⌘-click a file to open it in a new window.
 - Right-click (or control-click) a file for **Open in New Window**, **Reveal in Finder** and
   **Copy Path**. A folder has the last two.
-- **View > Previous File** (⌃Tab) goes back to the file the window showed before.
+- **View > Show Next Tab** (⌃Tab) and **Show Previous Tab** (⌃⇧Tab) step through the window's
+  tabs.
 - **View > Sidebar** (⌘\) or the sidebar button by the traffic lights shows or hides the sidebar
   in every window. It slides in and out, and the text's card follows its edge. It also hides when
   a window is too narrow to fit it beside the text.
@@ -171,9 +194,9 @@ it in, so a crash halfway through a save never leaves a half-written file. The f
 permissions.
 
 Closing a window, or quitting, with unsaved changes asks whether to save them first. When a
-window holds more than one unsaved file, one question covers them all: **Save All** saves each
-one (asking for a name for any untitled file), **Don't Save** drops the changes, and **Cancel**
-keeps the window open.
+window holds more than one unsaved file in its tabs, one question covers them all: **Save All**
+saves each one (asking for a name for any untitled file), **Don't Save** drops the changes, and
+**Cancel** keeps the window open.
 
 ## Syntax colors
 
@@ -196,7 +219,7 @@ show the mode and the two themes in use. ze remembers them in the settings file.
 
 ## Font and text size
 
-- **View > Font…** (⌘T) opens the Mac's Font panel. Pick any font; monospaced ones look best.
+- **View > Font…** (⇧⌘T) opens the Mac's Font panel. Pick any font; monospaced ones look best.
 - **View > Bigger** (⌘=) and **Smaller** (⌘-) change the text size in every window, and
   **Actual Size** (⌘0) puts it back to 14.
 
