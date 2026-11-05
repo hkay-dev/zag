@@ -234,6 +234,9 @@ fn buildMenu(delegate: Id) void {
     _ = item(w, "Minimize", "performMiniaturize:", "m", cmd);
     _ = item(w, "Zoom", "performZoom:", "", 0);
     msg(void, app(), "setWindowsMenu:", .{w});
+
+    const help = submenu(bar, "Help");
+    msg(void, app(), "setHelpMenu:", .{help});
     msg(void, app(), "setMainMenu:", .{bar});
     msg(void, bar, "release", .{});
 }
