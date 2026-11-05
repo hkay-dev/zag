@@ -7,16 +7,22 @@
 #           use with a message instead of drawing garbage or crashing later.
 #   stable  "ze", dev.hkay.ze, at zig-out/ze.app. Only scripts/ship.sh makes
 #           it, and installs it at ~/Applications/ze.app.
+#   perf    "ze Perf", dev.hkay.ze.perf, at zig-out/ze Perf.app: the same
+#           release with the self-driving bench compiled in, for
+#           scripts/bench.sh. Background only, like dev.
 set -eu
 cd "$(dirname "$0")/.."
 flavor=${1:-dev}
 case $flavor in
   dev) name="ze Dev" id=dev.hkay.ze.dev ui="<key>LSUIElement</key><true/>" ;;
+  perf) name="ze Perf" id=dev.hkay.ze.perf ui="<key>LSUIElement</key><true/>" ;;
   stable) name=ze id=dev.hkay.ze ui="" ;;
-  *) echo "bundle.sh: dev or stable, not $flavor" >&2; exit 1 ;;
+  *) echo "bundle.sh: dev, perf or stable, not $flavor" >&2; exit 1 ;;
 esac
 app=${2:-"zig-out/$name.app"}
-if [ "$flavor" = dev ] && [ "${ZE_DEBUG:-}" = 1 ]; then zig build; else zig build --release; fi
+if [ "$flavor" = dev ] && [ "${ZE_DEBUG:-}" = 1 ]; then zig build
+elif [ "$flavor" = perf ]; then zig build --release -Dbench=true
+else zig build --release; fi
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp zig-out/bin/ze "$app/Contents/MacOS/ze"

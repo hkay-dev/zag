@@ -1,0 +1,276 @@
+//! Bench mode, built only with `zig build -Dbench=true` (scripts/bench.sh).
+//! With ZE_BENCH=<dir> set, ze opens ZE_BENCH_FILES (colon-separated) in one
+//! window with ZE_BENCH_ROOT in the sidebar, drives itself through a fixed
+//! script, times each step's work plus the synchronous draw that follows it,
+//! appends one number per step to `<dir>/<metric>.txt` and quits. It never
+//! takes focus: the window stays behind every other one and nothing goes
+//! through the HID.
+const std = @import("std");
+const objc = @import("objc.zig");
+const view = @import("view.zig");
+const Id = objc.Id;
+const Sel = objc.Sel;
+const msg = objc.msg;
+
+extern fn CACurrentMediaTime() f64;
+extern fn CGEventCreateScrollWheelEvent2(source: ?*anyopaque, units: u32, count: u32, w1: i32, w2: i32, w3: i32) ?*anyopaque;
+extern fn CGEventSetLocation(ev: ?*anyopaque, at: objc.Point) void;
+extern fn sysctl(name: [*]const c_int, len: c_uint, old: ?*anyopaque, oldlen: *usize, new: ?*anyopaque, newlen: usize) c_int;
+extern fn gettimeofday(tv: *[2]i64, tz: ?*anyopaque) c_int;
+extern fn getrusage(who: c_int, usage: *[18]i64) c_int;
+extern fn task_info(task: u32, flavor: c_int, info: *[64]u64, count: *u32) c_int;
+extern fn usleep(us: c_uint) c_int;
+extern fn clock_gettime_nsec_np(clock: c_int) u64;
+extern var mach_task_self_: u32;
+
+const Sample = struct { metric: []const u8, x: f64 };
+var samples: std.ArrayList(Sample) = .empty;
+var out: []const u8 = "";
+var v: Id = null;
+var win: Id = null;
+
+/// Called from main before the run loop starts. Does nothing without ZE_BENCH.
+pub fn start() void {
+    const dir = std.c.getenv("ZE_BENCH") orelse return;
+    out = std.mem.span(dir);
+    view.background = true;
+    samples.ensureTotalCapacity(view.gpa, 4096) catch fail("no memory");
+    const c = objc.ClassBuilder.begin("NSObject", "ZeBench");
+    c.method("begin:", @ptrCast(&begin), "v@:@");
+    c.method("run:", @ptrCast(&run), "v@:@");
+    _ = c.finish();
+    const b = objc.new("ZeBench");
+    msg(void, b, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("begin:"), @as(Id, null), @as(f64, 0) });
+}
+
+/// Right after launch: open the files, size the window and draw it once,
+/// which ends the launch number, then let things settle before the script.
+fn begin(self: Id, _: Sel, _: Id) callconv(.c) void {
+    if (std.c.getenv("ZE_BENCH_ROOT")) |r| if (view.gpa.dupe(u8, std.mem.span(r))) |dir| view.setRoot(dir) else |_| {};
+    if (std.c.getenv("ZE_BENCH_FILES")) |fs| {
+        var it = std.mem.tokenizeScalar(u8, std.mem.span(fs), ':');
+        while (it.next()) |p| view.open(p, view.keyDoc());
+    }
+    findView();
+    if (std.c.getenv("ZE_BENCH_LAUNCH_ONLY") == null) msg(void, win, "setFrame:display:", .{ objc.Rect{ .x = 40, .y = 40, .w = 1200, .h = 760 }, true });
+    msg(void, v, "displayIfNeeded", .{});
+    put("launch_ms", (wallNow() - procStart()) * 1000);
+    memory("launch_mb", "launch_peak_mb");
+    visible();
+    msg(void, self, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("run:"), @as(Id, null), @as(f64, 1.5) });
+}
+
+/// 1 when any of the window shows on screen, 0 when other windows cover it
+/// all (macOS then paces its frames differently): a condition to note with
+/// the numbers.
+fn visible() void {
+    put("visible", if (msg(usize, win, "occlusionState", .{}) & 2 != 0) 1 else 0);
+}
+
+fn run(_: Id, _: Sel, _: Id) callconv(.c) void {
+    // A copy of a real session: just launch and let it settle, never edit.
+    if (std.c.getenv("ZE_BENCH_LAUNCH_ONLY") != null) {
+        for (0..5) |_| settle();
+        memory("footprint_mb", "peak_mb");
+        flush();
+        std.c.exit(0);
+    }
+    const cpu0 = cpuNow();
+    const main0 = threadCpu();
+    // The first tab holds the big file.
+    view.stepTab(1);
+    settle();
+
+    // A full redraw of an idle window.
+    for (0..120) |_| step("frame_ms", true, nothing, .{});
+    memory("mem_frame_mb", "peak_frame_mb");
+
+    // Typing in the middle of the big file.
+    for (0..600) |_| command("moveDown:");
+    settle();
+    for (0..200) |i| step("key_ms", false, insert, .{if (i % 7 == 6) " " else "x"});
+    for (0..200) |_| command("deleteBackward:");
+    settle();
+    memory("mem_key_mb", "peak_key_mb");
+
+    // Scrolling down and back up with the trackpad.
+    for (0..400) |i| step("scroll_ms", false, scroll, .{@as(i32, if (i < 200) -40 else 40)});
+    settle();
+    memory("mem_scroll_mb", "peak_scroll_mb");
+
+    // Switching tabs: the switch and its first frame, then later frames of
+    // the switch's fade at 120 Hz.
+    for (0..60) |_| {
+        step("tab_ms", false, view.stepTab, .{@as(isize, 1)});
+        settle();
+    }
+    memory("mem_tab_mb", "peak_tab_mb");
+    for (0..20) |_| {
+        view.stepTab(1);
+        for (0..12) |_| step("anim_frame_ms", false, tick, .{});
+    }
+    settle();
+    memory("mem_anim_mb", "peak_anim_mb");
+    // ZE_BENCH_HOLD=<seconds> waits here, for footprint or vmmap to look.
+    if (std.c.getenv("ZE_BENCH_HOLD")) |h| sleep(std.fmt.parseFloat(f64, std.mem.span(h)) catch 0);
+
+    // The command palette: open it, filter it a letter at a time, close it.
+    for (0..20) |_| {
+        step("palette_ms", false, palette, .{});
+        for ([_][]const u8{ "s", "p", "l", "i", "t" }) |ch| step("palette_ms", false, insert, .{ch});
+        step("palette_ms", false, command, .{"cancelOperation:"});
+        settle();
+    }
+
+    put("proc_cpu_ms", (cpuNow() - cpu0) * 1000);
+    put("main_cpu_ms", (threadCpu() - main0) * 1000);
+    memory("footprint_mb", "peak_mb");
+    visible();
+    flush();
+    std.c.exit(0);
+}
+
+/// The process's physical footprint now and its peak so far, in MB, from
+/// TASK_VM_INFO (phys_footprint and ledger_phys_footprint_peak).
+fn memory(comptime now: []const u8, comptime peak: []const u8) void {
+    var info: [64]u64 = @splat(0);
+    var n: u32 = 128;
+    if (task_info(mach_task_self_, 22, &info, &n) != 0) return;
+    put(now, @as(f64, @floatFromInt(info[18])) / (1 << 20));
+    put(peak, @as(f64, @floatFromInt(info[21])) / (1 << 20));
+}
+
+/// Times `f(args)` plus the draw it causes (the whole view when `full`),
+/// as main-thread CPU time, so neither load on the Mac nor the window
+/// server's pace counts. Each step is one run loop turn: its own
+/// autorelease pool and a Core Animation commit, outside the timing. Steps
+/// come no faster than a 120 Hz display asks for frames: faster, and a
+/// window that shows on screen piles up new backing stores for frames the
+/// screen hasn't shown yet, which real use never does.
+fn step(comptime metric: []const u8, comptime full: bool, comptime f: anytype, args: anytype) void {
+    sleep(1.0 / 120.0);
+    const pool = objc.objc_autoreleasePoolPush();
+    const t0 = threadCpu();
+    @call(.auto, f, args);
+    if (full) msg(void, v, "setNeedsDisplay:", .{true});
+    msg(void, v, "displayIfNeeded", .{});
+    put(metric, (threadCpu() - t0) * 1000);
+    msg(void, objc.class("CATransaction"), "flush", .{});
+    objc.objc_autoreleasePoolPop(pool);
+}
+
+/// This thread's CPU seconds so far.
+fn threadCpu() f64 {
+    return @as(f64, @floatFromInt(clock_gettime_nsec_np(16))) / 1e9;
+}
+
+fn nothing() void {}
+
+/// What the display link does each frame.
+fn tick() void {
+    msg(void, v, "tick:", .{@as(Id, null)});
+}
+
+fn palette() void {
+    msg(void, v, "commandPalette:", .{@as(Id, null)});
+}
+
+fn insert(s: []const u8) void {
+    msg(void, v, "insertText:", .{objc.str(s)});
+}
+
+fn command(name: [*:0]const u8) void {
+    msg(void, v, "doCommandBySelector:", .{objc.sel_registerName(name)});
+}
+
+/// A precise (trackpad) scroll of `dy` points over the middle of the card.
+fn scroll(dy: i32) void {
+    const ev = CGEventCreateScrollWheelEvent2(null, 0, 1, dy, 0, 0) orelse fail("no scroll event");
+    defer objc.CFRelease(ev);
+    const f = msg(objc.Rect, win, "frame", .{});
+    const screens = msg(Id, objc.class("NSScreen"), "screens", .{});
+    const top = msg(objc.Rect, msg(Id, screens, "objectAtIndex:", .{@as(usize, 0)}), "frame", .{}).h;
+    CGEventSetLocation(ev, .{ .x = f.x + 700, .y = top - (f.y + f.h) + 300 });
+    msg(void, v, "scrollWheel:", .{msg(Id, objc.class("NSEvent"), "eventWithCGEvent:", .{ev})});
+}
+
+/// Lets springs and fades finish, drawing about as often as the display would.
+fn settle() void {
+    for (0..30) |_| {
+        sleep(0.008);
+        const pool = objc.objc_autoreleasePoolPush();
+        tick();
+        msg(void, v, "displayIfNeeded", .{});
+        msg(void, objc.class("CATransaction"), "flush", .{});
+        objc.objc_autoreleasePoolPop(pool);
+    }
+}
+
+fn findView() void {
+    const app = msg(Id, objc.class("NSApplication"), "sharedApplication", .{});
+    const ws = msg(Id, app, "windows", .{});
+    for (0..msg(usize, ws, "count", .{})) |i| {
+        const w = msg(Id, ws, "objectAtIndex:", .{i});
+        const subs = msg(Id, msg(Id, w, "contentView", .{}), "subviews", .{});
+        const last = msg(Id, subs, "lastObject", .{});
+        if (last != null and msg(bool, last, "isKindOfClass:", .{objc.class("ZeView")})) {
+            win = w;
+            v = last;
+            return;
+        }
+    }
+    fail("no ze view");
+}
+
+fn sleep(s: f64) void {
+    _ = usleep(@intFromFloat(s * 1e6));
+}
+
+fn seconds(tv: *const [2]i64) f64 {
+    return @as(f64, @floatFromInt(tv[0])) + @as(f64, @floatFromInt(@as(i32, @truncate(tv[1])))) / 1e6;
+}
+
+fn wallNow() f64 {
+    var tv: [2]i64 = undefined;
+    _ = gettimeofday(&tv, null);
+    return seconds(&tv);
+}
+
+/// When this process started: p_starttime opens kinfo_proc.
+fn procStart() f64 {
+    var buf: [1024]u8 align(8) = undefined;
+    var len: usize = buf.len;
+    const mib = [_]c_int{ 1, 14, 1, std.c.getpid() };
+    if (sysctl(&mib, 4, &buf, &len, null, 0) != 0) return wallNow();
+    return seconds(@ptrCast(&buf));
+}
+
+/// User plus system CPU seconds of every thread of this process so far.
+fn cpuNow() f64 {
+    var ru: [18]i64 = undefined;
+    _ = getrusage(0, &ru);
+    return seconds(ru[0..2]) + seconds(ru[2..4]);
+}
+
+fn put(metric: []const u8, x: f64) void {
+    samples.append(view.gpa, .{ .metric = metric, .x = x }) catch {};
+}
+
+/// Appends each sample to `<out>/<metric>.txt`.
+fn flush() void {
+    for (samples.items) |s| {
+        var path: [1024]u8 = undefined;
+        const p = std.fmt.bufPrintSentinel(&path, "{s}/{s}.txt", .{ out, s.metric }, 0) catch continue;
+        const fd = std.c.open(p, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, @as(std.c.mode_t, 0o644));
+        if (fd < 0) continue;
+        defer _ = std.c.close(fd);
+        var line: [64]u8 = undefined;
+        const t = std.fmt.bufPrint(&line, "{d:.4}\n", .{s.x}) catch continue;
+        _ = std.c.write(fd, t.ptr, t.len);
+    }
+}
+
+fn fail(why: []const u8) noreturn {
+    _ = std.c.write(2, why.ptr, why.len);
+    std.c.exit(1);
+}

@@ -19,6 +19,10 @@ const opt: usize = 1 << 19;
 const release = @import("builtin").mode != .debug;
 pub const panic = if (release) std.debug.no_panic else std.debug.FullPanic(std.debug.defaultPanic);
 pub const std_options_debug_threaded_io: ?*std.Io.Threaded = if (release) null else std.Io.Threaded.global_single_threaded;
+/// The self-driving bench, only in `-Dbench=true` builds.
+const bench = if (@import("build_options").bench) @import("bench.zig") else struct {
+    fn start() void {}
+};
 
 var args: []const [:0]const u8 = &.{};
 
@@ -326,6 +330,7 @@ pub fn main(init: std.process.Init.Minimal) void {
 
     buildMenu(delegate);
     view.setup();
+    bench.start();
     objc.objc_autoreleasePoolPop(pool);
     msg(void, nsapp, "run", .{});
 }

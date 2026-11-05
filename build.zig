@@ -16,6 +16,11 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .strip = optimize != .debug,
     });
+    // `-Dbench=true` compiles in the self-driving bench (src/bench.zig, run
+    // by scripts/bench.sh). Shipped builds leave it out.
+    const opts = b.addOptions();
+    opts.addOption(bool, "bench", b.option(bool, "bench", "Compile in the bench mode") orelse false);
+    mod.addOptions("build_options", opts);
     if (!target.query.isNative()) {
         if (std.zig.system.darwin.getSdk(b.allocator, b.graph.io, &target.result)) |sdk| {
             mod.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System/Library/Frameworks" }) });
