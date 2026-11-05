@@ -56,7 +56,8 @@ The left side of each window lists the files of ze's folder, folders first. That
 started in from a terminal, or the one you opened last. Started from the Dock or Finder with no
 folder from last time, it's your home folder. Files and folders whose names start with a dot are
 left out. Each row has a small icon for its kind: folder, code, Markdown, data, image or plain
-text. Names are in the Mac's system font and end in "…" when they don't fit.
+text. Names are in the Mac's system font and end in "…" when they don't fit. The window's file
+is marked with a rounded highlight set in from the sidebar's edges, like Finder's sidebar.
 
 - Click a folder to open or close it.
 - Click a file to show it in the same window. The window keeps every file it has shown, with

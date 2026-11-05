@@ -66,6 +66,9 @@ const Theme = settings.Theme;
 const pad_x = 28.0;
 const top_h = 40.0;
 const side_w = 250.0;
+/// The sidebar's selection sits this far in from its edges, with rounded corners.
+const side_inset = 8.0;
+const side_radius = 5.0;
 
 /// The sidebar shows when there's a folder, it's turned on, and the window
 /// is wide enough to keep room for the text.
@@ -249,6 +252,15 @@ fn fill(ctx: Id, c: Rgb, x: f64, y: f64, w: f64, h: f64) void {
 fn fillA(ctx: Id, c: Rgb, a: f64, x: f64, y: f64, w: f64, h: f64) void {
     objc.CGContextSetRGBFillColor(ctx, c[0], c[1], c[2], a);
     objc.CGContextFillRect(ctx, .{ .x = x, .y = y, .w = w, .h = h });
+}
+
+/// A rounded rectangle, like the sidebar's selection in Finder.
+fn pill(ctx: Id, c: Rgb, x: f64, y: f64, w: f64, h: f64) void {
+    const path = objc.CGPathCreateWithRoundedRect(.{ .x = x, .y = y, .w = w, .h = h }, side_radius, side_radius, null);
+    defer if (path) |p| objc.CFRelease(p);
+    objc.CGContextSetRGBFillColor(ctx, c[0], c[1], c[2], 1);
+    objc.CGContextAddPath(ctx, path);
+    objc.CGContextFillPath(ctx);
 }
 
 fn nscolor(c: Rgb) Id {
@@ -1708,16 +1720,16 @@ fn drawSide(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, by: f64, dark: bool) vo
     objc.CGContextSaveGState(ctx);
     objc.CGContextClipToRect(ctx, .{ .y = top_h - 8, .w = side_w - 1, .h = by - top_h + 8 });
     const y0 = top_h - d.side_y;
-    if (side_head == null) side_head = uiLine(std.fs.path.basename(root.?), head_font, side_w - 28);
-    _ = drawLine(ctx, side_head, th.muted, 14, y0 + side_base);
+    if (side_head == null) side_head = uiLine(std.fs.path.basename(root.?), head_font, side_w - 36);
+    _ = drawLine(ctx, side_head, th.muted, 22, y0 + side_base);
     if (side_lines.items.len < rows.len) side_lines.appendNTimes(gpa, null, rows.len - side_lines.items.len) catch return objc.CGContextRestoreGState(ctx);
     const s = @round(conf.size + 4);
     const from: usize = @intFromFloat(@max(@floor(d.side_y / lh) - 1, 0));
     const to: usize = @min(rows.len, @as(usize, @intFromFloat(@ceil((d.side_y + view_h) / lh))));
     for (rows[@min(from, to)..to], @min(from, to) + 1..) |row, i| {
         const y = y0 + f(i) * lh;
-        const x = 10 + f(row.depth) * 14;
-        if (cur != null and std.mem.eql(u8, row.rel, cur.?)) fill(ctx, th.sel, 0, y, side_w - 1, lh);
+        const x = 18 + f(row.depth) * 14;
+        if (cur != null and std.mem.eql(u8, row.rel, cur.?)) pill(ctx, th.sel, side_inset, y, side_w - 1 - 2 * side_inset, lh);
         const iy = y + (lh - s) / 2;
         if (row.dir) drawIcon(icon(if (tree.isOpen(row.rel)) .opened else .closed, dark, th), x, iy + (s - 14) / 2, 14);
         drawIcon(icon(iconFor(row), dark, th), x + 15, iy, s);
