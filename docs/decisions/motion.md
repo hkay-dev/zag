@@ -53,6 +53,59 @@ showing and hiding, and later tabs and split panes. A jump is a bug.
 
 ## Timing
 
-Short and ease-out, so nothing feels like it waits on the animation: 0.09 s for the caret, 0.12 to
-0.2 s for fades, folds and the file fade-in, 0.24 s for the sidebar slide, 0.16 s for scroll
-glides. A click during an animation acts at once: a closing folder finishes shutting first.
+Short and ease-out, so nothing feels like it waits on the animation: 0.12 to 0.2 s for fades,
+folds and the file fade-in, 0.24 s for the sidebar slide, 0.16 s for scroll glides. A click during
+an animation acts at once: a closing folder keeps sliding and the click maps through its rows.
+
+- Caret glide: 0.05 s for a step of one column or less on the same row, else
+  `clamp(0.07 + 0.025 * log2(1 + dist / lineHeight), 0.07, 0.14)`. A move that extends a selection
+  snaps. The glide time is set only when a glide starts, so redraws keep zig-editor#258w fixed.
+- Blink: one 1 s keyframe animation, solid until 0.5, fade out to 0.62, dark until 0.9, fade in.
+  The solid hold after a move is the first segment (zig-editor#r6r2).
+- Find pill pop: spring k 600 c 22 kicked to v 6, peaks near 1.14, restarts on each jump. The old
+  pill fades over 0.12 s. Opening find on prefilled text staggers the other matches 8 ms per row,
+  capped at 120 ms.
+- Flash on undo, redo, Replace All and big pastes: caret color at 0.28, 0.1 s hold, then 0.45 s
+  ease-out. The next key clears it.
+- Shake (no matches, refused split): `6 * sin(2 * pi * 3t) * (1 - t)` over 0.3 s. A card shake
+  leaves the caret still (zig-editor#bdw5).
+- Prompt band (zig-editor#tdry): 0.14 s in, 0.12 s out, the words 30 ms behind. Closing keeps
+  drawing the last label and text held on the doc. Text layout uses the final height.
+- Tab switch: the text fades from 0.35 to 1 over 0.12 s with no rise, and the caret layer fades in
+  with it. Only a file freshly read from disk keeps the fade and rise.
+- Empty-window shortcut hint: fades in over 0.3 s after a 0.4 s delay, out over 0.12 s when the
+  card stops being blank or a prompt opens.
+- Scroll bar: 0.08 s in, 0.25 s out. The 1 s hold is a one-shot timer (`barHold:`), not display
+  link frames, so `scenery()` doesn't wait on it. Sidebar-only motion (selection, hover, the +
+  button) redraws only the sidebar strip through the dirty rect; other motion redraws the window.
+- Palette and quick open (zig-editor#fjkf): the first six rows stagger in 12 ms apart, and rows
+  that move while filtering crossfade over 0.08 s.
+- Split share spring k 260 c 30. The gap drag snaps to 1/2, 1/3 and 2/3 within 6 pt, and past a
+  limit it rubber-bands at 0.3 of the pull, up to 24 pt, then springs back on mouse-up. A drop
+  that splits starts at the previewed half with a kick of 0.3, the preview ring and the new ring
+  crossfade over 0.15 s, and the copy flies to the new card's title.
+- Sidebar edge: same rubber band as splits (0.3, 24 pt) with the spring from the split drag, and
+  dragging below 100 pt collapses it with the normal slide, restoring the saved width after.
+- Zen: a `z` spring k 200 c 28 blends the text padding, header, card rings and the traffic
+  lights' alpha. The sidebar material is covered by opaque chrome, not hidden.
+- Tabs (zig-editor#gw33): grow spring c 25, with the tab's contents scaling 0.92 to 1 on it. Each
+  tab's name width rides a spring k 420 c 34, so renames glide. Ink and weight follow the
+  highlight spring as it lands. A button's click fill shows at once and fades over 0.15 s.
+- Sidebar hover: spring k 700 c 53 (critically damped, no bounce). The selection fades its bold
+  name in and out on the selection spring's distance (zig-editor#jpd4).
+- Theme and appearance change: 0.25 s ease-in-out layer crossfade, skipped for Zen alone
+  (zig-editor#ms1x). The drag ghost lifts to 1.04 on a spring k 500 c 28 with a real shadow, and
+  the card shadow halves over 0.2 s when the window stops being key.
+- Folds keep two records, the latest click's and one still closing, so clicks map through
+  sliding rows and never snap a closing folder. Only a second folder closing at once, or a click
+  inside a closing folder's rows, finishes the older one early.
+- Haptics (trackpad taps): alignment taps when a split gap or the sidebar edge reaches a snap
+  point or limit, and when a dragged tab swaps places; a level tap when the drop zone changes
+  kind. Never on typing, clicks or scrolling.
+
+## Reduce Motion is not followed
+
+Decided by Harsha on 2026-11-05: "I do not want to cater to Reduced Motion at all." The audit
+(docs/design/2026-11-05-design-audit.md) suggested a crossfade-only mode, and we're not building
+it. Increase Contrast is followed (zig-editor#ms1x). Don't add a Reduce Motion branch to any
+animation.

@@ -13,15 +13,19 @@ ze is a small text editor. A window shows files on cards with rounded corners th
 in from the window's edges. A window starts with one card and can split into more, side by side
 or stacked (see Cards), and each card keeps the files you open in it as tabs.
 When you've opened a folder, a sidebar on the left lists its files. With one file, the card's
-header shows the file's icon, its name, a dot when there are unsaved changes, and its folder.
+header shows the file's icon, its name, a dot when there are unsaved changes, and its folder
+inside the open folder, with small arrows between folders (a file directly in the open folder
+shows none; outside it the path starts at ~).
 With more, it shows tabs instead (see Tabs). When you find, replace, jump to a line or open a
 file, a prompt line opens at the bottom of the card.
 
 ze follows the Mac's light or dark setting unless you pick one, with a theme for each (see Themes). Things move
-a little instead of jumping: the caret glides to each new spot and blinks with a soft fade after a
-moment of rest, the band behind the caret's line slides after it, a new selection fades in, the
-quick open list rises out of the prompt line, and the page eases into place when the keyboard
-scrolls it. Scrolling with the trackpad or mouse follows your fingers exactly. Pull the trackpad
+a little instead of jumping: the caret glides to each new spot, faster for a step along a line,
+and holds solid for a moment before it fades out and back in, the band behind the caret's line
+slides after it, a new selection fades in, the quick open list rises out of the prompt line, and
+the prompt line itself slides up from the bottom of the card, its words a moment behind. The page
+eases into place when the keyboard scrolls it. Scrolling with the trackpad or mouse follows your
+fingers exactly. Pull the trackpad
 past the top or bottom of the file (or the left edge) and the page stretches with some resistance,
 never more than three lines at the top or bottom, then springs back when you lift your fingers;
 momentum that hits an end overshoots a little and
@@ -29,12 +33,17 @@ settles. A mouse wheel stops at the ends. The bottom end leaves three blank line
 line. Windows in the background don't show a caret, their
 sidebar highlight fades and their header dims. The mouse pointer hides while you type and
 comes back when you move the mouse. The sidebar's highlight and the picked row in the quick open
-list hop to their new row with a little bounce, the prompt line's words rise in as it opens, and
-the buttons by the traffic lights and the tabs' **+** light up under the mouse.
+list hop to their new row with a little bounce, and the buttons by the traffic lights and the
+tabs' **+** light up under the mouse, with a round fill that fades after a click.
+
+A card with no file open shows the shortcuts for quick open, open and the command palette,
+fading in after a moment and out when you start something.
 
 A thin scroll bar shows on the right edge of the text while the page scrolls, with its knob
-sized and placed by how much of the file is in view, and fades out a second after it stops. A file
-that fits in the window never shows one.
+sized and placed by how much of the file is in view. It fades in quickly and fades out a second
+after it stops. A file that fits in the window never shows one.
+
+ze doesn't follow the Mac's Reduce Motion setting: things move the same way with it on.
 
 Right-click (or control-click) in the text for **Cut**, **Copy**, **Paste**, **Select All** and
 **Toggle Comment**, the same commands as the Edit menu.
@@ -50,10 +59,14 @@ Desktop & Dock's "Double-click a window's title bar" setting says).
 ## Command palette
 
 **View > Command Palette…** (⌘K) lists every command in ze's menus above the prompt line, the View
-menu's first, each with its shortcut and a checkmark when it's on. Type a few letters, use ↑ and
+menu's first. The list is an inset rounded panel with a soft shadow above it, set in the Mac's
+system font like a menu. Each command has its shortcut on the right, lined up like the Mac's
+menus, and a checkmark in a column on the left when it's on. The picked row has the same soft
+fill as the sidebar's selection, and the first rows slide in one after another when the list
+opens. Quick open looks the same. Type a few letters, use ↑ and
 ↓ to pick, and press Return to run it, or Escape to close the list. Commands inside a submenu or
-under a heading carry its name, like "Appearance: Dark" or "Dark Mode: Ayu Dark", so typing
-`dark` finds them all.
+under a heading carry its name in gray, like "Appearance: Dark" or "Dark Mode: Ayu Dark", so
+typing `dark` finds them all.
 
 The Mac's own menu search works too: press ⇧⌘/ (or open the **Help** menu) and type, and macOS
 points at the matching command in its menu. Press Return to run it.
@@ -61,10 +74,12 @@ points at the matching command in its menu. Press Return to run it.
 ## Markdown preview
 
 **View > Markdown Preview** (⇧⌘M), also in ⌘K, opens a read-only preview in a separate
-window. Run it again to close it. Keep typing in the editor: the preview updates after a short
-pause without jumping back to the top. It stays with the file it was opened for when you switch
-tabs or cards, and closes with its window. Other text files can be previewed too, using the same
-Markdown rules.
+window, titled with the file's name and "Preview", with the file's icon in the title bar. The
+window has the same page color as the editor, and the text sits in a centered column no wider
+than 680 points. Run it again to close it. Keep typing in the editor: the preview updates after a
+short pause without jumping back to the top. It stays with the file it was opened for when you
+switch tabs or cards, and closes with its window. Other text files can be previewed too, using
+the same Markdown rules.
 
 ## Open files
 
@@ -88,7 +103,9 @@ Markdown rules.
 Every file a window has shown stays in it as a tab, with its unsaved changes and undo, so
 switching never asks you to save. With one file the header is just its name and folder. Open a
 second and the header turns into a row of tabs: the name becomes the first tab, the new one pops
-in beside it with a little bounce, and a **+** shows after the last one.
+in beside it with a little bounce, and a **+** shows after the last one. The active tab's name is
+in medium weight and full strength, the others lighter; switching fades the text in without
+moving it, and tabs keep their widths.
 
 - Click a tab to show its file. The active tab's highlight hops over to it.
 - The active tab, and any tab under the mouse, shows a **×** that closes it. A tab with unsaved
@@ -97,7 +114,8 @@ in beside it with a little bounce, and a **+** shows after the last one.
   one folds it shut and the tabs after it slide over.
 - **File > New Tab** (⌘T) or the **+** opens an untitled file in a new tab. It stays open, even
   while it's empty, until you close it. Its tab and the window take their name from its first
-  line of text, and it's "Untitled" while it has none.
+  line of text once you pause typing, or at once when you press Return, and it's "Untitled" while
+  it has none.
 - **File > Close Tab** (⌘W) closes the tab on show, asking first when it has unsaved changes. The
   tab to its right takes its place. Closing the last tab folds its card away, or closes the
   window when it's the only card.
@@ -129,7 +147,9 @@ others hide their caret and dim their header.
 - Click a card to focus it. **View > Next Card** (⌘]) and **Previous Card** (⌘[) step through
   them and go around at the ends.
 - Drag the gap between two cards to resize them. Neither gets narrower than 220 points or shorter
-  than 140. ⌘D beeps when the focused card has no room to split.
+  than 140. The split snaps to halves and thirds when you come within a few points of them, with
+  a tap on a trackpad. Pull past a limit and the gap stretches a little, then springs back when
+  you let go. ⌘D shakes the card and beeps when the focused card has no room to split.
 - Closing a card's last tab folds the card away, and its neighbor springs over to fill the room.
 - Drag a tab to another card to move it there. Over the other card's tabs, they slide apart to
   show where it goes; over the card itself, it joins that card's tabs. Near a card's left, right,
@@ -142,20 +162,24 @@ others hide their caret and dim their header.
 
 The left side of each window lists the files of ze's folder, folders first. That's the folder ze
 started in from a terminal, or the one you opened last. Started from the Dock or Finder with no
-folder from last time, it's your home folder. At the top, a small line shows the folder that
-holds it, then the folder's own name in bold. Files and folders whose names start with a dot are
-left out. Each row has the Mac's own icon for a folder or for the file's kind, the same ones
-Finder shows. Names are in the Mac's system font and end in "…" when they don't fit. The file on
-show in the focused card is marked with a soft rounded highlight with a thin outline, and its
-name is in bold. A fainter highlight follows the mouse down the list, sliding from row to row,
-and fades out when the mouse leaves.
+folder from last time, it's your home folder. The sidebar sits on the Mac's own translucent
+sidebar material, and the cards' chrome lets a little of it show through. At the top, the
+folder's own name shows in bold with a small arrow. Click it for a menu of the folder and the
+folders above it; pick one to show it in Finder. Files and folders whose names start with a dot
+are left out. Files have the Mac's own icon for their kind, the same ones Finder shows, and
+folders have a small tinted folder. Names are in the Mac's system font and end in "…" when they
+don't fit. The file on show in the focused card is marked with a soft rounded fill and its name
+is in bold; when the selection moves, the bold fades from the old name to the new one. A fainter
+highlight follows the mouse down the list, sliding from row to row without a bounce, and fades
+out when the mouse leaves.
 
-The folder's parent and name stay pinned at the top while the rows scroll. An open folder whose
+The folder's name stays pinned at the top while the rows scroll. An open folder whose
 files fill the top of the list pins under the name too, up to three levels deep, until the next
 folder's row pushes it away. Click a pinned folder to scroll back to it.
 
 - Click a folder to open or close it. Its files fade in or out while the rows below slide to make
-  room, and its arrow turns.
+  room, and its arrow turns. Clicking another row while a folder is closing doesn't make the list
+  jump.
 - Click a file to show it in a new tab, where its text fades in. A dot next to a file in the
   sidebar means it has unsaved changes.
 - ⌘-click a file to open it in a new window.
@@ -174,7 +198,10 @@ folder's row pushes it away. Click a pinned folder to scroll back to it.
   in every window. It slides in and out, and the text's card follows its edge. It also hides when
   a window is too narrow to fit it beside the text.
 - Drag the sidebar's right edge to make it wider or narrower, from 150 to 500 points. Every
-  window follows, and new windows and the next start use the width you left it at.
+  window follows, and new windows and the next start use the width you left it at. Past either
+  limit the edge stretches a little with some resistance, gives a tap on a trackpad where it
+  stops, and springs back when you let go. Drag it in below 100 points and the sidebar slides
+  shut; show it again and it has the width it had.
 
 The sidebar reads the disk again when you come back to ze, so new and deleted files show up.
 
@@ -210,6 +237,8 @@ keys, ⌥⌫ to delete a word, and the Control-key shortcuts (⌃A, ⌃E, ⌃K a
   takes one level of indentation off.
 - ⌘/ comments or uncomments the selected lines.
 - ⌘Z and ⇧⌘Z undo and redo. A run of typing undoes as one step.
+- Undo, redo, Replace All and big pastes (several lines, or over 40 characters) flash the text
+  they changed. The flash fades out, and your next keypress clears it.
 - Files with Windows line endings keep them.
 
 ### Brackets and quotes
@@ -248,8 +277,9 @@ The choice applies to every window and is remembered.
 
 ## Zen mode
 
-**View > Zen Mode** (⌃⌘Z) hides the traffic lights, the sidebar, the cards' headers and outlines,
-turns the theme grey, and pads the text so an 80-column page sits in the middle of the window.
+**View > Zen Mode** (⌃⌘Z) fades out the traffic lights, the cards' headers and outlines, covers
+the sidebar, turns the theme grey, and pads the text so an 80-column page sits in the middle of
+the window. They all fade together over about half a second.
 The text stays left-aligned and wraps at 80 columns, or at the window's edge when the window is
 narrower. With split cards, each card centers its own page. Find, go to line, quick open and the
 command palette still open their prompt line at the bottom. Drag the empty strip at the top to
@@ -260,11 +290,13 @@ every window and is remembered; your sidebar, wrap and theme settings don't chan
 
 1. Press ⌘F. The prompt starts with the selected text or your last search.
 2. Type: ze jumps to the first match and shows how many there are. Searching ignores case unless
-   you type a capital letter.
+   you type a capital letter. If nothing matches, the words shake.
 3. Press Return for the next match, ⇧Return for the previous one, and Escape to close the prompt.
 
-⌘G and ⇧⌘G find the next and previous match after the prompt is closed. ⌘L asks for a line
-number and jumps to it.
+The match you're on is a bright yellow pill that pops when you jump to it, and the other matches
+are softer, rounded pills. When the prompt opens on text you'd selected, the other matches fade in
+outward from the one you're on. ⌘G and ⇧⌘G find the next and previous match after the prompt is
+closed, and they pop the match too. ⌘L asks for a line number and jumps to it.
 
 To replace, press ⌥⌘F (**Edit > Find and Replace…**). The prompt line shows `find` and `with`.
 
@@ -298,6 +330,17 @@ one of these in its tabs, one question covers them all: **Save All** saves each 
 name for any untitled file), **Don't Save** drops the changes, and **Cancel** keeps the window
 open.
 
+## VoiceOver
+
+VoiceOver reads each card's text, line by line, and follows the caret and the selection as they
+move. It can move the caret, select text and switch between cards. Tabs show up as a group of
+tabs when a card has two or more, and pressing one switches to it. The sidebar is an outline
+named after the folder: each row says its name, how deep it is, whether a folder is open and
+whether it's selected. Pressing a folder opens or closes it, and pressing a file opens it in the
+focused card. With soft wrap on, VoiceOver still reads a whole line at a time. VoiceOver doesn't
+see the find, replace or quick open prompts, but it keeps reading the card's text while one is
+open.
+
 ## Syntax colors
 
 ze colors code by the file's extension, for Zig, C and its family (C++, Objective-C, Java,
@@ -317,6 +360,10 @@ ze in that mode whatever the Mac does. Below that it picks the themes: Paper (th
 or One Light for light mode, and Ink (the default), Ayu Dark or One Dark for dark mode. Checkmarks
 show the mode and the two themes in use. ze remembers them in the settings file.
 Zen Mode turns every theme color grey while it's on, without changing the saved colors.
+Switching themes, or the Mac's light and dark setting, fades over a quarter of a second. Gray
+text in every theme is dark enough to read comfortably. With **Increase contrast** on in System
+Settings > Accessibility > Display, ze strengthens the card outlines, the sidebar's selection and
+the gray text, and follows the setting the moment you change it.
 
 ## Font and text size
 
