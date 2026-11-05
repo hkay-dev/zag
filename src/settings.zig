@@ -33,8 +33,8 @@ fn rgb(comptime v: u24) Rgb {
 pub const paper: Theme = .{
     .bg = rgb(0xF5F2EA),
     .fg = rgb(0x2E2C28),
-    .muted = rgb(0x9A958A),
-    .kinds = .{ rgb(0x2E2C28), rgb(0x9C3D26), rgb(0x4F7A3A), rgb(0xB3AEA3), rgb(0xA8642A), rgb(0x2F6587), rgb(0x7D4E86) },
+    .muted = rgb(0x736E64),
+    .kinds = .{ rgb(0x2E2C28), rgb(0x9C3D26), rgb(0x4F7A3A), rgb(0x8A857A), rgb(0xA8642A), rgb(0x2F6587), rgb(0x7D4E86) },
     .sel = rgb(0xF1C7AC),
     .line = rgb(0xEFEADF),
     .caret = rgb(0xE8590C),
@@ -48,8 +48,8 @@ pub const paper: Theme = .{
 pub const ink: Theme = .{
     .bg = rgb(0x17171B),
     .fg = rgb(0xD9D4C7),
-    .muted = rgb(0x6E6A61),
-    .kinds = .{ rgb(0xD9D4C7), rgb(0xF08A6C), rgb(0xA7C080), rgb(0x5F5C56), rgb(0xE8B86B), rgb(0x8DB8D8), rgb(0xCFA3D8) },
+    .muted = rgb(0x8A857B),
+    .kinds = .{ rgb(0xD9D4C7), rgb(0xF08A6C), rgb(0xA7C080), rgb(0x7A766E), rgb(0xE8B86B), rgb(0x8DB8D8), rgb(0xCFA3D8) },
     .sel = rgb(0x5E3B26),
     .line = rgb(0x1E1E24),
     .caret = rgb(0xFF8A3D),
@@ -63,8 +63,8 @@ pub const ink: Theme = .{
 const ayu_light: Theme = .{
     .bg = rgb(0xF8F9FA),
     .fg = rgb(0x5C6166),
-    .muted = rgb(0x8A9199),
-    .kinds = .{ rgb(0x5C6166), rgb(0xFA8D3E), rgb(0x86B300), rgb(0xADAEB1), rgb(0xA37ACC), rgb(0xF2AE49), rgb(0x399EE6) },
+    .muted = rgb(0x6D7379),
+    .kinds = .{ rgb(0x5C6166), rgb(0xFA8D3E), rgb(0x86B300), rgb(0x8A8D91), rgb(0xA37ACC), rgb(0xF2AE49), rgb(0x399EE6) },
     .sel = rgb(0xC2D6F2),
     .line = rgb(0xEDEFF0),
     .caret = rgb(0xFFAA33),
@@ -78,7 +78,7 @@ const ayu_light: Theme = .{
 const ayu_dark: Theme = .{
     .bg = rgb(0x0B0E14),
     .fg = rgb(0xBFBDB6),
-    .muted = rgb(0x565B66),
+    .muted = rgb(0x7C7F85),
     .kinds = .{ rgb(0xBFBDB6), rgb(0xFF8F40), rgb(0xAAD94C), rgb(0x646A72), rgb(0xD2A6FF), rgb(0xFFB454), rgb(0x59C2FF) },
     .sel = rgb(0x1F4470),
     .line = rgb(0x131721),
@@ -93,8 +93,8 @@ const ayu_dark: Theme = .{
 const one_light: Theme = .{
     .bg = rgb(0xFAFAFA),
     .fg = rgb(0x383A42),
-    .muted = rgb(0x9D9D9F),
-    .kinds = .{ rgb(0x383A42), rgb(0xA626A4), rgb(0x50A14F), rgb(0xA0A1A7), rgb(0x986801), rgb(0x4078F2), rgb(0xC18401) },
+    .muted = rgb(0x727277),
+    .kinds = .{ rgb(0x383A42), rgb(0xA626A4), rgb(0x50A14F), rgb(0x8A8B92), rgb(0x986801), rgb(0x4078F2), rgb(0xC18401) },
     .sel = rgb(0xD8DEFB),
     .line = rgb(0xF0F0F1),
     .caret = rgb(0x526FFF),
@@ -108,8 +108,8 @@ const one_light: Theme = .{
 const one_dark: Theme = .{
     .bg = rgb(0x282C34),
     .fg = rgb(0xABB2BF),
-    .muted = rgb(0x636D83),
-    .kinds = .{ rgb(0xABB2BF), rgb(0xC678DD), rgb(0x98C379), rgb(0x5C6370), rgb(0xD19A66), rgb(0x61AFEF), rgb(0xE5C07B) },
+    .muted = rgb(0x8B93A4),
+    .kinds = .{ rgb(0xABB2BF), rgb(0xC678DD), rgb(0x98C379), rgb(0x6F7683), rgb(0xD19A66), rgb(0x61AFEF), rgb(0xE5C07B) },
     .sel = rgb(0x354871),
     .line = rgb(0x2C313C),
     .caret = rgb(0x528BFF),
@@ -512,4 +512,24 @@ test "a single color applies on top of the chosen theme wherever its line sits" 
     try t.expect(std.mem.indexOf(u8, text, "dark-theme = one-dark\n") != null);
     try t.expect(std.mem.indexOf(u8, text, "dark.background") == null);
     try t.expectEqual(s.dark, parse(text).dark);
+}
+
+/// WCAG relative luminance of a color.
+fn luminance(c: Rgb) f64 {
+    var l: f64 = 0;
+    for (c, [3]f64{ 0.2126, 0.7152, 0.0722 }) |v, k| l += k * (if (v <= 0.03928) v / 12.92 else std.math.pow(f64, (v + 0.055) / 1.055, 2.4));
+    return l;
+}
+
+fn contrastRatio(a: Rgb, b: Rgb) f64 {
+    const x = luminance(a);
+    const y = luminance(b);
+    return (@max(x, y) + 0.05) / (@min(x, y) + 0.05);
+}
+
+test "every theme's muted text reads at 4.5:1 and its comments at 3:1 on the page" {
+    for (schemes) |sc| {
+        try t.expect(contrastRatio(sc.theme.muted, sc.theme.bg) >= 4.5);
+        try t.expect(contrastRatio(sc.theme.kinds[3], sc.theme.bg) >= 3.0);
+    }
 }
