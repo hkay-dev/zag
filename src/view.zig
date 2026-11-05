@@ -3814,10 +3814,32 @@ fn faded(c: Rgb, bg: Rgb, a: f64) Rgb {
 /// centered in a row whose top is `y`. Returns its width.
 fn rowText(ctx: Id, s: []const u8, fnt: Id, c: Rgb, x: f64, y: f64, room: f64) f64 {
     if (room < 4 or s.len == 0) return 0;
-    const line = uiLine(s, fnt, room);
-    defer if (line) |l| objc.CFRelease(l);
+    const line = rowLine(s, fnt, room);
     const base = @round((prow - objc.CTFontGetAscent(fnt) - objc.CTFontGetDescent(fnt)) / 2 + objc.CTFontGetAscent(fnt));
     return drawLine(ctx, line, c, x, y + base);
+}
+
+/// The lines the palette and quick open drew lately, so an open panel
+/// doesn't lay its rows out again every frame. Keyed by text, font and room;
+/// a full cache lets its oldest line go. Lines take the context's color, so
+/// a theme change doesn't touch them.
+const RowLine = struct { key: u64 = 0, line: Id = null };
+var row_lines: [128]RowLine = @splat(.{});
+var row_next: usize = 0;
+
+/// `uiLine(s, fnt, room)` from `row_lines`, made on a miss. The cache owns it.
+fn rowLine(s: []const u8, fnt: Id, room: f64) Id {
+    var h = std.hash.Fnv1a_64.init();
+    h.update(std.mem.asBytes(&fnt));
+    h.update(std.mem.asBytes(&room));
+    h.update(s);
+    const key = h.final() | 1;
+    for (row_lines) |e| if (e.key == key) return e.line;
+    const e = &row_lines[row_next];
+    row_next = (row_next + 1) % row_lines.len;
+    if (e.line) |l| objc.CFRelease(l);
+    e.* = .{ .key = key, .line = uiLine(s, fnt, room) };
+    return e.line;
 }
 
 /// The caret-colored checkmark symbol, made again when the caret color changes.
@@ -3866,8 +3888,7 @@ fn panelRow(ctx: Id, d: *const Doc, th: *const Theme, p: usize, left: f64, right
         var at = right - keys_w;
         var it = (std.unicode.Utf8View.init(c.keys) catch return).iterator();
         while (it.nextCodepointSlice()) |g| : (at += key_cell) {
-            const line = uiLine(g, panel_small, 1e5);
-            defer if (line) |l| objc.CFRelease(l);
+            const line = rowLine(g, panel_small, 1e5);
             const gw = if (line != null) objc.CTLineGetTypographicBounds(line, null, null, null) else 0;
             const base = @round((prow - objc.CTFontGetAscent(panel_small) - objc.CTFontGetDescent(panel_small)) / 2 + objc.CTFontGetAscent(panel_small));
             _ = drawLine(ctx, line, dim, at + (key_cell - gw) / 2, y + base);
