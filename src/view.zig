@@ -934,6 +934,13 @@ const Win = struct {
     pv: [4]Spring = @splat(.{ .k = 420, .c = 30, .eps = 0.05 }),
     pv_a: Tween = .{ .dur = fade_time },
     ghost_a: Tween = .{ .dur = fade_time },
+    /// The sidebar row (of tree `menu_gen`) or the card's tab that a
+    /// right-click menu is open on, and its outline fading in or out.
+    menu_row: ?usize = null,
+    menu_gen: u32 = 0,
+    menu_card: ?*Doc = null,
+    menu_tab: u32 = 0,
+    menu_a: Tween = .{ .dur = fade_time },
 };
 
 /// Where a dragged tab lands: among a card's tabs, on the card itself, or
@@ -942,8 +949,9 @@ const Zone = enum { tabs, whole, left, right, top, bottom };
 const Drop = struct { card: *Doc, zone: Zone, k: usize = 0 };
 
 const TabDrag = struct {
-    from: *Doc,
-    id: u32,
+    /// The card whose tab it is, or null for a file dragged from the sidebar.
+    from: ?*Doc,
+    id: u32 = 0,
     /// Where the mouse went down and where it is, in the view, and how far
     /// right of the tab's left edge it went down.
     down: Point,
@@ -954,6 +962,11 @@ const TabDrag = struct {
     /// It left its card's tab row, so it drops by `drop`.
     out: bool = false,
     drop: ?Drop = null,
+    /// A sidebar file: its path, its name for the copy under the mouse, and
+    /// whether ⌘ was down, for a click that opens it. Owned: see `freeDrag`.
+    file: ?[:0]u8 = null,
+    name: Id = null,
+    cmd: bool = false,
 };
 
 var wins: std.ArrayList(*Win) = .empty;
@@ -3080,6 +3093,10 @@ fn drawRow(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, i
     const s = tileSize();
     const x = 16 + f(row.depth) * 16;
     if (cur != null and std.mem.eql(u8, row.rel, cur.?)) selPill(ctx, th, key, y);
+    if (w.menu_row == i and w.menu_gen == tree_gen) {
+        const ma = w.menu_a.at(CACurrentMediaTime());
+        if (ma > 0.01) menuMark(ctx, th, ma, side_inset, y, side_w - 2 * side_inset - 2, side_h, side_radius);
+    }
     const iy = y + (side_h - s) / 2;
     if (row.dir) {
         const cx = x - 4;
@@ -3315,9 +3332,10 @@ fn sideClick(w: *Win, p: Point, flags: usize) void {
         startFold(i);
         return refreshAll();
     }
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ root.?, row.rel }) catch return;
-    open(path, if (flags & cmd_key != 0) null else w.focus);
+    // A file opens when the mouse comes up, unless it's dragged to a card.
+    const path = std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ root.?, row.rel }, 0) catch return;
+    const ix = 16 + f(row.depth) * 16 + 10;
+    w.tdrag = .{ .from = null, .file = path, .cmd = flags & cmd_key != 0, .down = p, .at = p, .grab = p.x - ix + tab_pad, .name = uiLine(row.rel[row.base..], name_font, 1e5) };
 }
 
 fn isDark(view: Id) bool {
@@ -3359,7 +3377,7 @@ fn draw(w: *Win, ctx: Id) void {
     for (&w.hot_t, 1..) |*t, i| t.aim(if (w.hot == i) 1 else 0, now);
     var busy = w.side_t.moving(now) or w.side_a.moving(now) or fold.t.moving(now) or fold.closing or cardsMoving(w.cards) or
         !w.sel.settled() or w.sel_a.moving(now) or w.hot_t[0].moving(now) or w.hot_t[1].moving(now) or
-        w.pv_a.moving(now) or w.ghost_a.moving(now);
+        w.pv_a.moving(now) or w.ghost_a.moving(now) or w.menu_a.moving(now);
     for (w.pv) |s| busy = busy or !s.settled();
     var gliding = false;
     for (docs.items) |d| if (d.win == w) {
@@ -3493,8 +3511,9 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         objc.CGContextTranslateCTM(ctx, 0, (1 - loaded) * load_rise);
     }
 
-    // The caret line's band slides after the caret.
-    const band_on = d.mode == .edit and s[0] == s[1];
+    // The caret line's band slides after the caret, and stays on its line
+    // under a selection, which draws over it in its own color.
+    const band_on = d.mode == .edit;
     if (band_on and d.band_on) d.band.aim(f(here.row) * lh, now) else d.band.snap(f(here.row) * lh);
     d.band_on = band_on;
     if (band_on) fill(ctx, th.line, lx, top_h + d.band.at(now) - d.vy, card.w, lh);
@@ -3941,6 +3960,10 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, key: bool, 
         ring(ctx, th.fg, (if (key) @as(f64, 0.1) else 0.06) * a, sx, hy - 11, s.w, 22, 7);
     }
     if (hv > 0.01 and !on) pill(ctx, th.fg, 0.05 * hv, sx, hy - 11, s.w, 22, 7);
+    if (d.win.menu_card == d and d.win.menu_tab == s.id) {
+        const ma = d.win.menu_a.at(now);
+        if (ma > 0.01) menuMark(ctx, th, ma, sx, hy - 11, s.w, 22, 7);
+    }
     tile(s.icon, sx + pad, @round(hy - ts / 2));
     const nx = sx + pad + ts + 7;
     const nw = if (s.line != null) objc.CTLineGetTypographicBounds(s.line, null, null, null) else 0;
@@ -3980,7 +4003,7 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, key: bool, 
 
 /// The drag of one of `d`'s tabs, once the mouse has moved far enough.
 fn draggedTab(d: *const Doc) ?*TabDrag {
-    if (d.win.tdrag) |*t| if (t.from == d and t.live) return t;
+    if (d.win.tdrag) |*t| if (t.from) |x| if (x == d and t.live) return t;
     return null;
 }
 
@@ -4000,7 +4023,12 @@ fn tabAt(d: *const Doc, p: Point) ?TabHit {
 
 /// With more than one card, a card's lone file name drags like a tab.
 fn loneTab(d: *const Doc, p: Point) ?TabHit {
-    if (conf.zen or d.tabbed.to != 0 or d.win.cards.pane != null or @abs(p.y - (gap + head_h / 2)) > 12) return null;
+    return if (d.win.cards.pane != null) null else titleTab(d, p);
+}
+
+/// The card's lone file name under `p`, when it has one tab.
+fn titleTab(d: *const Doc, p: Point) ?TabHit {
+    if (conf.zen or d.tabbed.to != 0 or @abs(p.y - (gap + head_h / 2)) > 12) return null;
     const s = d.slots.items[slotOf(d, d.id) orelse return null];
     if (p.x < s.x or p.x >= s.x + s.w) return null;
     return .{ .j = 0, .id = d.id, .close = false };
@@ -4009,49 +4037,63 @@ fn loneTab(d: *const Doc, p: Point) ?TabHit {
 // ---- dragging tabs ----
 
 /// Follows a tab drag to `p` in the view. Along its own row the tab
-/// trades places with the tabs it passes; anywhere else it shows where it
-/// would drop.
+/// trades places with the tabs it passes; anywhere else, and for a file
+/// from the sidebar, it shows where it would drop.
 fn dragTab(w: *Win, p: Point) void {
     const t = &w.tdrag.?;
-    const d = t.from;
-    if (d.closing) {
-        w.tdrag = null;
-        return;
-    }
+    if (t.from) |d| if (d.closing) return endDrag(w);
     t.at = p;
     if (!t.live) {
         if (@abs(p.x - t.down.x) < 4 and @abs(p.y - t.down.y) < 4) return;
         t.live = true;
     }
-    const lp = inPane(d, p);
-    t.out = tabCount(d) == 1 or lp.x < 0 or lp.x >= d.size.x or lp.y < 0 or lp.y >= top_h + 8;
     t.drop = null;
-    if (t.out) {
-        t.drop = dropAt(w, t, p);
-    } else if (tabIndex(d, t.id)) |j| {
-        // It trades places with a tab once its middle passes that tab's.
-        const s = d.slots.items[slotOf(d, t.id).?];
-        const mid = lp.x - t.grab + s.w / 2;
-        var k: usize = 0;
-        for (d.slots.items) |o| if (!o.gone and o.id != t.id and o.x + o.w / 2 < mid) {
-            k += 1;
+    t.out = true;
+    if (t.from) |d| {
+        const lp = inPane(d, p);
+        t.out = tabCount(d) == 1 or lp.x < 0 or lp.x >= d.size.x or lp.y < 0 or lp.y >= top_h + 8;
+        if (!t.out) if (tabIndex(d, t.id)) |j| {
+            // It trades places with a tab once its middle passes that tab's.
+            const s = d.slots.items[slotOf(d, t.id).?];
+            const mid = lp.x - t.grab + s.w / 2;
+            var k: usize = 0;
+            for (d.slots.items) |o| if (!o.gone and o.id != t.id and o.x + o.w / 2 < mid) {
+                k += 1;
+            };
+            reorderTab(d, j, k);
         };
-        reorderTab(d, j, k);
     }
+    if (t.out) t.drop = dropAt(w, t, p);
     aimPreview(w, CACurrentMediaTime());
     msg(void, w.view, "setNeedsDisplay:", .{true});
+}
+
+/// Ends the drag in `w` without dropping it.
+fn endDrag(w: *Win) void {
+    const t = w.tdrag orelse return;
+    w.tdrag = null;
+    freeDrag(t);
+}
+
+fn freeDrag(t: TabDrag) void {
+    if (t.file) |p| gpa.free(p);
+    if (t.name) |l| objc.CFRelease(l);
 }
 
 /// Where a tab dragged off its row to `p` would land: among another
 /// card's tabs, in a new card off the nearest edge of the card under it
 /// when `p` is within a quarter of that edge and there's room, or else
 /// on that card. Null over the sidebar, the gaps, or its own card's
-/// middle, and its own card's edges when it's that card's only tab.
+/// middle, and its own card's edges when it's that card's only tab. A
+/// file from the sidebar splits off the nearest edge from anywhere over
+/// the text, and lands on the card only when there's no room.
 fn dropAt(w: *Win, t: *const TabDrag, p: Point) ?Drop {
+    if (sideShown(w) and p.x < side_w) return null;
     const c = paneAt(w, p) orelse return null;
+    const own = if (t.from) |x| x == c else false;
     const lp = inPane(c, p);
     if (lp.y < top_h) {
-        if (c == t.from) return null;
+        if (own) return null;
         var k: usize = 0;
         for (c.slots.items) |o| if (!o.gone and o.x + o.w / 2 < lp.x) {
             k += 1;
@@ -4063,11 +4105,11 @@ fn dropAt(w: *Win, t: *const TabDrag, p: Point) ?Drop {
     const near = [4]f64{ u, 1 - u, v, 1 - v };
     const edges = [4]Zone{ .left, .right, .top, .bottom };
     var best: ?usize = null;
-    for (near, 0..) |x, i| if (x < 0.25 and (best == null or x < near[best.?])) {
+    for (near, 0..) |x, i| if ((t.from == null or x < 0.25) and (best == null or x < near[best.?])) {
         best = i;
     };
-    if (best) |i| if ((c != t.from or tabCount(c) > 1) and roomFor(c, i >= 2)) return .{ .card = c, .zone = edges[i] };
-    if (c == t.from) return null;
+    if (best) |i| if ((!own or tabCount(c) > 1) and roomFor(c, i >= 2)) return .{ .card = c, .zone = edges[i] };
+    if (own) return null;
     return .{ .card = c, .zone = .whole, .k = c.at + 1 };
 }
 
@@ -4100,10 +4142,19 @@ fn dropRect(dr: Drop, gw: f64) Rect {
     };
 }
 
+/// The dragged tab's or file's name and icon, for its copy under the mouse.
+fn ghostOf(t: *const TabDrag) ?struct { line: Id, icon: Id } {
+    if (t.from) |d| {
+        const s = d.slots.items[slotOf(d, t.id) orelse return null];
+        return .{ .line = s.line, .icon = s.icon };
+    }
+    return .{ .line = t.name, .icon = iconFor(std.fs.path.basename(t.file.?), false) };
+}
+
 /// The width of the dragged tab's copy under the mouse.
 fn ghostW(t: *const TabDrag) f64 {
-    const s = t.from.slots.items[slotOf(t.from, t.id) orelse return 80];
-    const nw = if (s.line != null) objc.CTLineGetTypographicBounds(s.line, null, null, null) else 0;
+    const g = ghostOf(t) orelse return 80;
+    const nw = if (g.line != null) objc.CTLineGetTypographicBounds(g.line, null, null, null) else 0;
     return 2 * tab_pad + tileSize() + 7 + nw;
 }
 
@@ -4143,20 +4194,57 @@ fn aimPreview(w: *Win, now: f64) void {
 
 /// Ends a tab drag: a tab dragged along its row springs into its place,
 /// and one dropped elsewhere moves there and takes typing. A card left
-/// with no tabs folds away.
-fn dropTab(t: TabDrag) void {
-    const from = t.from;
+/// with no tabs folds away. A file from the sidebar that didn't move far
+/// enough opens as a click does.
+fn dropTab(w: *Win, t: TabDrag) void {
+    if (t.file) |path| {
+        if (!t.live) return open(path, if (t.cmd) null else w.focus);
+        if (t.drop) |dr| placeFile(w, path, dr);
+        return;
+    }
+    const from = t.from.?;
     if (!t.live or from.closing) return;
     const dr = t.drop orelse return refresh(from);
-    const j = tabIndex(from, t.id) orelse return;
-    const last = tabCount(from) == 1;
-    const to = switch (dr.zone) {
-        .tabs, .whole => dr.card,
-        .left, .right, .top, .bottom => splitOff(dr.card, dr.zone == .top or dr.zone == .bottom, dr.zone == .left or dr.zone == .top) orelse return,
+    moveTab(from, tabIndex(from, t.id) orelse return, dr);
+}
+
+fn splitZone(z: Zone) bool {
+    return switch (z) {
+        .tabs, .whole => false,
+        .left, .right, .top, .bottom => true,
     };
+}
+
+/// Moves card `from`'s tab `j` to where `dr` says, taking typing there.
+/// A card left with no tabs folds away.
+fn moveTab(from: *Doc, j: usize, dr: Drop) void {
+    const last = tabCount(from) == 1;
+    if (last and dr.card == from) return;
+    const to = if (splitZone(dr.zone)) splitOff(dr.card, dr.zone == .top or dr.zone == .bottom, dr.zone == .left or dr.zone == .top) orelse return else dr.card;
     const pg = takeTab(from, j) orelse return;
     putTab(to, pg, dr.k);
     if (last) foldCard(from);
+    focus(to);
+}
+
+/// Shows file `path` in window `w` where `dr` says: as a new tab, or in a
+/// new card split off an edge. A file a card there already holds moves
+/// there instead, and one open in another window comes forward in it.
+fn placeFile(w: *Win, path: [:0]const u8, dr: Drop) void {
+    for (docs.items) |o| {
+        if (o.closing) continue;
+        const j = if (o.path != null and std.mem.eql(u8, o.path.?, path)) o.at else if (pageIndex(o, path)) |i| (if (i < o.at) i else i + 1) else continue;
+        if (o.win != w) return open(path, null);
+        if (o == dr.card and !splitZone(dr.zone)) {
+            showTab(o, j);
+            return focus(o);
+        }
+        return moveTab(o, j, dr);
+    }
+    var pg = loadPage(path) orelse return;
+    const to = if (splitZone(dr.zone)) splitOff(dr.card, dr.zone == .top or dr.zone == .bottom, dr.zone == .left or dr.zone == .top) orelse return pg.deinit() else dr.card;
+    putTab(to, pg, dr.k);
+    noteRecent(path);
     focus(to);
 }
 
@@ -4173,7 +4261,7 @@ fn drawDrag(w: *Win, ctx: Id, th: *const Theme, now: f64) void {
     const ga = w.ghost_a.at(now);
     const t = w.tdrag orelse return;
     if (ga < 0.01) return;
-    const s = &t.from.slots.items[slotOf(t.from, t.id) orelse return];
+    const g = ghostOf(&t) orelse return;
     const ts = tileSize();
     const gw = ghostW(&t);
     const x = t.at.x - std.math.clamp(t.grab, 10, gw - 10);
@@ -4185,8 +4273,8 @@ fn drawDrag(w: *Win, ctx: Id, th: *const Theme, now: f64) void {
     pill(ctx, th.fg, 0.06, x, y + 1, gw, 22, 7);
     pill(ctx, th.header, 1, x, y, gw, 22, 7);
     ring(ctx, th.fg, 0.2, x, y, gw, 22, 7);
-    tile(s.icon, x + tab_pad, @round(y + 11 - ts / 2));
-    _ = drawLine(ctx, s.line, th.fg, x + tab_pad + ts + 7, @round(y + 11 + name_off));
+    tile(g.icon, x + tab_pad, @round(y + 11 - ts / 2));
+    _ = drawLine(ctx, g.line, th.fg, x + tab_pad + ts + 7, @round(y + 11 + name_off));
     objc.CGContextRestoreGState(ctx);
 }
 
@@ -4390,7 +4478,7 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const p = local(self, ev);
     w.side_down = true;
     w.grab = null;
-    w.tdrag = null;
+    endDrag(w);
     if (toolAt(w, p)) |t| {
         if (t == .sidebar) toggleSidebar() else newTab(w.focus);
         return;
@@ -4513,7 +4601,8 @@ fn mouseUp(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
     if (w.tdrag) |t| {
         w.tdrag = null;
-        dropTab(t);
+        dropTab(w, t);
+        freeDrag(t);
         aimPreview(w, CACurrentMediaTime());
         return msg(void, w.view, "setNeedsDisplay:", .{true});
     }
@@ -4634,10 +4723,16 @@ fn performDrag(_: Id, _: Sel, sender: Id) callconv(.c) bool {
 /// they reach the key window's view through the responder chain.
 var text_menu: Id = null;
 var side_menu: Id = null;
-var side_open_item: Id = null;
-/// The sidebar row the menu was opened on.
-var menu_path: [std.fs.max_path_bytes]u8 = undefined;
+var side_items: [3]Id = @splat(null);
+var tab_menu: Id = null;
+var tab_items: [6]Id = @splat(null);
+/// The file of the sidebar row or tab the menu was opened on, its window,
+/// and for a tab, its card and id.
+var menu_path: [std.fs.max_path_bytes:0]u8 = undefined;
 var menu_len: usize = 0;
+var menu_win: ?*Win = null;
+var menu_doc: ?*Doc = null;
+var menu_id: u32 = 0;
 
 fn menuItem(menu: Id, title: []const u8, sel: [:0]const u8, key: []const u8) Id {
     const it = msg(Id, msg(Id, objc.class("NSMenuItem"), "alloc", .{}), "initWithTitle:action:keyEquivalent:", .{ objc.str(title), objc.sel_registerName(sel), objc.str(key) });
@@ -4651,16 +4746,59 @@ fn newMenu() Id {
     return objc.new("NSMenu");
 }
 
+fn separator(m: Id) void {
+    msg(void, m, "addItem:", .{msg(Id, objc.class("NSMenuItem"), "separatorItem", .{})});
+}
+
+fn setMenuPath(p: []const u8) bool {
+    if (p.len >= menu_path.len) return false;
+    @memcpy(menu_path[0..p.len], p);
+    menu_path[p.len] = 0;
+    menu_len = p.len;
+    return true;
+}
+
+fn menuFile() [:0]const u8 {
+    return menu_path[0..menu_len :0];
+}
+
+/// Outlines the row or tab the menu is open on while it's open. `self`
+/// hears when it closes, and the outline fades out.
+fn markMenu(self: Id, w: *Win, m: Id) Id {
+    menu_win = w;
+    w.menu_a.aim(1, CACurrentMediaTime());
+    msg(void, m, "setDelegate:", .{self});
+    msg(void, self, "setNeedsDisplay:", .{true});
+    return m;
+}
+
+fn menuDidClose(_: Id, _: Sel, m: Id) callconv(.c) void {
+    msg(void, m, "setDelegate:", .{@as(Id, null)});
+    const w = menu_win orelse return;
+    w.menu_a.aim(0, CACurrentMediaTime());
+    msg(void, w.view, "setNeedsDisplay:", .{true});
+}
+
+/// The right-click outline: an accent ring two points thick over a faint
+/// accent fill, `a` faded in.
+fn menuMark(ctx: Id, th: *const Theme, a: f64, x: f64, y: f64, w: f64, h: f64, r: f64) void {
+    pill(ctx, th.caret, 0.1 * a, x, y, w, h, r);
+    ring(ctx, th.caret, 0.9 * a, x, y, w, h, r);
+    ring(ctx, th.caret, 0.9 * a, x + 1, y + 1, w - 2, h - 2, r - 1);
+}
+
 /// Right-click and control-click: Edit's commands over a card's text, which
-/// takes typing from then on, the file's commands over a sidebar row, and
-/// nothing elsewhere.
+/// takes typing from then on, the tab's commands over a tab, the file's
+/// commands over a sidebar row, and nothing elsewhere. A tab or row keeps
+/// an outline while its menu is open.
 fn menuForEvent(self: Id, _: Sel, ev: Id) callconv(.c) Id {
     const w = winOf(self) orelse return null;
     const p = local(self, ev);
-    if (p.y < top_h) return null;
     if (!sideShown(w) or p.x >= side_w) {
         const d = paneAt(w, p) orelse return null;
-        if (inPane(d, p).y >= bottom(d)) return null;
+        const lp = inPane(d, p);
+        if (lp.y < top_h) return tabMenu(self, w, d, lp);
+        if (lp.y >= bottom(d)) return null;
         focus(d);
         if (text_menu == null) {
             const m = newMenu();
@@ -4668,29 +4806,135 @@ fn menuForEvent(self: Id, _: Sel, ev: Id) callconv(.c) Id {
             _ = menuItem(m, "Copy", "copy:", "c");
             _ = menuItem(m, "Paste", "paste:", "v");
             _ = menuItem(m, "Select All", "selectAll:", "a");
-            msg(void, m, "addItem:", .{msg(Id, objc.class("NSMenuItem"), "separatorItem", .{})});
+            separator(m);
             _ = menuItem(m, "Toggle Comment", "toggleComment:", "/");
             text_menu = m;
         }
         return text_menu;
     }
-    const row = tree.rows.items[sideRow(w, p.y) orelse return null];
-    const path = std.fmt.bufPrint(&menu_path, "{s}/{s}", .{ root.?, row.rel }) catch return null;
-    menu_len = path.len;
+    if (p.y < top_h) return null;
+    const i = sideRow(w, p.y) orelse return null;
+    const row = tree.rows.items[i];
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (!setMenuPath(std.fmt.bufPrint(&buf, "{s}/{s}", .{ root.?, row.rel }) catch return null)) return null;
     if (side_menu == null) {
         const m = newMenu();
         msg(void, m, "setAutoenablesItems:", .{false});
-        side_open_item = menuItem(m, "Open in New Window", "openInNewWindow:", "");
+        side_items = .{
+            menuItem(m, "Open in New Tab", "openInNewTab:", ""),
+            menuItem(m, "Open in New Split", "openInNewSplit:", ""),
+            menuItem(m, "Open in New Window", "openInNewWindow:", ""),
+        };
+        separator(m);
         _ = menuItem(m, "Reveal in Finder", "revealInFinder:", "");
         _ = menuItem(m, "Copy Path", "copyPath:", "");
         side_menu = m;
     }
-    msg(void, side_open_item, "setEnabled:", .{!row.dir});
-    return side_menu;
+    for (side_items) |it| msg(void, it, "setEnabled:", .{!row.dir});
+    w.menu_card = null;
+    w.menu_row = i;
+    w.menu_gen = tree_gen;
+    return markMenu(self, w, side_menu);
+}
+
+/// The menu for card `d`'s tab (or lone file name) under `lp`, in its pane.
+fn tabMenu(self: Id, w: *Win, d: *Doc, lp: Point) Id {
+    const hit = tabAt(d, lp) orelse titleTab(d, lp) orelse return null;
+    const n = tabCount(d);
+    const path = tabPath(d, hit.j);
+    const has_path = if (path) |x| setMenuPath(x) else false;
+    if (tab_menu == null) {
+        const m = newMenu();
+        msg(void, m, "setAutoenablesItems:", .{false});
+        _ = menuItem(m, "Close Tab", "tabClose:", "");
+        tab_items[0] = menuItem(m, "Close Other Tabs", "tabCloseOthers:", "");
+        tab_items[1] = menuItem(m, "Close Tabs to the Right", "tabCloseRight:", "");
+        separator(m);
+        tab_items[2] = menuItem(m, "Split Right", "tabSplitRight:", "");
+        tab_items[3] = menuItem(m, "Split Down", "tabSplitDown:", "");
+        separator(m);
+        tab_items[4] = menuItem(m, "Reveal in Finder", "revealInFinder:", "");
+        tab_items[5] = menuItem(m, "Copy Path", "copyPath:", "");
+        tab_menu = m;
+    }
+    const on = [6]bool{ n > 1, hit.j + 1 < n, n > 1 and roomFor(d, false), n > 1 and roomFor(d, true), has_path, has_path };
+    for (tab_items, on) |it, x| msg(void, it, "setEnabled:", .{x});
+    menu_doc = d;
+    menu_id = hit.id;
+    w.menu_row = null;
+    w.menu_card = d;
+    w.menu_tab = hit.id;
+    return markMenu(self, w, tab_menu);
+}
+
+/// The card and tab index the tab menu was opened on, while both are there.
+fn menuTab() ?struct { d: *Doc, j: usize } {
+    const d = menu_doc orelse return null;
+    if (std.mem.indexOfScalar(*Doc, docs.items, d) == null or d.closing) return null;
+    return .{ .d = d, .j = tabIndex(d, menu_id) orelse return null };
+}
+
+fn tabClose(_: Id, _: Sel, _: Id) callconv(.c) void {
+    const t = menuTab() orelse return;
+    closeTab(t.d, t.j);
+}
+
+fn tabCloseOthers(_: Id, _: Sel, _: Id) callconv(.c) void {
+    const t = menuTab() orelse return;
+    closeAround(t.d, menu_id, true);
+}
+
+fn tabCloseRight(_: Id, _: Sel, _: Id) callconv(.c) void {
+    const t = menuTab() orelse return;
+    closeAround(t.d, menu_id, false);
+}
+
+fn tabSplitRight(_: Id, _: Sel, _: Id) callconv(.c) void {
+    const t = menuTab() orelse return;
+    moveTab(t.d, t.j, .{ .card = t.d, .zone = .right });
+}
+
+fn tabSplitDown(_: Id, _: Sel, _: Id) callconv(.c) void {
+    const t = menuTab() orelse return;
+    moveTab(t.d, t.j, .{ .card = t.d, .zone = .bottom });
+}
+
+/// Closes card `d`'s tabs right of tab `id`, and with `left` the ones left
+/// of it too, then shows it. Each one with something to lose asks first,
+/// and Cancel stops there.
+fn closeAround(d: *Doc, id: u32, left: bool) void {
+    while (tabIndex(d, id)) |j| {
+        if (j + 1 >= tabCount(d)) break;
+        const n = tabCount(d);
+        closeTab(d, j + 1);
+        if (tabCount(d) == n) return;
+    }
+    while (left) {
+        const j = tabIndex(d, id) orelse return;
+        if (j == 0) break;
+        const n = tabCount(d);
+        closeTab(d, 0);
+        if (tabCount(d) == n) return;
+    }
+    showTab(d, tabIndex(d, id) orelse return);
+}
+
+fn openInNewTab(_: Id, _: Sel, _: Id) callconv(.c) void {
+    const w = menu_win orelse return;
+    placeFile(w, menuFile(), .{ .card = w.focus, .zone = .tabs, .k = w.focus.at + 1 });
+}
+
+/// Splits the focused card right, or down when it's too narrow, or opens a
+/// tab when it's too small for either.
+fn openInNewSplit(_: Id, _: Sel, _: Id) callconv(.c) void {
+    const w = menu_win orelse return;
+    const c = w.focus;
+    const zone: Zone = if (roomFor(c, false)) .right else if (roomFor(c, true)) .bottom else .tabs;
+    placeFile(w, menuFile(), .{ .card = c, .zone = zone, .k = c.at + 1 });
 }
 
 fn openInNewWindow(_: Id, _: Sel, _: Id) callconv(.c) void {
-    open(menu_path[0..menu_len], null);
+    open(menuFile(), null);
 }
 
 fn revealInFinder(_: Id, _: Sel, _: Id) callconv(.c) void {
@@ -4715,6 +4959,8 @@ fn windowShouldClose(self: Id, _: Sel, _: Id) callconv(.c) bool {
 fn windowWillClose(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
     preview.close(w.window);
+    endDrag(w);
+    if (menu_win == w) menu_win = null;
     msg(void, w.link, "invalidate", .{});
     setWin(self, null);
     msg(void, w.window, "setDelegate:", .{@as(Id, null)});
@@ -4915,6 +5161,14 @@ pub fn setup() void {
     c.method("changeFont:", @ptrCast(&changeFont), "v@:@");
     c.method("menuForEvent:", @ptrCast(&menuForEvent), "@@:@");
     c.method("openInNewWindow:", @ptrCast(&openInNewWindow), "v@:@");
+    c.method("openInNewTab:", @ptrCast(&openInNewTab), "v@:@");
+    c.method("openInNewSplit:", @ptrCast(&openInNewSplit), "v@:@");
+    c.method("tabClose:", @ptrCast(&tabClose), "v@:@");
+    c.method("tabCloseOthers:", @ptrCast(&tabCloseOthers), "v@:@");
+    c.method("tabCloseRight:", @ptrCast(&tabCloseRight), "v@:@");
+    c.method("tabSplitRight:", @ptrCast(&tabSplitRight), "v@:@");
+    c.method("tabSplitDown:", @ptrCast(&tabSplitDown), "v@:@");
+    c.method("menuDidClose:", @ptrCast(&menuDidClose), "v@:@");
     c.method("revealInFinder:", @ptrCast(&revealInFinder), "v@:@");
     c.method("copyPath:", @ptrCast(&copyPath), "v@:@");
     c.method("runCommand:", @ptrCast(&runCommand), "v@:@");

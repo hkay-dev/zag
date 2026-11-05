@@ -105,6 +105,11 @@ in beside it with a little bounce, and a **+** shows after the last one.
   around at the ends.
 - Drag a tab along the row to move it. The tabs it passes slide out of its way, and it springs
   into its place when you let go.
+- Right-click (or control-click) a tab, or a card's lone file name, for **Close Tab**, **Close
+  Other Tabs**, **Close Tabs to the Right**, **Split Right** and **Split Down** (which move the tab
+  into a new card beside or below), **Reveal in Finder** and **Copy Path**. The tab keeps an
+  outline in the caret's color while the menu is open. Closing several tabs asks about each one
+  with unsaved changes, and **Cancel** stops there.
 
 When the tabs don't fit, they all get narrower and their names end in "…". Past that, the row
 scrolls to keep the active tab in view. Drag the header between and around the tabs to move the
@@ -152,8 +157,14 @@ folder's row pushes it away. Click a pinned folder to scroll back to it.
 - Click a file to show it in a new tab, where its text fades in. A dot next to a file in the
   sidebar means it has unsaved changes.
 - ⌘-click a file to open it in a new window.
-- Right-click (or control-click) a file for **Open in New Window**, **Reveal in Finder** and
-  **Copy Path**. A folder has the last two.
+- Drag a file onto a card's tabs to open it there as a new tab: the tabs slide apart to show
+  where it goes. Drag it over a card's text to open it in a new card split off that card's nearest
+  edge, with a preview of the half it takes. A copy of the file's name follows the mouse. A file
+  already open in the window moves there instead.
+- Right-click (or control-click) a file for **Open in New Tab**, **Open in New Split** (beside the
+  focused card, or below it when there's no room beside), **Open in New Window**, **Reveal in
+  Finder** and **Copy Path**. A folder has the last two. The row keeps an outline in the caret's
+  color while the menu is open, apart from the highlight on the file on show.
 - **View > Show Next Tab** (⌃Tab) and **Show Previous Tab** (⌃⇧Tab) step through the window's
   tabs.
 - **View > Sidebar** (⌘\) or the sidebar button by the traffic lights shows or hides the sidebar
@@ -189,6 +200,9 @@ keys, ⌥⌫ to delete a word, and the Control-key shortcuts (⌃A, ⌃E, ⌃K a
 
 - Double-click selects a word and triple-click selects a line; drag after either to grow the
   selection by words or lines.
+- A selection has a clear tint of its own (the caret's color on Paper and Ink, blue on the Ayu
+  and One themes), so it stands apart from the band on the caret's line, which stays put while
+  you select.
 - Return keeps the line's indentation. Tab indents, or indents every selected line; ⇧Tab
   takes one level of indentation off.
 - ⌘/ comments or uncomments the selected lines.
