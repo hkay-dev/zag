@@ -516,6 +516,10 @@ const Slot = struct {
 };
 
 const caret_time = 0.09;
+/// The caret's glide for a step along its row, and the least and most for a longer jump.
+const caret_step = 0.05;
+const caret_min = 0.07;
+const caret_max = 0.14;
 const fade_time = 0.12;
 const panel_time = 0.14;
 /// The outline on a right-clicked row or tab fades in and out this slowly,
@@ -540,7 +544,6 @@ const glide_rows = 3;
 /// In the text the caret lives in page coordinates, so it rides along with
 /// a gliding scroll.
 fn placeCaret(d: *Doc, now: f64, x: f64, y: f64, in_text: bool, spot: [3]usize, show: bool) void {
-    d.cy.dur = if (conf.typewriter and in_text) scroll_time else caret_time;
     const moved = !std.mem.eql(usize, &spot, &d.spot);
     if (in_text != d.c_text) {
         const sign: f64 = if (in_text) 1 else -1;
@@ -549,6 +552,9 @@ fn placeCaret(d: *Doc, now: f64, x: f64, y: f64, in_text: bool, spot: [3]usize, 
         d.c_text = in_text;
     }
     if (moved and d.shown and show and !d.snap) {
+        const glide = glideTime(x - d.cx.to, y - d.cy.to);
+        d.cx.dur = glide;
+        d.cy.dur = if (conf.typewriter and in_text) scroll_time else glide;
         d.cx.aim(x, now);
         d.cy.aim(y, now);
     } else if (moved or !d.shown or !show or d.snap or d.cx.to != x or d.cy.to != y) {
@@ -560,6 +566,13 @@ fn placeCaret(d: *Doc, now: f64, x: f64, y: f64, in_text: bool, spot: [3]usize, 
     d.shown = show;
     d.snap = false;
     moveCaret(d, now);
+}
+
+/// How long the caret takes to glide by (`dx`, `dy`): a step along its
+/// row is quick, and longer jumps take a little longer so they read as travel.
+fn glideTime(dx: f64, dy: f64) f64 {
+    if (@abs(dy) < lh / 2 and @abs(dx) <= cw + 0.5) return caret_step;
+    return std.math.clamp(caret_min + 0.025 * @log2(1 + @sqrt(dx * dx + dy * dy) / lh), caret_min, caret_max);
 }
 
 /// Puts the caret layer where its glide is at `now`, hidden outside the text.
@@ -579,18 +592,100 @@ fn moveCaret(d: *Doc, now: f64) void {
     msg(void, t, "commit", .{});
 }
 
-/// Holds the caret solid for half a second, then fades it out and in.
+/// Holds the caret solid for half a second, then fades it out, rests it
+/// dark, and fades it back in, once a second.
 fn blink(caret: Id) void {
     const num = objc.class("NSNumber");
-    const a = msg(Id, objc.class("CABasicAnimation"), "animationWithKeyPath:", .{objc.str("opacity")});
-    msg(void, a, "setFromValue:", .{msg(Id, num, "numberWithDouble:", .{@as(f64, 1)})});
-    msg(void, a, "setToValue:", .{msg(Id, num, "numberWithDouble:", .{@as(f64, 0)})});
-    msg(void, a, "setDuration:", .{@as(f64, 0.5)});
-    msg(void, a, "setAutoreverses:", .{true});
+    const arr = objc.class("NSArray");
+    const levels = [_]f64{ 1, 1, 0, 0, 1 };
+    const times = [_]f64{ 0, 0.5, 0.62, 0.9, 1 };
+    var values: [5]Id = undefined;
+    var stops: [5]Id = undefined;
+    for (levels, times, &values, &stops) |lv, tm, *v, *s| {
+        v.* = msg(Id, num, "numberWithDouble:", .{lv});
+        s.* = msg(Id, num, "numberWithDouble:", .{tm});
+    }
+    const fn_class = objc.class("CAMediaTimingFunction");
+    const eases = [_][:0]const u8{ "linear", "easeIn", "linear", "easeOut" };
+    var curves: [4]Id = undefined;
+    for (eases, &curves) |name, *c| c.* = msg(Id, fn_class, "functionWithName:", .{objc.str(name)});
+    const a = msg(Id, objc.class("CAKeyframeAnimation"), "animationWithKeyPath:", .{objc.str("opacity")});
+    msg(void, a, "setValues:", .{msg(Id, arr, "arrayWithObjects:count:", .{ &values, @as(usize, 5) })});
+    msg(void, a, "setKeyTimes:", .{msg(Id, arr, "arrayWithObjects:count:", .{ &stops, @as(usize, 5) })});
+    msg(void, a, "setTimingFunctions:", .{msg(Id, arr, "arrayWithObjects:count:", .{ &curves, @as(usize, 4) })});
+    msg(void, a, "setDuration:", .{@as(f64, 1)});
     msg(void, a, "setRepeatCount:", .{std.math.inf(f32)});
-    msg(void, a, "setBeginTime:", .{CACurrentMediaTime() + 0.5});
-    msg(void, a, "setTimingFunction:", .{msg(Id, objc.class("CAMediaTimingFunction"), "functionWithName:", .{objc.str("easeInEaseOut")})});
     msg(void, caret, "addAnimation:forKey:", .{ a, objc.str("blink") });
+}
+
+const max_flash = 64;
+const flash_alpha = 0.28;
+const flash_hold = 0.1;
+const flash_time = 0.45;
+
+/// Clears the flash and starts a new one now; add its spans with `flashAdd`.
+fn flashStart(d: *Doc) void {
+    d.flash_n = 0;
+    d.flash_t0 = CACurrentMediaTime();
+}
+
+/// Adds the bytes `lo..hi` of the text to the flash, up to `max_flash` spans.
+fn flashAdd(d: *Doc, lo: usize, hi: usize) void {
+    if (lo >= hi or d.flash_n == max_flash) return;
+    d.flash[d.flash_n] = .{ lo, hi };
+    d.flash_n += 1;
+}
+
+/// The flash's opacity at `now`: held, then easing out.
+fn flashAlpha(d: *const Doc, now: f64) f64 {
+    const age = now - d.flash_t0;
+    if (d.flash_n == 0 or age >= flash_hold + flash_time) return 0;
+    if (age < flash_hold) return flash_alpha;
+    const rest = 1 - (age - flash_hold) / flash_time;
+    return flash_alpha * rest * rest;
+}
+
+const find_light: Rgb = .{ @as(f64, 0xF7) / 255.0, @as(f64, 0xD4) / 255.0, @as(f64, 0x4C) / 255.0 };
+const find_dark: Rgb = .{ @as(f64, 0xE8) / 255.0, @as(f64, 0xB8) / 255.0, @as(f64, 0x4A) / 255.0 };
+const find_ink: Rgb = .{ @as(f64, 0x1A) / 255.0, @as(f64, 0x1A) / 255.0, @as(f64, 0x1A) / 255.0 };
+/// Other find matches are drawn at this opacity.
+const match_alpha = 0.55;
+/// The nearest match fades in first; each row of distance waits this long, up to the cap.
+const stag_row = 0.008;
+const stag_cap = 0.12;
+/// A new current match starts its pop at this speed: it peaks near 1.14.
+const pop_kick = 6.0;
+
+/// Draws the find indicator over row `sg` of line `l` (which starts at byte
+/// `ls`): bytes `m` of the file as an opaque pill with its glyphs redrawn
+/// dark, grown by `scale` about its center and `a` opaque.
+fn pillOver(k: *Ink, th: *const Theme, dark: bool, l: []const u8, ls: usize, sg: Seg, m: [2]usize, ox: f64, skip: usize, y: f64, scale: f64, a: f64) void {
+    if (m[0] > ls + l.len or m[1] <= ls) return;
+    const lo = std.math.clamp(@max(m[0], ls) - ls, sg.start, sg.end);
+    const hi = std.math.clamp(@min(m[1], ls + l.len) - ls, sg.start, sg.end);
+    if (lo >= hi) return;
+    const col = colAt(l, sg.start, sg.col, lo);
+    const x0 = ox + (f(col - sg.col) - f(skip)) * cw;
+    const x1 = ox + (f(colAt(l, sg.start, sg.col, hi) - sg.col) - f(skip)) * cw;
+    const ctx = k.ctx;
+    k.flush();
+    objc.CGContextSaveGState(ctx);
+    const cx = (x0 + x1) / 2;
+    const cy = y + lh / 2;
+    if (scale != 1) {
+        objc.CGContextTranslateCTM(ctx, cx, cy);
+        objc.CGContextScaleCTM(ctx, scale, scale);
+        objc.CGContextTranslateCTM(ctx, -cx, -cy);
+    }
+    pill(ctx, if (dark) find_dark else find_light, a, x0 - 2, y + 1, x1 - x0 + 4, lh - 2, 3);
+    var ink: Rgb = undefined;
+    for (&ink, th.fg, find_ink) |*c, fg, dk| c.* = fg + (dk - fg) * a;
+    const was = k.focus;
+    k.focus = null;
+    _ = k.run(l, lo, hi, col, null, th, ink, x0, y + baseline, 0, 1 << 16);
+    k.flush();
+    k.focus = was;
+    objc.CGContextRestoreGState(ctx);
 }
 
 /// A tap on a Force Touch trackpad, felt only while a finger presses it:
@@ -612,6 +707,7 @@ fn scenery(d: *const Doc, now: f64) bool {
     const stretched = d.relax and (d.ov[0] != 0 or d.ov[1] != 0);
     return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or now < d.focus_t0 + focus_time or d.panel.moving(now) or d.lit.moving(now) or
         d.prompt_t.moving(now) or d.plus_t.moving(now) or !d.pick_s.settled() or tabsMoving(d, now) or
+        !d.pop.settled() or now < d.prev_t0 + fade_time or now < d.stag_t0 + stag_cap + fade_time or (d.flash_n > 0 and now < d.flash_t0 + flash_hold + flash_time) or
         now < d.load_t + load_time or (d.had_sel and now < d.sel_t0 + fade_time) or now < d.bar_t0 + bar_hold + bar_time;
 }
 
@@ -831,6 +927,21 @@ const Doc = struct {
     query: std.ArrayList(u8) = .empty,
     /// Where the caret was when find opened.
     origin: usize = 0,
+    /// The find indicator: the current match's span as last drawn, the span
+    /// it is fading out of and when that began, and a find jump just made.
+    cur_m: ?[2]usize = null,
+    prev_m: [2]usize = .{ 0, 0 },
+    prev_t0: f64 = -1e9,
+    jumped: bool = false,
+    /// The current match pill's pop: scale is 1 plus this, kicked on arrival.
+    pop: Spring = .{ .k = 600, .c = 22, .eps = 0.01 },
+    /// Find is open and drawn, and when the other matches began fading in.
+    find_seen: bool = false,
+    stag_t0: f64 = -1e9,
+    /// Ranges to flash behind after undo, redo, Replace All or a big paste.
+    flash: [max_flash][2]usize = undefined,
+    flash_n: usize = 0,
+    flash_t0: f64 = 0,
     found: [2]usize = .{ 0, 0 },
     list: ?finder.Files = null,
     picks: [10]usize = undefined,
@@ -2586,7 +2697,7 @@ fn accept(d: *Doc) void {
             d.fresh = false;
             const s = d.ed.sel();
             const replaced = d.ed.replaceOne(gpa, q, d.with.items) catch false;
-            _ = d.ed.find(q, if (replaced) d.ed.cur else s[0], false);
+            if (d.ed.find(q, if (replaced) d.ed.cur else s[0], false)) d.jumped = true;
             countFound(d);
             center(d);
         },
@@ -2599,7 +2710,27 @@ var note_buf: [40]u8 = undefined;
 /// ⌥Return in find and replace.
 fn replaceAll(d: *Doc) void {
     remember(d);
-    const n = d.ed.replaceAll(gpa, d.prompt.items, d.with.items) catch 0;
+    // Where each replacement will stand once the earlier ones are in.
+    var spots: [max_flash][2]usize = undefined;
+    var ns: usize = 0;
+    const q = d.prompt.items;
+    const old = d.ed.text();
+    var i: usize = 0;
+    while (q.len > 0 and ns < max_flash and i + q.len <= old.len) {
+        if (!editor.matchAt(old, i, q)) {
+            i += 1;
+            continue;
+        }
+        const lo: usize = @intCast(@as(isize, @intCast(i)) + @as(isize, @intCast(ns)) * (@as(isize, @intCast(d.with.items.len)) - @as(isize, @intCast(q.len))));
+        spots[ns] = .{ lo, lo + d.with.items.len };
+        ns += 1;
+        i += q.len;
+    }
+    const n = d.ed.replaceAll(gpa, q, d.with.items) catch 0;
+    if (n > 0) {
+        flashStart(d);
+        for (spots[0..ns]) |sp| flashAdd(d, sp[0], sp[1]);
+    }
     d.mode = .edit;
     d.note = std.fmt.bufPrint(&note_buf, "replaced {d}", .{n}) catch "";
     center(d);
@@ -2610,7 +2741,7 @@ fn findAgain(d: *Doc, back: bool) void {
     const q = if (finding) d.prompt.items else d.query.items;
     if (q.len == 0) return startPrompt(d, .find);
     const s = d.ed.sel();
-    if (!d.ed.find(q, if (back) s[0] else s[0] + 1, back)) d.note = "no matches";
+    if (d.ed.find(q, if (back) s[0] else s[0] + 1, back)) d.jumped = true else d.note = "no matches";
     if (finding) countFound(d);
     center(d);
 }
@@ -3629,6 +3760,44 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     const fade = std.math.clamp((now - d.sel_t0) / fade_time, 0, 1);
     const sel_a = 1 - (1 - fade) * (1 - fade) * (1 - fade);
 
+    // The find indicator marks the current match: the selection while it is a
+    // match of the search, or the selection a find jump just made.
+    var cur_m: ?[2]usize = null;
+    if (finding) {
+        const want = d.prompt.items;
+        if (s[1] - s[0] == want.len and editor.matchAt(d.ed.text(), s[0], want)) cur_m = s;
+    } else if (d.mode == .edit and has_sel) {
+        const kept = if (d.cur_m) |h| h[0] == s[0] and h[1] == s[1] else false;
+        if (d.jumped or kept) cur_m = s;
+    }
+    const jumped = d.jumped;
+    d.jumped = false;
+    if (cur_m) |c| {
+        // It pops when it first appears and on every jump to a match.
+        if (d.cur_m == null or jumped) {
+            if (d.pop.settled()) d.pop.t = now;
+            d.pop.v = pop_kick;
+        }
+        if (d.cur_m) |h| if (jumped and h[0] != c[0]) {
+            d.prev_m = h;
+            d.prev_t0 = now;
+        };
+    } else if (d.cur_m) |h| {
+        d.prev_m = h;
+        d.prev_t0 = now;
+    }
+    d.cur_m = cur_m;
+    const pop = 1 + (if (d.pop.settled()) 0 else d.pop.step(now));
+    const prev_a = std.math.clamp(1 - (now - d.prev_t0) / fade_time, 0, 1);
+    // Opening find on prefilled text starts the matches' staggered fade-in.
+    if (!finding) {
+        d.find_seen = false;
+    } else if (!d.find_seen) {
+        d.find_seen = true;
+        if (d.fresh) d.stag_t0 = now;
+    }
+    const flash_a = flashAlpha(d, now);
+
     // Backgrounds: selection, find matches.
     for (vis[0..nvis], first..) |v, row| {
         const y = top_h + f(row) * lh - d.vy;
@@ -3648,15 +3817,28 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             const w = xat(l, sg, hi, ox, skip) - x0 + tail;
             if (w > 0) fillA(ctx, th.sel, sel_a, x0, y, w, lh);
         }
+        if (flash_a > 0) for (d.flash[0..d.flash_n]) |fr| {
+            if (fr[0] <= ls + l.len and fr[1] > ls) {
+                const lo = std.math.clamp(@max(fr[0], ls) - ls, sg.start, sg.end);
+                const hi = std.math.clamp(@min(fr[1], ls + l.len) - ls, sg.start, sg.end);
+                const tail: f64 = if (fr[1] > ls + l.len and sg.end == l.len) 0.6 * cw else 0;
+                const x0 = xat(l, sg, lo, ox, skip);
+                const w = xat(l, sg, hi, ox, skip) - x0 + tail;
+                if (w > 0) fillA(ctx, th.caret, flash_a, x0, y, w, lh);
+            }
+        };
         if (finding) {
             const q = d.prompt.items;
+            // Opening find on prefilled text fades the matches in, the nearest first.
+            const dist = if (row > here.row) row - here.row else here.row - row;
+            const m_a = std.math.clamp((now - d.stag_t0 - @min(stag_row * f(dist), stag_cap)) / fade_time, 0, 1);
             var j = sg.start -| (q.len - 1);
             while (j < sg.end and j + q.len <= l.len) : (j += 1) if (editor.matchAt(l, j, q)) {
                 const lo = @max(j, sg.start);
                 const hi = @min(j + q.len, sg.end);
                 if (lo < hi and ls + j != s[0]) {
                     const x0 = xat(l, sg, lo, ox, skip);
-                    fill(ctx, th.match, x0, y + 2, xat(l, sg, hi, ox, skip) - x0, lh - 4);
+                    pill(ctx, th.match, match_alpha * m_a, x0, y + 2, xat(l, sg, hi, ox, skip) - x0, lh - 4, 3);
                 }
                 j += q.len - 1;
             };
@@ -3683,7 +3865,10 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             }
         }
         k.offset = b.lineStart(v.line);
-        _ = k.run(l, v.seg.start, v.seg.end, v.seg.col, kinds, th, th.fg, ox, top_h + f(row) * lh - d.vy + baseline, skip, cols);
+        const row_y = top_h + f(row) * lh - d.vy;
+        _ = k.run(l, v.seg.start, v.seg.end, v.seg.col, kinds, th, th.fg, ox, row_y + baseline, skip, cols);
+        if (prev_a > 0) pillOver(&k, th, dark, l, k.offset, v.seg, d.prev_m, ox, skip, row_y, 1, prev_a);
+        if (cur_m) |m| pillOver(&k, th, dark, l, k.offset, v.seg, m, ox, skip, row_y, pop, 1);
     }
     k.flush();
     k.focus = null;
@@ -3712,7 +3897,10 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
 
     const by = bottom(d);
     if (d.mode == .edit) {
-        placeCaret(d, now, tx + f(here.col) * cw - 1, top_h + f(here.row) * lh + 2, true, .{ 0, here.row, here.col }, key and load >= 1);
+        const spot: [3]usize = .{ 0, here.row, here.col };
+        // A shift-move that extends a selection snaps, like the selection's edge.
+        if (has_sel and !std.mem.eql(usize, &spot, &d.spot)) d.snap = true;
+        placeCaret(d, now, tx + f(here.col) * cw - 1, top_h + f(here.row) * lh + 2, true, spot, key and load >= 1);
     }
 
     // The quick open list, rising out of the prompt line.
@@ -4489,6 +4677,7 @@ fn yes(_: Id, _: Sel) callconv(.c) bool {
 fn keyDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const d = docOf(self) orelse return;
     d.note = "";
+    d.flash_n = 0;
     const flags = msg(usize, ev, "modifierFlags", .{});
     const code = msg(u16, ev, "keyCode", .{});
     // ⌥Z for Soft Wrap: menus only see option keys after the text has typed them.
@@ -5216,7 +5405,12 @@ fn cut(d: *Doc) void {
 fn paste(d: *Doc) void {
     const s = objc.utf8(msg(Id, pasteboard(), "stringForType:", .{NSPasteboardTypeString}));
     if (d.mode != .edit) return promptType(d, s);
+    const at = d.ed.sel()[0];
     d.ed.insert(gpa, s) catch {};
+    if (std.mem.indexOfScalar(u8, s, '\n') != null or s.len > 40) {
+        flashStart(d);
+        flashAdd(d, at, d.ed.cur);
+    }
     reveal(d);
 }
 
@@ -5226,13 +5420,21 @@ fn selectAll(d: *Doc) void {
 
 fn undo(d: *Doc) void {
     d.mode = .edit;
+    const us = d.ed.buf.undos.items;
+    const span: [2]usize = if (us.len > 0) .{ us[us.len - 1].pos, us[us.len - 1].pos + us[us.len - 1].old.len } else .{ 0, 0 };
     d.ed.undo(gpa) catch {};
+    flashStart(d);
+    flashAdd(d, span[0], span[1]);
     reveal(d);
 }
 
 fn redo(d: *Doc) void {
     d.mode = .edit;
+    const rs = d.ed.buf.redos.items;
+    const span: [2]usize = if (rs.len > 0) .{ rs[rs.len - 1].pos, rs[rs.len - 1].pos + rs[rs.len - 1].new.len } else .{ 0, 0 };
     d.ed.redo(gpa) catch {};
+    flashStart(d);
+    flashAdd(d, span[0], span[1]);
     reveal(d);
 }
 
