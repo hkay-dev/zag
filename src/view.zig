@@ -142,7 +142,8 @@ fn chrome(th: *const Theme, dark: bool) Rgb {
 }
 
 /// How much of the chrome color paints over the sidebar material: the rest
-/// shows through. Zen has no material.
+/// shows through. Zen covers the material completely. (The material can't
+/// be hidden: ze's view lives inside it.)
 fn chromeAlpha(dark: bool) f64 {
     return if (conf.zen) 1 else if (dark) 0.7 else 0.6;
 }
@@ -1226,8 +1227,6 @@ var win_ivar: usize = 0;
 const Win = struct {
     window: Id,
     view: Id,
-    /// The sidebar material behind the view, which draws its chrome over it.
-    fx: Id = null,
     link: Id = null,
     cards: *Node,
     /// The card that takes typing, the menu commands and sidebar clicks.
@@ -2146,7 +2145,6 @@ pub fn newDoc() ?*Doc {
     msg(void, fx, "addSubview:", .{view});
     msg(void, win, "setContentView:", .{fx});
     msg(void, fx, "release", .{});
-    w.fx = fx;
     msg(void, win, "setOpaque:", .{false});
     msg(void, win, "setBackgroundColor:", .{msg(Id, objc.class("NSColor"), "clearColor", .{})});
     setLights(w, if (conf.zen) 0 else 1);
@@ -4442,8 +4440,6 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
             dropSideLines();
         }
     }
-    // The material behind the window shows everywhere but in Zen.
-    if (msg(bool, w.fx, "isHidden", .{}) != conf.zen) msg(void, w.fx, "setHidden:", .{conf.zen});
     // A closing folder shuts once its rows have folded away.
     finishFolds(now);
     // The sidebar slides in and out, on the first draw it's just there.
