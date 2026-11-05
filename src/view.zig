@@ -49,6 +49,12 @@ fn rebuildTree() void {
 /// Counts tree rebuilds, so a window knows when to look up its selected row again.
 var tree_gen: u32 = 0;
 
+/// Set while `restoreSession` opens last session's tabs: `install` leaves
+/// the folder read and the redraw to one pass at its end, and marks
+/// `tree_stale` when the folders need reading again.
+var restoring = false;
+var tree_stale = false;
+
 /// `p` relative to the folder, when it's inside it.
 fn relOf(p: []const u8) ?[]const u8 {
     const r = root orelse return null;
@@ -1578,11 +1584,13 @@ fn install(d: *Doc, pg: Page) void {
     if (d.path) |p| if (relOf(p)) |rel| {
         // The folders are only read again when one had to open or the file
         // isn't listed yet (made since the last read).
-        if (tree.reveal(gpa, rel) or !tree.has(rel)) rebuildTree();
+        if (tree.reveal(gpa, rel) or (!tree_stale and !tree.has(rel))) {
+            if (restoring) tree_stale = true else rebuildTree();
+        }
         if (d.win.focus == d) d.win.side_find = true;
     };
     named(d);
-    refreshAll();
+    if (!restoring) refreshAll();
 }
 
 /// Shows page `i` of the window. The file it had keeps its tab, even an
@@ -2466,12 +2474,19 @@ pub fn restoreSession() bool {
     }
     const list = msg(Id, defaults(), "stringArrayForKey:", .{objc.str("session")});
     if (list == null) return false;
+    restoring = true;
     for (0..msg(usize, list, "count", .{})) |i| {
         const entry = objc.utf8(msg(Id, list, "objectAtIndex:", .{i}));
         const tab = std.mem.indexOfScalar(u8, entry, '\t') orelse continue;
         var it = std.mem.splitScalar(u8, entry[tab + 1 ..], '\t');
         restoreWindow(entry[0..tab], &it);
     }
+    restoring = false;
+    if (tree_stale) {
+        tree_stale = false;
+        rebuildTree();
+    }
+    refreshAll();
     return docs.items.len > 0;
 }
 
@@ -2488,7 +2503,6 @@ fn restoreWindow(frame: []const u8, it: *std.mem.SplitIterator(u8, .scalar)) voi
     w.focus = lit orelse firstPane(n);
     named(w.focus);
     msg(void, w.window, "setFrameFromString:", .{objc.str(frame)});
-    refreshAll();
 }
 
 /// The cards that `it` describes next, leaving out files that are gone and
