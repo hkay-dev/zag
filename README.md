@@ -12,9 +12,11 @@ Needs Zig 0.17 and macOS 15 or later.
 
 ```sh
 zig build --release          # zig-out/bin/ze
-zig-out/bin/ze [file or folder]...
 zig build test
-scripts/bundle.sh            # zig-out/ze.app, for Finder and `open`
+scripts/dev.sh [files...]    # builds "ze Dev" and starts it in the background
+scripts/ship.sh              # Ship it: installs the stable ze at ~/Applications/ze.app
 ```
+
+Stable and dev builds are explained in [AGENTS.md](AGENTS.md).
 
 The guide is in [docs/guide](docs/guide/index.md).

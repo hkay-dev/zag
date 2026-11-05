@@ -946,7 +946,16 @@ pub fn open(path: []const u8, into: ?*Doc) void {
 /// Brings `d`'s window forward with `d` as its focused card.
 fn front(d: *Doc) void {
     focus(d);
-    msg(void, d.window, "makeKeyAndOrderFront:", .{@as(Id, null)});
+    showWin(d.window);
+}
+
+/// Set for a Dev build (`ze Dev`, bundle id ending in `.dev`), which runs
+/// behind Harsha's windows and never takes the keys.
+pub var background = false;
+
+/// Shows `win` in front and key, or for a Dev build, behind every window.
+fn showWin(win: Id) void {
+    if (background) msg(void, win, "orderBack:", .{@as(Id, null)}) else msg(void, win, "makeKeyAndOrderFront:", .{@as(Id, null)});
 }
 
 /// Makes `d` the card that takes typing in its window. Its ring lights up
@@ -1462,7 +1471,7 @@ pub fn newDoc() ?*Doc {
         msg(void, win, "setFrameTopLeftPoint:", .{Point{ .x = fr.x + 24, .y = fr.y + fr.h - 24 }});
     }
     named(d);
-    msg(void, win, "makeKeyAndOrderFront:", .{@as(Id, null)});
+    showWin(win);
     return d;
 }
 
@@ -1742,6 +1751,8 @@ fn checkOutside(d: *Doc) void {
 }
 
 fn askReload(d: *Doc) bool {
+    // A Dev build never puts an alert in front of Harsha: it keeps its copy.
+    if (background) return false;
     msg(void, d.window, "makeKeyAndOrderFront:", .{@as(Id, null)});
     const a = objc.new("NSAlert");
     var buf: [300]u8 = undefined;

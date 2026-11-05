@@ -44,7 +44,7 @@ fn didFinishLaunching(_: Id, _: Sel, _: Id) callconv(.c) void {
     // Launched from a terminal there is no bundle and nothing brings the
     // window forward; from the bundle, Launch Services does it (or `open -g` doesn't).
     const bundle = msg(Id, objc.class("NSBundle"), "mainBundle", .{});
-    if (msg(Id, bundle, "bundleIdentifier", .{}) == null) msg(void, app(), "activate", .{});
+    if (!view.background and msg(Id, bundle, "bundleIdentifier", .{}) == null) msg(void, app(), "activate", .{});
 }
 
 fn openFiles(_: Id, _: Sel, _: Id, list: Id) callconv(.c) void {
@@ -73,6 +73,8 @@ fn openDocument(_: Id, _: Sel, _: Id) callconv(.c) void {
 }
 
 fn becameActive(_: Id, _: Sel, _: Id) callconv(.c) void {
+    // A Dev build hands the keys straight back.
+    if (view.background) return msg(void, app(), "deactivate", .{});
     view.recheckAll();
 }
 
@@ -273,7 +275,11 @@ pub fn main(init: std.process.Init.Minimal) void {
     args = init.args.toSlice(view.gpa) catch &.{};
     const pool = objc.objc_autoreleasePoolPush();
     const nsapp = app();
-    _ = msg(bool, nsapp, "setActivationPolicy:", .{@as(isize, 0)});
+    // A Dev build (bundle id ending in `.dev`) runs in the background: no
+    // Dock tile or menu bar, and it never comes forward.
+    const id = msg(Id, msg(Id, objc.class("NSBundle"), "mainBundle", .{}), "bundleIdentifier", .{});
+    if (id != null) view.background = std.mem.endsWith(u8, std.mem.span(msg([*:0]const u8, id, "UTF8String", .{})), ".dev");
+    _ = msg(bool, nsapp, "setActivationPolicy:", .{@as(isize, if (view.background) 1 else 0)});
     // No window tabs, so ⌃Tab reaches ze's own tabs.
     msg(void, objc.class("NSWindow"), "setAllowsAutomaticWindowTabbing:", .{false});
 
