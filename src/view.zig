@@ -201,27 +201,54 @@ extern const NSRunLoopCommonModes: Id;
 
 /// A value that eases from where it is to a new target over `dur` seconds.
 /// A display link redraws while any of them move.
+///
+/// The curve is a cubic from `from` at speed `v0` to `to` at rest. From rest
+/// it starts at three times the average speed, which is ease-out cubic. A new
+/// target mid-glide keeps the current speed, so held keys don't stutter.
 const Tween = struct {
     from: f64 = 0,
     to: f64 = 0,
     t0: f64 = 0,
+    v0: f64 = 0,
     dur: f64,
 
     fn at(w: Tween, now: f64) f64 {
-        const q = 1 - std.math.clamp((now - w.t0) / w.dur, 0, 1);
-        return w.to + (w.from - w.to) * q * q * q;
+        const s = std.math.clamp((now - w.t0) / w.dur, 0, 1);
+        const s2 = s * s;
+        const s3 = s2 * s;
+        return (2 * s3 - 3 * s2 + 1) * w.from + (s3 - 2 * s2 + s) * w.dur * w.v0 + (3 * s2 - 2 * s3) * w.to;
+    }
+
+    fn speed(w: Tween, now: f64) f64 {
+        if (!w.moving(now)) return 0;
+        const s = std.math.clamp((now - w.t0) / w.dur, 0, 1);
+        const s2 = s * s;
+        return (6 * s - 6 * s2) * (w.to - w.from) / w.dur + (3 * s2 - 4 * s + 1) * w.v0;
     }
 
     fn aim(w: *Tween, to: f64, now: f64) void {
         if (to == w.to) return;
+        const v = w.speed(now);
         w.from = w.at(now);
         w.to = to;
         w.t0 = now;
+        const ease = 3 * (to - w.from) / w.dur;
+        // Slower than ease-out keeps its speed and picks up smoothly, and the
+        // other way it turns around; faster is capped so it doesn't overshoot.
+        w.v0 = if (v == 0 or ((v > 0) == (ease > 0) and @abs(v) > @abs(ease))) ease else v;
     }
 
     fn snap(w: *Tween, to: f64) void {
         w.from = to;
         w.to = to;
+        w.v0 = 0;
+    }
+
+    /// Moves the whole glide by `by`, so it keeps its place on screen when the
+    /// page under it jumps.
+    fn shift(w: *Tween, by: f64) void {
+        w.from += by;
+        w.to += by;
     }
 
     fn moving(w: Tween, now: f64) bool {
@@ -233,6 +260,8 @@ const scroll_time = 0.16;
 const caret_time = 0.09;
 const fade_time = 0.12;
 const panel_time = 0.14;
+/// Keyboard scrolls this many rows or fewer (stepping past the edge) snap.
+const glide_rows = 3;
 
 /// Aims the caret. A new spot glides there; the same spot, a caret that was
 /// hidden, or a mouse drag snaps. In the text the caret lives in page
@@ -1216,13 +1245,25 @@ fn draw(d: *Doc, ctx: Id) void {
     const b = &d.ed.buf;
     layout(d);
     clampScroll(d);
-    // Keys and jumps glide the scroll; the trackpad and live resizing snap it.
-    if (msg(bool, d.view, "inLiveResize", .{})) {
-        d.ys.snap(d.sy);
-        d.xs.snap(d.sx);
+    // Jumps glide the scroll. Stepping past the edge a few rows at a time and
+    // live resizing snap it (the trackpad snaps in scrollWheel), and the caret
+    // and band move with the page so they don't bounce back to the edge.
+    const resizing = msg(bool, d.view, "inLiveResize", .{});
+    if (d.sy != d.ys.to) {
+        if (resizing or (!d.ys.moving(now) and @abs(d.sy - d.ys.to) <= glide_rows * lh)) {
+            const by = d.sy - d.ys.at(now);
+            d.ys.snap(d.sy);
+            d.band.shift(by);
+            if (d.c_text) d.cy.shift(by);
+        } else d.ys.aim(d.sy, now);
     }
-    d.ys.aim(d.sy, now);
-    d.xs.aim(d.sx, now);
+    if (d.sx != d.xs.to) {
+        if (resizing or (!d.xs.moving(now) and @abs(d.sx - d.xs.to) <= 16 * cw)) {
+            const by = d.sx - d.xs.at(now);
+            d.xs.snap(d.sx);
+            if (d.c_text) d.cx.shift(by);
+        } else d.xs.aim(d.sx, now);
+    }
     d.vy = d.ys.at(now);
     d.vx = d.xs.at(now);
     fill(ctx, th.bg, 0, 0, r.w, r.h);
