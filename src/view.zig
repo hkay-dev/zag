@@ -103,7 +103,8 @@ fn rightEdge(d: *const Doc) f64 {
 /// From the card's left edge to the text. Zen pads it so an 80-column page
 /// sits in the middle of the card.
 fn padL(d: *const Doc) f64 {
-    return if (conf.zen) @max(pad_x, (d.size.x - 80 * cw) / 2 - gap) else pad_x;
+    const z = std.math.clamp(d.win.z.x, 0, 1);
+    return pad_x + (@max(pad_x, (d.size.x - 80 * cw) / 2 - gap) - pad_x) * z;
 }
 
 /// Soft wrap is on, or zen wraps at 80 columns.
@@ -768,6 +769,8 @@ const Doc = struct {
     lit: Tween = .{ .dur = tab_time },
     /// Folding away after its last tab closed.
     closing: bool = false,
+    /// When a refused split last shook this card.
+    shake_t0: f64 = -1,
     /// Where scrolling is headed; vx and vy are where it shows right now.
     sx: f64 = 0,
     sy: f64 = 0,
@@ -924,6 +927,9 @@ const Win = struct {
     side_drag: bool = false,
     /// The gap between two cards that the mouse is dragging.
     grab: ?*Node = null,
+    /// Which snap point or limit the dragged gap sits on, 0 for none, so the
+    /// trackpad taps once on arriving.
+    grab_hit: u8 = 0,
     /// Scroll the sidebar to the focused card's file on the next draw.
     side_find: bool = false,
     /// The open folders pinned under the folder's name, and where each drew.
@@ -962,6 +968,8 @@ const Win = struct {
     /// mouse fades in with `ghost_a` once it leaves its row.
     pv: [4]Spring = @splat(.{ .k = 420, .c = 30, .eps = 0.05 }),
     pv_a: Tween = .{ .dur = fade_time },
+    /// A split drop just happened, so the preview's ring fades out quicker.
+    pv_cross: bool = false,
     ghost_a: Tween = .{ .dur = fade_time },
     /// The sidebar row (of tree `menu_gen`) or the card's tab that a
     /// right-click menu is open on, and its outline fading in or out.
@@ -974,6 +982,10 @@ const Win = struct {
     side_drawn: bool = false,
     /// A dragged copy finishing its trip after the mouse let go.
     fly: ?Fly = null,
+    /// Zen blended in, 0 to 1: the text's margin, the header and the
+    /// traffic lights follow it. And the lights' alpha as last set.
+    z: Spring = .{ .k = 200, .c = 28, .eps = 0.002 },
+    lights_a: f64 = 1,
     /// The sidebar row under the mouse (of tree `hov_gen`), the row the
     /// hover highlight last went to, where it springs to in the list, and
     /// how far it's faded in.
@@ -1004,6 +1016,15 @@ const Fly = struct {
 };
 
 const fly_time = 0.3;
+
+/// A refused split shakes its card this long.
+const shake_time = 0.3;
+/// A gap dragged past its limit stretches at this share of the pull, up to
+/// `grab_stretch` points. A split gap snaps to 1/2, 1/3 and 2/3 within
+/// `snap_reach` points.
+const grab_pull = 0.3;
+const grab_stretch = 24.0;
+const snap_reach = 6.0;
 
 /// Where a dragged tab lands: among a card's tabs, on the card itself, or
 /// in a new card split off one of its edges.
@@ -1043,7 +1064,7 @@ const Node = struct {
     down: bool = false,
     kids: [2]*Node = undefined,
     up: ?*Node = null,
-    share: Spring = .{ .k = 300, .c = 24, .eps = 0.0005 },
+    share: Spring = .{ .k = 260, .c = 30, .eps = 0.0005 },
     /// The kid folding away, dropped once the share settles.
     going: ?u1 = null,
     /// Where it laid out last, for grabbing the gap between its kids.
@@ -1398,7 +1419,11 @@ pub fn keyDoc() ?*Doc {
 /// while this one makes room. It takes the tab on show when there are
 /// others to leave behind, else it starts with quick open.
 fn split(d: *Doc, down: bool) void {
-    const e = splitOff(d, down, false) orelse return msg(void, objc.class("NSSound"), "beep", .{});
+    const e = splitOff(d, down, false, false) orelse {
+        d.shake_t0 = CACurrentMediaTime();
+        refresh(d);
+        return msg(void, objc.class("NSSound"), "beep", .{});
+    };
     if (tabCount(d) > 1) {
         if (takeTab(d, d.at)) |pg| putTab(e, pg, 0);
     } else startPrompt(e, .open);
@@ -1413,8 +1438,10 @@ fn roomFor(d: *const Doc, down: bool) bool {
 
 /// Splits card `d` and returns the new card, with a blank untitled file,
 /// right of or under it, or left of or above it when `before`. It springs
-/// in from a sliver at that edge while `d` makes room. Null without room.
-fn splitOff(d: *Doc, down: bool, before: bool) ?*Doc {
+/// in from a sliver at that edge while `d` makes room, or when `dropped`
+/// (a drop showed its half) starts as that half and settles with a kick.
+/// Null without room.
+fn splitOff(d: *Doc, down: bool, before: bool, dropped: bool) ?*Doc {
     const w = d.win;
     const leaf = nodeOf(w.cards, d) orelse return null;
     if (!roomFor(d, down)) return null;
@@ -1430,12 +1457,24 @@ fn splitOff(d: *Doc, down: bool, before: bool) ?*Doc {
     leaf.pane = null;
     leaf.down = down;
     leaf.kids = if (before) .{ b, a } else .{ a, b };
-    leaf.share.snap(if (before) 0 else 1);
-    leaf.share.aim(0.5, CACurrentMediaTime());
-    // It starts as a sliver at its edge, already the size it'll wrap at.
-    const far: Point = if (before) .{} else if (down) .{ .y = d.size.y - 2 * gap } else .{ .x = d.size.x - 2 * gap };
-    e.org = .{ .x = d.org.x + far.x, .y = d.org.y + far.y };
-    e.size = if (down) .{ .x = d.size.x, .y = 2 * gap } else .{ .x = 2 * gap, .y = d.size.y };
+    const now = CACurrentMediaTime();
+    if (dropped) {
+        leaf.share.snap(0.5);
+        leaf.share.aim(0.5, now);
+        leaf.share.v = if (before) 0.3 else -0.3;
+        const half = divide(.{ .x = d.org.x, .y = d.org.y, .w = d.size.x, .h = d.size.y }, 0.5, down)[if (before) 0 else 1];
+        e.org = .{ .x = half.x, .y = half.y };
+        e.size = .{ .x = half.w, .y = half.h };
+        w.pv_cross = true;
+        e.lit.dur = 0.15;
+    } else {
+        leaf.share.snap(if (before) 0 else 1);
+        leaf.share.aim(0.5, now);
+        // It starts as a sliver at its edge, already the size it'll wrap at.
+        const far: Point = if (before) .{} else if (down) .{ .y = d.size.y - 2 * gap } else .{ .x = d.size.x - 2 * gap };
+        e.org = .{ .x = d.org.x + far.x, .y = d.org.y + far.y };
+        e.size = if (down) .{ .x = d.size.x, .y = 2 * gap } else .{ .x = 2 * gap, .y = d.size.y };
+    }
     e.fin = if (down) .{ .x = d.fin.x, .y = room / 2 + 2 * gap } else .{ .x = room / 2 + 2 * gap, .y = d.fin.y };
     msg(void, d.window, "invalidateCursorRectsForView:", .{d.view});
     return e;
@@ -1641,12 +1680,38 @@ fn gapAt(n: *Node, p: Point) ?*Node {
 
 /// Moves split `n`'s gap to `p`, keeping each side's card a usable size.
 fn dragGap(w: *Win, n: *Node, p: Point) void {
-    const len = (if (n.down) n.r.h else n.r.w) - 3 * gap;
-    const at = (if (n.down) p.y - n.r.y else p.x - n.r.x) - 1.5 * gap;
-    const lo = @min(0.5, (if (n.down) min_card_h else min_card_w) / @max(len, 1));
-    n.share.snap(std.math.clamp(at / @max(len, 1), lo, 1 - lo));
-    msg(void, resizeCursor(n.down), "set", .{});
+    const len = @max((if (n.down) n.r.h else n.r.w) - 3 * gap, 1);
+    var at = (if (n.down) p.y - n.r.y else p.x - n.r.x) - 1.5 * gap;
+    const lo = @min(0.5, (if (n.down) min_card_h else min_card_w) / len) * len;
+    const hi = len - lo;
+    // Past a limit the gap stretches with resistance; near 1/2, 1/3 or
+    // 2/3 it snaps. Either way the trackpad taps once on arriving.
+    var hit: u8 = 0;
+    if (at <= lo) {
+        at = lo - @min((lo - at) * grab_pull, grab_stretch);
+        hit = 1;
+    } else if (at >= hi) {
+        at = hi + @min((at - hi) * grab_pull, grab_stretch);
+        hit = 2;
+    } else for ([_]f64{ 1.0 / 2.0, 1.0 / 3.0, 2.0 / 3.0 }, 3..) |s, id| {
+        if (@abs(at - s * len) < snap_reach and s * len > lo and s * len < hi) {
+            at = s * len;
+            hit = @intCast(id);
+            break;
+        }
+    }
+    if (hit != 0 and hit != w.grab_hit) haptic(.alignment);
+    w.grab_hit = hit;
+    n.share.snap(at / len);
+    msg(void, if (hit == 1 or hit == 2) limitCursor(n.down, hit == 1) else resizeCursor(n.down), "set", .{});
     msg(void, w.view, "setNeedsDisplay:", .{true});
+}
+
+/// Lets go of a gap dragged past its limit: the share springs back.
+fn releaseGap(n: *Node, now: f64) void {
+    const len = @max((if (n.down) n.r.h else n.r.w) - 3 * gap, 1);
+    const lo = @min(0.5, (if (n.down) min_card_h else min_card_w) / len);
+    n.share.aim(std.math.clamp(n.share.to, lo, 1 - lo), now);
 }
 
 /// The gaps' cursors: left-right between cards side by side, up-down
@@ -1661,6 +1726,14 @@ fn gapCursors(view: Id, n: *const Node) void {
 fn resizeCursor(down: bool) Id {
     const c = objc.class("NSCursor");
     return if (down) msg(Id, c, "resizeUpDownCursor", .{}) else msg(Id, c, "resizeLeftRightCursor", .{});
+}
+
+/// The cursor at a gap's limit, which only moves one way: toward the
+/// bigger first card at its smallest (`low`), away from it at its biggest.
+fn limitCursor(down: bool, low: bool) Id {
+    const c = objc.class("NSCursor");
+    if (down) return if (low) msg(Id, c, "resizeDownCursor", .{}) else msg(Id, c, "resizeUpCursor", .{});
+    return if (low) msg(Id, c, "resizeRightCursor", .{}) else msg(Id, c, "resizeLeftCursor", .{});
 }
 
 /// ⌘] and ⌘[: typing moves to the next or previous card, in layout order.
@@ -1724,7 +1797,7 @@ pub fn newDoc() ?*Doc {
     msg(void, win, "setTitleVisibility:", .{@as(isize, 1)});
     msg(void, win, "setMinSize:", .{Point{ .x = 360, .y = 240 }});
     msg(void, win, "setContentView:", .{view});
-    hideLights(w);
+    setLights(w, if (conf.zen) 0 else 1);
     msg(void, view, "release", .{});
     msg(void, win, "setDelegate:", .{view});
     msg(void, win, "makeFirstResponder:", .{view});
@@ -2298,7 +2371,6 @@ pub fn loadSettings() void {
     msg(void, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "setAppearance:", .{look});
     for (wins.items) |w| {
         w.dark = null;
-        hideLights(w);
         w.side_find = true;
         msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
     }
@@ -3086,7 +3158,19 @@ fn stuckRows(sy: f64, out: *[max_stuck]usize) usize {
 fn sideRow(w: *const Win, y: f64) ?usize {
     for (w.stuck[0..w.nstuck], w.stuck_y[0..w.nstuck]) |i, sy| if (y >= sy and y < sy + side_h) return i;
     if (y < listTop()) return null;
-    const at = @floor((y - listTop() + w.side_y) / side_h);
+    // Rows after a folding folder have slid up by how far it's shut, so a
+    // click lands on the row it shows, in the tree's own numbering.
+    var ly = y - listTop() + w.side_y;
+    var vs: [2]FoldView = undefined;
+    const vn = foldViews(tree.rows.items, CACurrentMediaTime(), &vs);
+    if (vn == 2 and vs[0].rest > vs[1].rest) std.mem.swap(FoldView, &vs[0], &vs[1]);
+    var cum: f64 = 0;
+    for (vs[0..vn]) |v| {
+        if (ly < f(v.rest) * side_h - cum - v.off) break;
+        cum += v.off;
+    }
+    ly += cum;
+    const at = @floor(ly / side_h);
     if (at < 0 or at >= f(tree.rows.items.len)) return null;
     return @intFromFloat(at);
 }
@@ -3108,37 +3192,128 @@ const Fold = struct {
     rel: [std.fs.max_path_bytes]u8 = undefined,
     len: usize = 0,
 };
-var fold: Fold = .{};
 
-/// Opens or closes the folder at row `i`, turning back a folder that's
-/// still opening from where it got to.
-fn startFold(i: usize) void {
-    const now = CACurrentMediaTime();
-    const row = tree.rows.items[i];
-    const shut = tree.isOpen(row.rel);
-    const p0 = if (fold.t.moving(now) and fold.at == i) fold.t.at(now) else @as(f64, if (shut) 1 else 0);
-    @memcpy(fold.rel[0..row.rel.len], row.rel);
-    fold.len = row.rel.len;
-    fold.at = i;
-    fold.closing = shut;
-    if (!shut) {
-        tree.toggle(gpa, row.rel);
-        rebuildTree();
+/// The folders folding now. Slot 0 is the latest click's; a folder still
+/// closing when another click comes moves to slot 1 and finishes there,
+/// so clicks are never held up by a closing folder.
+var folds: [2]Fold = .{ .{}, .{} };
+
+/// A folding folder as drawn: its row, where its rows end, how far open it
+/// is and how far the rows after it have slid up.
+const FoldView = struct { at: usize, rest: usize, n: usize, p: f64, off: f64 };
+
+/// The folders that are folding on screen, by `rows`, into `out`.
+fn foldViews(rows: []const tree_mod.Row, now: f64, out: *[2]FoldView) usize {
+    var nv: usize = 0;
+    for (&folds) |*o| {
+        if (!o.t.moving(now) or o.at >= rows.len or !std.mem.eql(u8, rows[o.at].rel, o.rel[0..o.len])) continue;
+        const p = std.math.clamp(o.t.at(now), 0, 1);
+        out[nv] = .{ .at = o.at, .rest = o.at + o.n + 1, .n = o.n, .p = p, .off = (1 - p) * f(o.n) * side_h };
+        nv += 1;
     }
-    fold.t.snap(p0);
-    fold.t.aim(if (shut) 0 else 1, now);
-    const rows = tree.rows.items;
-    var e = i + 1;
-    while (e < rows.len and rows[e].depth > rows[i].depth) e += 1;
-    fold.n = e - i - 1;
+    return nv;
 }
 
-/// Shuts the closing folder once its rows have folded away.
-fn finishFold() void {
-    fold.closing = false;
-    tree.toggle(gpa, fold.rel[0..fold.len]);
+/// How far row `i` has slid up, by the folders folding above it.
+fn shiftOf(vs: []const FoldView, i: usize) f64 {
+    var s: f64 = 0;
+    for (vs) |v| if (i >= v.rest) {
+        s += v.off;
+    };
+    return s;
+}
+
+/// The folder folding that holds row `i` among its rows.
+fn insideOf(vs: []const FoldView, i: usize) ?FoldView {
+    for (vs) |v| if (i > v.at and i < v.rest) return v;
+    return null;
+}
+
+/// True while any folder opens or closes.
+fn foldsBusy(now: f64) bool {
+    for (folds) |o| if (o.t.moving(now) or o.closing) return true;
+    return false;
+}
+
+/// Finds folder `o`'s row again after the tree changed. A folder that's
+/// gone from the list stops folding.
+fn refindFold(o: *Fold, now: f64) void {
+    if (!o.closing and !o.t.moving(now)) return;
+    const rows = tree.rows.items;
+    for (rows, 0..) |row, i| if (std.mem.eql(u8, row.rel, o.rel[0..o.len])) {
+        o.at = i;
+        var e = i + 1;
+        while (e < rows.len and rows[e].depth > row.depth) e += 1;
+        o.n = e - i - 1;
+        return;
+    };
+    o.closing = false;
+    o.t.snap(1);
+}
+
+/// Opens or closes the folder at row `i`. A folder that's still folding
+/// turns around from where it got to; one still closing keeps going on
+/// its own record.
+fn startFold(i: usize) void {
+    const now = CACurrentMediaTime();
+    var rel_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rel = rel_buf[0..tree.rows.items[i].rel.len];
+    @memcpy(rel, tree.rows.items[i].rel);
+    for (&folds) |*o| if (o.t.moving(now) and std.mem.eql(u8, rel, o.rel[0..o.len])) {
+        o.closing = !o.closing;
+        return o.t.aim(if (o.closing) 0 else 1, now);
+    };
+    // A closing folder the new one reaches into, or a third folder
+    // closing at once, is shut right away.
+    var at = i;
+    while (true) {
+        const rows = tree.rows.items;
+        var e = at + 1;
+        while (e < rows.len and rows[e].depth > rows[at].depth) e += 1;
+        const crowded = folds[0].closing and folds[0].t.moving(now) and folds[1].closing and folds[1].t.moving(now);
+        var hit: ?*Fold = null;
+        for (&folds, 0..) |*o, s| if (o.closing and o.t.moving(now) and ((o.at < e and at < o.at + o.n + 1) or (crowded and s == 1))) {
+            hit = o;
+        };
+        finishFold(hit orelse break);
+        at = for (tree.rows.items, 0..) |row, j| {
+            if (std.mem.eql(u8, row.rel, rel)) break j;
+        } else return;
+    }
+    const shut = tree.isOpen(rel);
+    if (folds[0].closing and folds[0].t.moving(now)) folds[1] = folds[0];
+    const fo = &folds[0];
+    @memcpy(fo.rel[0..rel.len], rel);
+    fo.len = rel.len;
+    fo.at = at;
+    fo.closing = shut;
+    if (!shut) {
+        tree.toggle(gpa, rel);
+        rebuildTree();
+        refindFold(&folds[1], now);
+    }
+    fo.t.snap(if (shut) 1 else 0);
+    fo.t.aim(if (shut) 0 else 1, now);
+    const rows = tree.rows.items;
+    var e = at + 1;
+    while (e < rows.len and rows[e].depth > rows[at].depth) e += 1;
+    fo.n = e - at - 1;
+}
+
+/// Shuts folder `o` for good: the tree drops its rows, and the other
+/// folder still folding finds its row again.
+fn finishFold(o: *Fold) void {
+    o.closing = false;
+    tree.toggle(gpa, o.rel[0..o.len]);
     rebuildTree();
+    const now = CACurrentMediaTime();
+    for (&folds) |*x| if (x != o) refindFold(x, now);
     refreshAll();
+}
+
+/// Shuts the closing folders whose rows have folded away.
+fn finishFolds(now: f64) void {
+    for (&folds) |*o| if (o.closing and !o.t.moving(now)) finishFold(o);
 }
 
 /// The sidebar's selection: a soft rounded highlight with a thin outline,
@@ -3248,10 +3423,10 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
     _ = drawLine(ctx, side_head, th.fg, 16, top_h + label_h + side_base);
 
     objc.CGContextClipToRect(ctx, .{ .y = lt, .w = side_w - 2, .h = view_h });
-    const folding = fold.t.moving(now) and fold.at < rows.len and std.mem.eql(u8, rows[fold.at].rel, fold.rel[0..fold.len]);
-    const p = if (folding) std.math.clamp(fold.t.at(now), 0, 1) else 1;
-    const off = if (folding) (1 - p) * f(fold.n) * side_h else 0;
-    const rest_at = if (folding) fold.at + fold.n + 1 else rows.len;
+    var vs: [2]FoldView = undefined;
+    const vn = foldViews(rows, now, &vs);
+    var moved: f64 = 0;
+    for (vs[0..vn]) |v| moved += v.off;
 
     // A softer highlight follows the mouse down the list, sliding from row
     // to row on the selection's spring. It fades in where the mouse comes
@@ -3259,7 +3434,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
     const hov_a = w.hov_a.at(now);
     if (w.hov_row != null and w.hov_gen == tree_gen and w.hov_row.? < rows.len) {
         const i = w.hov_row.?;
-        const ty = f(i) * side_h - if (i >= rest_at) off else 0;
+        const ty = f(i) * side_h - shiftOf(vs[0..vn], i);
         if (hov_a < 0.05) {
             w.hov.snap(ty);
         } else if (w.hov_last != i) {
@@ -3285,7 +3460,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
         };
     }
     if (w.sel_row) |i| {
-        const ty = f(i) * side_h - if (i >= rest_at) off else 0;
+        const ty = f(i) * side_h - shiftOf(vs[0..vn], i);
         if (w.sel_a.to == 0 or w.sel_was == null) {
             w.sel.snap(ty);
         } else if (w.sel_was.? != i) {
@@ -3297,7 +3472,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
         w.sel_a.aim(1, now);
     } else w.sel_a.aim(0, now);
     w.sel_was = w.sel_row;
-    const sel_a = w.sel_a.at(now) * if (w.sel_row != null and folding and w.sel_row.? > fold.at and w.sel_row.? < rest_at) p else 1;
+    const sel_a = w.sel_a.at(now) * if (w.sel_row) |sr| (if (insideOf(vs[0..vn], sr)) |v| v.p else 1.0) else 1.0;
     if (sel_a > 0.01) {
         objc.CGContextSaveGState(ctx);
         objc.CGContextSetAlpha(ctx, sel_a * fade);
@@ -3308,23 +3483,26 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
     // A folding folder's own rows stay put and show only as far as it's
     // open, fading in or out, and the rows after them slide to match.
     const from: usize = @intFromFloat(@max(@floor(sy / side_h), 0));
-    const to: usize = @min(rest_at, @as(usize, @intFromFloat(@max(@ceil((sy + view_h) / side_h), 0))));
+    const to: usize = @min(rows.len, @as(usize, @intFromFloat(@max(@ceil((sy + moved + view_h) / side_h), 0))));
     for (@min(from, to)..to) |i| {
-        const y = lt + f(i) * side_h - sy;
-        if (!folding or i <= fold.at) {
-            drawRow(w, ctx, th, k, dark, key, i, y, null, if (folding and i == fold.at) p else null);
+        const sh = shiftOf(vs[0..vn], i);
+        const y = lt + f(i) * side_h - sy - sh;
+        if (y > lt + view_h or y + side_h < lt) continue;
+        if (insideOf(vs[0..vn], i)) |v| {
+            objc.CGContextSaveGState(ctx);
+            objc.CGContextClipToRect(ctx, .{ .y = lt + f(v.at + 1) * side_h - sy - sh, .w = side_w, .h = f(v.n) * side_h - v.off });
+            objc.CGContextSetAlpha(ctx, fade * v.p);
+            drawRow(w, ctx, th, k, dark, key, i, y, null, null);
+            k.flush();
+            objc.CGContextRestoreGState(ctx);
             continue;
         }
-        objc.CGContextSaveGState(ctx);
-        objc.CGContextClipToRect(ctx, .{ .y = lt + f(fold.at + 1) * side_h - sy, .w = side_w, .h = f(fold.n) * side_h - off });
-        objc.CGContextSetAlpha(ctx, fade * p);
-        drawRow(w, ctx, th, k, dark, key, i, y, null, null);
-        k.flush();
-        objc.CGContextRestoreGState(ctx);
+        var turn: ?f64 = null;
+        for (vs[0..vn]) |v| if (v.at == i) {
+            turn = v.p;
+        };
+        drawRow(w, ctx, th, k, dark, key, i, y, null, turn);
     }
-    const from2 = @max(rest_at, @as(usize, @intFromFloat(@max(@floor((sy + off) / side_h), 0))));
-    const to2: usize = @min(rows.len, @as(usize, @intFromFloat(@max(@ceil((sy + off + view_h) / side_h), 0))));
-    for (@min(from2, to2)..to2) |i| drawRow(w, ctx, th, k, dark, key, i, lt + f(i) * side_h - sy - off, null, null);
 
     // Pinned folders, each held up by the end of its rows, the outer ones
     // drawn last so they stay on top.
@@ -3420,7 +3598,7 @@ fn drawLine(ctx: Id, line: Id, c: Rgb, x: f64, y: f64) f64 {
 /// A folder opens or closes; a file shows in the focused card, or with ⌘
 /// in a new window.
 fn sideClick(w: *Win, p: Point, flags: usize) void {
-    if (fold.closing) finishFold();
+    finishFolds(CACurrentMediaTime());
     const i = sideRow(w, p.y) orelse return;
     // A pinned folder scrolls back to where its rows start.
     if (std.mem.indexOfScalar(usize, w.stuck[0..w.nstuck], i) != null and p.y < listTop() + f(w.nstuck) * side_h) {
@@ -3461,12 +3639,26 @@ fn draw(w: *Win, ctx: Id) void {
     dev_px = 1 / @max(1, msg(f64, w.window, "backingScaleFactor", .{}));
     placeLights(w);
     // A closing folder shuts once its rows have folded away.
-    if (fold.closing and !fold.t.moving(now)) finishFold();
+    finishFolds(now);
     // The sidebar slides in and out, on the first draw it's just there.
     const shown = sideShown(w);
     const want: f64 = if (shown) 1 else 0;
-    if (w.side_seen) w.side_a.aim(want, now) else w.side_a.snap(want);
+    const zen_to: f64 = if (conf.zen) 1 else 0;
+    if (w.side_seen) {
+        w.side_a.aim(want, now);
+        w.z.aim(zen_to, now);
+    } else {
+        w.side_a.snap(want);
+        w.z.snap(zen_to);
+    }
     w.side_seen = true;
+    // Zen eases in: the lights follow it, the margin and header in drawPane.
+    _ = w.z.step(now);
+    const la = 1 - std.math.clamp(w.z.x, 0, 1);
+    if (la != w.lights_a) {
+        setLights(w, la);
+        w.lights_a = la;
+    }
     const slid = std.math.clamp(w.side_a.at(now), 0, 1);
     w.lx = @max(gap, side_w * slid);
     // The cards fill the room right of the sidebar, their panes reaching a
@@ -3478,10 +3670,10 @@ fn draw(w: *Win, ctx: Id) void {
     const key = msg(bool, w.window, "isKeyWindow", .{});
     const many = w.cards.pane == null;
     for (&w.hot_t, 1..) |*t, i| t.aim(if (w.hot == i) 1 else 0, now);
-    var busy = w.side_t.moving(now) or w.side_a.moving(now) or fold.t.moving(now) or fold.closing or cardsMoving(w.cards) or
+    var busy = w.side_t.moving(now) or w.side_a.moving(now) or foldsBusy(now) or cardsMoving(w.cards) or
         !w.sel.settled() or w.sel_a.moving(now) or w.hot_t[0].moving(now) or w.hot_t[1].moving(now) or
         w.pv_a.moving(now) or w.ghost_a.moving(now) or w.menu_a.moving(now) or w.fly != null or
-        !w.hov.settled() or w.hov_a.moving(now);
+        !w.hov.settled() or w.hov_a.moving(now) or !w.z.settled();
     for (w.pv) |s| busy = busy or !s.settled();
     var gliding = false;
     for (docs.items) |d| if (d.win == w) {
@@ -3490,6 +3682,8 @@ fn draw(w: *Win, ctx: Id) void {
         if (grown <= 0.01) continue;
         objc.CGContextSaveGState(ctx);
         objc.CGContextTranslateCTM(ctx, d.org.x, d.org.y);
+        const shaking = (now - d.shake_t0) / shake_time;
+        if (shaking >= 0 and shaking < 1) objc.CGContextTranslateCTM(ctx, 6 * @sin(2 * std.math.pi * 3 * shaking) * (1 - shaking), 0);
         if (grown < 1) {
             objc.CGContextSetAlpha(ctx, grown);
             objc.CGContextBeginTransparencyLayer(ctx, null);
@@ -3497,7 +3691,7 @@ fn draw(w: *Win, ctx: Id) void {
         drawPane(d, ctx, th, dark, key, many, now);
         if (grown < 1) objc.CGContextEndTransparencyLayer(ctx);
         objc.CGContextRestoreGState(ctx);
-        busy = busy or d.busy;
+        busy = busy or d.busy or (shaking >= 0 and shaking < 1);
         gliding = gliding or d.cx.moving(now) or d.cy.moving(now);
     };
     // The sidebar, and the buttons by the traffic lights, each with a soft
@@ -3803,11 +3997,16 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // The header, over any text scrolled under it: the file's name and
     // folder, or the window's tabs.
     // The header has its own shade and a hairline under it, set apart from the text.
-    // Zen keeps its room as a plain margin.
-    if (conf.zen) fill(ctx, th.bg, card.x, card.y, card.w, top_h - gap) else {
+    // Zen blends the header out into a plain margin.
+    const zt = std.math.clamp(d.win.z.x, 0, 1);
+    fill(ctx, th.bg, card.x, card.y, card.w, top_h - gap);
+    if (zt < 0.999) {
+        if (zt > 0.001) {
+            objc.CGContextSetAlpha(ctx, 1 - zt);
+            objc.CGContextBeginTransparencyLayer(ctx, null);
+        }
         fill(ctx, th.header, card.x, card.y, card.w, head_h);
         fill(ctx, th.rule, card.x, card.y + head_h, card.w, 1);
-        fill(ctx, th.bg, card.x, card.y + head_h + 1, card.w, top_h - gap - head_h - 1);
         const hy = gap + head_h / 2;
         const mono_y = @round(hy - lh / 2 + baseline);
         const right = card.x + card.w - 10;
@@ -3815,16 +4014,19 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         // The traffic lights and the sidebar button sit on a card at the window's top left.
         const lights_end: f64 = if (root != null) toggle_x + 22 else lights_x + 76;
         drawTabs(d, ctx, th, &k, dark, key, @max(card.x + 14, if (d.org.y < 1) lights_end - d.org.x else 0), right, mono_y, now);
+        k.flush();
+        if (zt > 0.001) objc.CGContextEndTransparencyLayer(ctx);
     }
     objc.CGContextRestoreGState(ctx);
 
     // The card's outline. In a window with more than one, the card that
     // takes typing also gets a ring in the caret's color, which fades
-    // from card to card. Zen draws neither.
-    if (!conf.zen) {
-        ring(ctx, th.fg, if (dark) 0.1 else 0.08, card.x, card.y, card.w, card.h, card_radius);
+    // from card to card. Zen fades both out.
+    const calm = 1 - zt;
+    if (calm > 0.01) {
+        ring(ctx, th.fg, (if (dark) @as(f64, 0.1) else 0.08) * calm, card.x, card.y, card.w, card.h, card_radius);
         const lit = d.lit.at(now);
-        if (lit > 0.01) ring(ctx, th.caret, 0.55 * lit, card.x, card.y, card.w, card.h, card_radius);
+        if (lit > 0.01) ring(ctx, th.caret, 0.55 * lit * calm, card.x, card.y, card.w, card.h, card_radius);
     }
     d.busy = scenery(d, now);
 }
@@ -4156,6 +4358,7 @@ fn dragTab(w: *Win, p: Point) void {
         if (@abs(p.x - t.down.x) < 4 and @abs(p.y - t.down.y) < 4) return;
         t.live = true;
     }
+    const was: ?Zone = if (t.drop) |x| x.zone else null;
     t.drop = null;
     t.out = true;
     if (t.from) |d| {
@@ -4169,10 +4372,13 @@ fn dragTab(w: *Win, p: Point) void {
             for (d.slots.items) |o| if (!o.gone and o.id != t.id and o.x + o.w / 2 < mid) {
                 k += 1;
             };
+            if (k != j) haptic(.alignment);
             reorderTab(d, j, k);
         };
     }
     if (t.out) t.drop = dropAt(w, t, p);
+    const now_zone: ?Zone = if (t.drop) |x| x.zone else null;
+    if (was != now_zone) haptic(.level);
     aimPreview(w, CACurrentMediaTime());
     msg(void, w.view, "setNeedsDisplay:", .{true});
 }
@@ -4251,6 +4457,16 @@ fn dropRect(dr: Drop, gw: f64) Rect {
     };
 }
 
+/// Where the dragged copy's tab pill lands when `dr` splits off a new card:
+/// the title spot of the half the card will take, in the view.
+fn titleSpot(dr: Drop) Point {
+    const r = dropRect(dr, 0);
+    // A card at the window's top left clears the traffic lights.
+    const lights_end: f64 = if (root != null) toggle_x + 22 else lights_x + 76;
+    const x = if (r.y < gap + 1) @max(r.x + 14, lights_end) else r.x + 14;
+    return .{ .x = x, .y = r.y + head_h / 2 - 11 };
+}
+
 /// The dragged tab's or file's name and icon, for its copy under the mouse.
 fn ghostOf(t: *const TabDrag) ?struct { line: Id, icon: Id } {
     if (t.from) |d| {
@@ -4284,8 +4500,14 @@ fn aimPreview(w: *Win, now: f64) void {
             for (&w.pv, from) |*s, v| s.snap(v);
         }
         for (&w.pv, to) |*s, v| s.aim(v, now);
+        if (w.pv_a.to != 1) w.pv_a.dur = fade_time;
         w.pv_a.aim(1, now);
-    } else w.pv_a.aim(0, now);
+    } else {
+        // A split drop's preview ring fades out into the new card's ring.
+        if (w.pv_a.to != 0) w.pv_a.dur = if (w.pv_cross) 0.15 else fade_time;
+        w.pv_cross = false;
+        w.pv_a.aim(0, now);
+    }
     for (docs.items) |d| if (d.win == w) {
         const over = dr != null and dr.?.zone == .tabs and dr.?.card == d;
         if (over and d.open_at != dr.?.k) {
@@ -4329,7 +4551,7 @@ fn splitZone(z: Zone) bool {
 fn moveTab(from: *Doc, j: usize, dr: Drop) void {
     const last = tabCount(from) == 1;
     if (last and dr.card == from) return;
-    const to = if (splitZone(dr.zone)) splitOff(dr.card, dr.zone == .top or dr.zone == .bottom, dr.zone == .left or dr.zone == .top) orelse return else dr.card;
+    const to = if (splitZone(dr.zone)) splitOff(dr.card, dr.zone == .top or dr.zone == .bottom, dr.zone == .left or dr.zone == .top, true) orelse return else dr.card;
     const pg = takeTab(from, j) orelse return;
     putTab(to, pg, dr.k);
     if (last) foldCard(from);
@@ -4351,7 +4573,7 @@ fn placeFile(w: *Win, path: [:0]const u8, dr: Drop) void {
         return moveTab(o, j, dr);
     }
     var pg = loadPage(path) orelse return;
-    const to = if (splitZone(dr.zone)) splitOff(dr.card, dr.zone == .top or dr.zone == .bottom, dr.zone == .left or dr.zone == .top) orelse return pg.deinit() else dr.card;
+    const to = if (splitZone(dr.zone)) splitOff(dr.card, dr.zone == .top or dr.zone == .bottom, dr.zone == .left or dr.zone == .top, true) orelse return pg.deinit() else dr.card;
     putTab(to, pg, dr.k);
     noteRecent(path);
     focus(to);
@@ -4416,6 +4638,8 @@ fn startFly(w: *Win, t: TabDrag) void {
         if (dr.zone == .tabs) {
             const r = dropRect(dr, gw);
             fl.to = .{ .x = r.x, .y = r.y };
+        } else if (splitZone(dr.zone)) {
+            fl.to = titleSpot(dr);
         } else fl.fade = true;
     } else if (t.from) |d| {
         if (slotOf(d, t.id)) |i| {
@@ -4449,9 +4673,14 @@ fn rowLift(w: *const Win, i: usize, now: f64) f64 {
     return 0;
 }
 
-/// Zen hides the traffic lights; the window still closes, zooms and drags.
-fn hideLights(w: *Win) void {
-    for (0..3) |i| msg(void, msg(Id, w.window, "standardWindowButton:", .{i}), "setHidden:", .{conf.zen});
+/// Zen fades the traffic lights out as `a` falls to 0, and hides them
+/// once they're gone; the window still closes, zooms and drags.
+fn setLights(w: *Win, a: f64) void {
+    for (0..3) |i| {
+        const b = msg(Id, w.window, "standardWindowButton:", .{i});
+        msg(void, b, "setAlphaValue:", .{a});
+        msg(void, b, "setHidden:", .{a < 0.01});
+    }
 }
 
 /// Moves the traffic lights in and down so they sit on the header's line.
@@ -4666,6 +4895,7 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     }
     if (gapAt(w.cards, p)) |n| {
         w.grab = n;
+        w.grab_hit = 0;
         return;
     }
     const d = paneAt(w, p) orelse return titleStrip(w, ev);
@@ -4801,8 +5031,10 @@ fn mouseUp(self: Id, _: Sel, _: Id) callconv(.c) void {
         aimPreview(w, CACurrentMediaTime());
         return msg(void, w.view, "setNeedsDisplay:", .{true});
     }
-    if (w.grab != null) {
+    if (w.grab) |n| {
+        releaseGap(n, CACurrentMediaTime());
         w.grab = null;
+        msg(void, w.view, "setNeedsDisplay:", .{true});
         return msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
     }
     if (!w.side_drag) return;
