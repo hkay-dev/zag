@@ -1,4 +1,6 @@
 ---
+type: guide
+summary: Opening, editing and reading files in ze.
 title: Using ze
 feature: editor
 covers:
@@ -54,6 +56,14 @@ under a heading carry its name, like "Appearance: Dark" or "Dark Mode: Ayu Dark"
 
 The Mac's own menu search works too: press ⇧⌘/ (or open the **Help** menu) and type, and macOS
 points at the matching command in its menu. Press Return to run it.
+
+## Markdown preview
+
+**View > Markdown Preview** (⇧⌘M), also in ⌘K, opens a read-only preview in a separate
+window. Run it again to close it. Keep typing in the editor: the preview updates after a short
+pause without jumping back to the top. It stays with the file it was opened for when you switch
+tabs or cards, and closes with its window. Other text files can be previewed too, using the same
+Markdown rules.
 
 ## Open files
 

@@ -47,7 +47,7 @@ Ghostty's terminal core. ze drops all three.
   the rest a page step).
 - **Icons are SF Symbols.** The sidebar's icons come from macOS through
   `imageWithSystemSymbolName:`, tinted with the theme's colors, so ze ships no images for them.
-- **The sidebar is the one place off the grid** (zig-editor#5teh). Its names are `CTLine`s in the
+- **The sidebar's names are off the grid** (zig-editor#5teh). They are `CTLine`s in the
   system font, made once per row and kept until the tree or the font changes, so a scroll frame
   draws them without laying anything out. They take the context's fill color, so a theme change
   keeps them. `CTLineDraw` leaves its position in the text matrix, which the grid's glyph runs
@@ -71,6 +71,10 @@ Ghostty's terminal core. ze drops all three.
   dragging the top strip still work. The header's room stays as a plain top margin, so nothing
   else in the layout moves. Each split card centers its own 80 columns. Release `__text` goes
   from 116,684 to 117,640 bytes (+956); the file goes from 221,760 to 222,112 bytes.
+- **Markdown preview uses Foundation's CommonMark parser and an NSTextView** (zig-editor#jfh1).
+  Unlike md4c, cmark-gfm or WebKit, it adds no library and starts no web process. Release
+  `__text` goes from 117,932 to 122,568 bytes (+4,636); the file goes from 222,240 to 223,248
+  bytes.
 - **No input methods and no accessibility.** ze is for US English typing on Apple Silicon only.
   It has no input method support (Chinese, Japanese or accented-letter composing), no VoiceOver
   or other accessibility support, and none is planned. Harsha set this on 2026-11-05, so new

@@ -11,6 +11,7 @@ const finder = @import("finder.zig");
 const files = @import("files.zig");
 const settings = @import("settings.zig");
 const tree_mod = @import("tree.zig");
+const preview = @import("preview.zig");
 const Editor = editor.Editor;
 const Id = objc.Id;
 const Sel = objc.Sel;
@@ -1570,6 +1571,7 @@ fn save(d: *Doc, as: bool) bool {
         if (msg(isize, p, "runModal", .{}) != 1) return false;
         const path = objc.utf8(msg(Id, msg(Id, p, "URL", .{}), "path", .{}));
         const z = gpa.dupeSentinel(u8, path, 0) catch return false;
+        preview.rename(d.window, d.path orelse "", z);
         if (d.path) |old| gpa.free(old);
         d.path = z;
         d.lang = syntax.forPath(z);
@@ -2416,6 +2418,7 @@ fn refresh(d: *Doc) void {
     }
     d.focus_on = conf.focus != .off;
     msg(void, d.view, "setNeedsDisplay:", .{true});
+    preview.update(d, &conf);
     var edited = false;
     for (docs.items) |o| if (o.win == d.win and o.dirty()) {
         edited = true;
@@ -2961,6 +2964,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     if (d.dark != dark) {
         d.dark = dark;
         msg(void, d.caret, "setBackgroundColor:", .{msg(Id, nscolor(th.caret), "CGColor", .{})});
+        preview.update(d, &conf);
     }
     const r = bounds(d);
     const focused = d.win.focus == d;
@@ -4007,6 +4011,7 @@ fn windowShouldClose(self: Id, _: Sel, _: Id) callconv(.c) bool {
 
 fn windowWillClose(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
+    preview.close(w.window);
     msg(void, w.link, "invalidate", .{});
     setWin(self, null);
     msg(void, w.window, "setDelegate:", .{@as(Id, null)});
@@ -4137,6 +4142,10 @@ fn previousCard(d: *Doc) void {
     stepCard(d, -1);
 }
 
+fn markdownPreview(d: *Doc) void {
+    preview.toggle(d.window, d.path orelse "", d.ed.text(), if (isDark(d.view)) &conf.dark else &conf.light);
+}
+
 fn comment(d: *Doc) void {
     if (d.mode != .edit) return;
     d.ed.toggleComment(gpa, d.lang.line_comment) catch {};
@@ -4214,6 +4223,7 @@ pub fn setup() void {
         .{ "commandPalette:", palette },    .{ "newTab:", newTab },         .{ "closeTab:", closeActive },
         .{ "splitRight:", splitRight },     .{ "splitDown:", splitDown },   .{ "nextCard:", nextCard },
         .{ "previousCard:", previousCard },
+        .{ "markdownPreview:", markdownPreview },
     };
     inline for (actions) |a| c.method(a[0], action(a[1]), "v@:@");
     view_class = c.finish();

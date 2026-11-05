@@ -218,6 +218,7 @@ fn buildMenu(delegate: Id) void {
 
     const v = submenu(bar, "View");
     _ = item(v, "Command Palette…", "commandPalette:", "k", cmd);
+    _ = item(v, "Markdown Preview", "markdownPreview:", "m", cmd | shift);
     separator(v);
     const fonts = item(v, "Font…", "orderFrontFontPanel:", "t", cmd | shift);
     msg(void, fonts, "setTarget:", .{msg(Id, objc.class("NSFontManager"), "sharedFontManager", .{})});
