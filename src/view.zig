@@ -2681,7 +2681,9 @@ fn sameStamp(a: ?files.Stamp, b: ?files.Stamp) bool {
 pub fn recheckAll() void {
     if (conf_path) |p| if (!sameStamp(files.stamp(p), conf_stamp)) loadSettings();
     for (docs.items) |d| checkOutside(d);
-    rebuildTree();
+    // The rows and their cached lines stay unless a read folder moved on
+    // disk or the open set changed (see `Tree.fresh`).
+    if (!tree.fresh()) rebuildTree();
     refreshAll();
 }
 
