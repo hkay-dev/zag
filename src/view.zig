@@ -12,6 +12,7 @@ const files = @import("files.zig");
 const settings = @import("settings.zig");
 const tree_mod = @import("tree.zig");
 const preview = @import("preview.zig");
+const access = @import("access.zig");
 const Editor = editor.Editor;
 const Id = objc.Id;
 const Sel = objc.Sel;
@@ -1442,6 +1443,7 @@ fn focus(d: *Doc) void {
     const w = d.win;
     if (w.focus == d) return;
     w.focus = d;
+    access.focused(d);
     w.side_find = true;
     named(d);
     refreshAll();
@@ -1926,6 +1928,7 @@ fn freeNodes(n: *Node) void {
 fn closePane(d: *Doc) void {
     rememberPlace(d);
     msg(void, d.caret, "removeFromSuperlayer", .{});
+    access.drop(d);
     for (docs.items, 0..) |x, i| if (x == d) {
         _ = docs.orderedRemove(i);
         break;
@@ -3332,7 +3335,176 @@ fn refresh(d: *Doc) void {
         edited = true;
     };
     msg(void, d.window, "setDocumentEdited:", .{edited});
+    access.changed(d);
 }
+
+/// What VoiceOver's elements in `access.zig` read from the window, in the
+/// view's coordinates. Nothing here runs unless VoiceOver asks.
+pub const ax = struct {
+    pub const Card = Doc;
+    pub const Window = Win;
+
+    pub fn winOfView(view: Id) ?*Win {
+        return winOf(view);
+    }
+
+    pub fn alive(d: *const Doc) bool {
+        return std.mem.indexOfScalar(*Doc, docs.items, @constCast(d)) != null and !d.closing;
+    }
+
+    pub fn winAlive(w: *const Win) bool {
+        return std.mem.indexOfScalar(*Win, wins.items, @constCast(w)) != null;
+    }
+
+    /// Gives card `d` the typing.
+    pub fn focusCard(d: *Doc) void {
+        focus(d);
+    }
+
+    /// The window's cards in layout order, leaving out ones folding away.
+    pub fn cards(w: *const Win, out: []*Doc) usize {
+        return listPanes(w.cards, out, 0);
+    }
+
+    pub fn name(d: *const Doc) []const u8 {
+        return d.name();
+    }
+
+    /// Where the text shows in the card.
+    pub fn textRect(d: *const Doc) Rect {
+        return .{ .x = d.org.x + gap, .y = d.org.y + top_h, .w = rightEdge(d) - gap, .h = @max(bottom(d) - top_h, 0) };
+    }
+
+    /// The cell of the character at byte `pos`, one column wide.
+    pub fn cell(d: *Doc, pos: usize) Rect {
+        layout(d);
+        const b = &d.ed.buf;
+        const i = b.lineOf(pos);
+        const l = b.line(i);
+        const p = @min(pos - b.lineStart(i), l.len);
+        const s = segOf(d, l, p);
+        const row = rowOfLine(d, i) + s.k;
+        const col = colAt(l, s.start, s.col, p) - s.col;
+        return .{ .x = d.org.x + gap + padL(d) + f(col) * cw - d.vx, .y = d.org.y + top_h + f(row) * lh - d.vy, .w = cw, .h = lh };
+    }
+
+    /// The byte nearest `p`.
+    pub fn posAtPoint(d: *Doc, p: Point) usize {
+        return posAt(d, inPane(d, p));
+    }
+
+    /// The bytes on show, from the top row's start to the bottom row's end.
+    pub fn visible(d: *Doc) [2]usize {
+        return .{ posAt(d, .{ .y = top_h }), posAt(d, .{ .x = 1e9, .y = bottom(d) - 1 }) };
+    }
+
+    /// Selects `anchor` to `cur` and brings the caret into view.
+    pub fn select(d: *Doc, anchor: usize, cur: usize) void {
+        d.ed.select(anchor, cur);
+        reveal(d);
+        refresh(d);
+    }
+
+    /// The card shows its tabs, rather than its file's name alone.
+    pub fn tabsShown(d: *const Doc) bool {
+        return !conf.zen and d.tabbed.to == 1;
+    }
+
+    pub fn tabs(d: *const Doc) usize {
+        return tabCount(d);
+    }
+
+    pub fn tabAtIndex(d: *const Doc, j: usize) u32 {
+        return tabId(d, j);
+    }
+
+    pub fn tabOf(d: *const Doc, id: u32) ?usize {
+        return tabIndex(d, id);
+    }
+
+    pub fn tabTitle(d: *const Doc, j: usize, buf: *[48]u8) []const u8 {
+        return tabName(d, j, buf);
+    }
+
+    /// Where tab `id` last drew.
+    pub fn tabRect(d: *const Doc, id: u32) Rect {
+        const s = d.slots.items[slotOf(d, id) orelse return .{}];
+        return .{ .x = d.org.x + s.x, .y = d.org.y + gap + head_h / 2 - 12, .w = s.w, .h = 24 };
+    }
+
+    /// The tab under `p`, by id.
+    pub fn tabUnder(d: *const Doc, p: Point) ?u32 {
+        const hit = tabAt(d, inPane(d, p)) orelse return null;
+        return tabId(d, hit.j);
+    }
+
+    /// Shows tab `id` in its card, as a click on it does.
+    pub fn pressTab(d: *Doc, id: u32) bool {
+        const j = tabIndex(d, id) orelse return false;
+        focus(d);
+        showTab(d, j);
+        return true;
+    }
+
+    pub fn paneUnder(w: *const Win, p: Point) ?*Doc {
+        return paneAt(w, p);
+    }
+
+    pub fn sidebar(w: *const Win) bool {
+        return sideShown(w);
+    }
+
+    pub fn sideRect(w: *const Win) Rect {
+        return .{ .y = top_h, .w = side_w, .h = @max(msg(Rect, w.view, "bounds", .{}).h - top_h, 0) };
+    }
+
+    pub fn rows() []const tree_mod.Row {
+        return tree.rows.items;
+    }
+
+    /// Counts tree rebuilds, so a row knows when to look itself up again.
+    pub fn treeGen() u32 {
+        return tree_gen;
+    }
+
+    pub fn rowOpen(i: usize) bool {
+        const row = tree.rows.items[i];
+        return row.dir and tree.isOpen(row.rel);
+    }
+
+    /// Where row `i` last drew: pinned under the folder's name, or in the list.
+    pub fn rowRect(w: *const Win, i: usize) Rect {
+        for (w.stuck[0..w.nstuck], w.stuck_y[0..w.nstuck]) |k, y| if (k == i) return .{ .y = y, .w = side_w, .h = side_h };
+        return .{ .y = listTop() + f(i) * side_h - w.side_y, .w = side_w, .h = side_h };
+    }
+
+    pub fn rowUnder(w: *const Win, p: Point) ?usize {
+        return if (sideShown(w) and p.x < side_w) sideRow(w, p.y) else null;
+    }
+
+    /// Opens the file at `rel` in the focused card, or opens or shuts the
+    /// folder, as a click on its row does.
+    pub fn pressRow(w: *Win, rel: []const u8) bool {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (rel.len > buf.len) return false;
+        @memcpy(buf[0..rel.len], rel);
+        const want = buf[0..rel.len];
+        // Shutting a folder rebuilds the rows, so look the row up after.
+        if (fold.closing) finishFold();
+        const i = for (tree.rows.items, 0..) |row, k| {
+            if (std.mem.eql(u8, row.rel, want)) break k;
+        } else return false;
+        if (tree.rows.items[i].dir) {
+            startFold(i);
+            refreshAll();
+            return true;
+        }
+        const path = std.fmt.allocPrint(gpa, "{s}/{s}", .{ root orelse return false, want }) catch return false;
+        defer gpa.free(path);
+        open(path, w.focus);
+        return true;
+    }
+};
 
 // ---- drawing ----
 
@@ -6156,6 +6328,7 @@ fn windowWillClose(self: Id, _: Sel, _: Id) callconv(.c) void {
     endFly(w);
     if (menu_win == w) menu_win = null;
     msg(void, w.link, "invalidate", .{});
+    access.dropWin(w);
     setWin(self, null);
     msg(void, w.window, "setDelegate:", .{@as(Id, null)});
     var i = docs.items.len;
@@ -6382,6 +6555,7 @@ pub fn setup() void {
     c.method("sideParent:", @ptrCast(&sideParent), "v@:@");
     c.method("copyPath:", @ptrCast(&copyPath), "v@:@");
     c.method("runCommand:", @ptrCast(&runCommand), "v@:@");
+    access.addViewMethods(c);
     const actions = .{
         .{ "copy:", copy },             .{ "cut:", cut },               .{ "paste:", paste },
         .{ "selectAll:", selectAll },   .{ "undo:", undo },             .{ "redo:", redo },
