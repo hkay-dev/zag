@@ -7,20 +7,22 @@ covers:
 since: 2026-11-04
 ---
 
-ze is a small text editor. A window shows one file at a time, with the text filling the page and
-one line at the bottom. When you've opened a folder, a sidebar on the left lists its files. The
-bottom line shows the file's name, a dot when there are unsaved changes, and the line and column
-of the caret. It also turns into a prompt when you find, replace, jump to a line or open a file.
+ze is a small text editor. A window shows one file at a time, on a card with rounded corners
+that sits a little in from the window's edges. When you've opened a folder, a sidebar on the
+left lists its files. The card's header shows the file's kind as a small colored icon, its name,
+a dot when there are unsaved changes, its folder, and the line and column of the caret on the
+right. When you find, replace, jump to a line or open a file, a prompt line opens at the bottom
+of the card.
 
 ze follows the Mac's light or dark setting unless you pick one, with a theme for each (see Themes). Things move
 a little instead of jumping: the caret glides to each new spot and blinks with a soft fade after a
 moment of rest, the band behind the caret's line slides after it, a new selection fades in, the
-quick open list rises out of the bottom line, and the page eases into place when the keyboard
+quick open list rises out of the prompt line, and the page eases into place when the keyboard
 scrolls it. Scrolling with the trackpad or mouse follows your fingers exactly. Pull the trackpad
 past the top or bottom of the file (or the left edge) and the page stretches with some resistance,
 then springs back when you lift your fingers; momentum that hits an end overshoots a little and
 settles. A mouse wheel stops at the ends. Windows in the background don't show a caret, their
-sidebar highlight turns grey and their bottom line dims. The mouse pointer hides while you type and
+sidebar highlight fades and their header dims. The mouse pointer hides while you type and
 comes back when you move the mouse.
 
 A thin scroll bar shows on the right edge of the text while the page scrolls, with its knob
@@ -30,15 +32,16 @@ that fits in the window never shows one.
 Right-click (or control-click) in the text for **Cut**, **Copy**, **Paste**, **Select All** and
 **Toggle Comment**, the same commands as the Edit menu.
 
-The window's top strip is its title bar, with the editor drawn behind it: it shows the file's name
-and proxy icon (⌘-click the name for the folder path menu, drag the icon to drag the file; an
-untitled file has no icon), and the close button shows a dot while there are unsaved changes. Drag
-the empty part of the strip to move the window, and double-click it to zoom (or minimize, or
-nothing, as Desktop & Dock's "Double-click a window's title bar" setting says).
+The window has no title bar of its own. The traffic lights sit at the top of the sidebar, in line
+with the header, next to a sidebar button that shows or hides the sidebar and a **+** button
+at the sidebar's right that opens a new window. With the sidebar hidden, the traffic lights and
+the sidebar button sit on the header. Drag the header or the empty band above the sidebar to
+move the window, and double-click it to zoom (or minimize, or nothing, as Desktop & Dock's
+"Double-click a window's title bar" setting says).
 
 ## Command palette
 
-**View > Command Palette…** (⌘K) lists every command in ze's menus in the bottom line, the View
+**View > Command Palette…** (⌘K) lists every command in ze's menus above the prompt line, the View
 menu's first, each with its shortcut and a checkmark when it's on. Type a few letters, use ↑ and
 ↓ to pick, and press Return to run it, or Escape to close the list. Commands inside a submenu or
 under a heading carry its name, like "Appearance: Dark" or "Dark Mode: Ayu Dark", so typing
@@ -67,10 +70,11 @@ points at the matching command in its menu. Press Return to run it.
 
 The left side of each window lists the files of ze's folder, folders first. That's the folder ze
 started in from a terminal, or the one you opened last. Started from the Dock or Finder with no
-folder from last time, it's your home folder. Files and folders whose names start with a dot are
-left out. Each row has a small icon for its kind: folder, code, Markdown, data, image or plain
-text. Names are in the Mac's system font and end in "…" when they don't fit. The window's file
-is marked with a rounded highlight set in from the sidebar's edges, like Finder's sidebar.
+folder from last time, it's your home folder. At the top, a small line shows the folder that
+holds it, then the folder's own name in bold. Files and folders whose names start with a dot are
+left out. Each row has an icon for its kind on a small tile of the kind's color: folder, code,
+Markdown, data, image or plain text. Names are in the Mac's system font and end in "…" when they
+don't fit. The window's file is marked with a soft rounded highlight with a thin outline.
 
 - Click a folder to open or close it.
 - Click a file to show it in the same window. The window keeps every file it has shown, with
@@ -135,11 +139,11 @@ applies to every window and is remembered.
 ⌘G and ⇧⌘G find the next and previous match after the prompt is closed. ⌘L asks for a line
 number and jumps to it.
 
-To replace, press ⌥⌘F (**Edit > Find and Replace…**). The bottom line shows `find` and `with`.
+To replace, press ⌥⌘F (**Edit > Find and Replace…**). The prompt line shows `find` and `with`.
 
 - Type what to find, press Tab, and type what to put in its place. Tab goes back and forth.
 - Return replaces the selected match and selects the next one.
-- ⌥Return replaces every match in the file and closes the prompt. The bottom line says how many
+- ⌥Return replaces every match in the file and closes the prompt. The header says how many
   it replaced, and one ⌘Z puts them all back.
 
 The replacement goes in exactly as typed.
@@ -148,7 +152,7 @@ The replacement goes in exactly as typed.
 
 When another app changes a file that's open in ze, ze notices the next time you come back to it:
 
-- If you haven't changed the file in ze, it reloads it and says "reloaded" in the bottom line.
+- If you haven't changed the file in ze, it reloads it and says "reloaded" in the header.
   The caret stays put, and ⌘Z brings back the text from before the reload.
 - If you have unsaved changes, ze asks whether to keep yours or reload the file.
 - If the file was deleted, ze says "deleted on disk" and keeps the text as unsaved changes, so
@@ -214,10 +218,11 @@ light.comment = #B3AEA3  # one color of the light theme, as #rrggbb
 ```
 
 A `light.` or `dark.` line changes one color of that mode's theme, whichever theme it is. The
-names are `background`, `text`, `muted` (the bottom line's fainter words), `keyword`, `string`,
-`comment`, `number`, `function`, `type`, `selection`, `line` (the caret's line), `caret`, `match`
-(other find matches), `panel` (the quick open list and the sidebar) and `rule` (the line above the
-bottom line and the sidebar's edge).
+names are `background` (the card; the window around it is a step darker), `text`, `muted` (the
+header's fainter words), `keyword`, `string`, `comment`, `number`, `function`, `type`,
+`selection`, `line` (the caret's line), `caret`, `match` (other find matches), `panel` (the quick
+open list) and `rule` (the line above the prompt line and the quick open list). The sidebar's
+icon tiles take their colors from `function`, `string`, `keyword`, `number` and `type`.
 Either mode can also use any theme from the file, so `light-theme = one-dark` keeps ze dark all
 the time. A line ze doesn't understand is skipped, and a missing line keeps its default. The menus,
 the size shortcuts and the Font panel rewrite their own line in the file and leave the rest of it

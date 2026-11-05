@@ -64,18 +64,26 @@ const Rgb = settings.Rgb;
 const Theme = settings.Theme;
 
 const pad_x = 28.0;
-const top_h = 40.0;
+/// The text sits in a card with rounded corners, this far in from the
+/// window's edges and the sidebar.
+const gap = 8.0;
+const card_radius = 10.0;
+/// The card's header holds the file's name; the text starts a little below it.
+const head_h = 30.0;
+const top_h = gap + head_h + 6;
+/// The traffic lights start here and sit centered on the header's line.
+const lights_x = 15.0;
+/// The sidebar button's center, right of the traffic lights.
+const toggle_x = 96.0;
 /// The sidebar's width, shared by every window and kept in the settings file.
 var side_w: f64 = settings.sidebar_default;
 /// How far either side of the sidebar's edge grabs it.
 const edge_grab = 4.0;
 /// The sidebar's selection sits this far in from its edges, with rounded corners.
 const side_inset = 8.0;
-const side_radius = 5.0;
-/// The selection's neutral grey in a window that isn't key, near what the
-/// system's unemphasized selection color gives in light and dark.
-const grey_light: Rgb = .{ 0.86, 0.86, 0.86 };
-const grey_dark: Rgb = .{ 0.27, 0.27, 0.27 };
+const side_radius = 7.0;
+/// The height of the sidebar's line above the folder's name.
+const label_h = 24.0;
 
 /// The sidebar shows when there's a folder, it's turned on, and the window
 /// is wide enough to keep room for the text.
@@ -83,9 +91,25 @@ fn sideShown(d: *const Doc) bool {
     return conf.sidebar and root != null and bounds(d).w >= side_w + 360;
 }
 
-/// Where the text area starts: right of the sidebar when it shows.
+/// The card's left edge: right of the sidebar when it shows.
 fn left(d: *const Doc) f64 {
-    return if (sideShown(d)) side_w else 0;
+    return if (sideShown(d)) side_w else gap;
+}
+
+fn rightEdge(d: *const Doc) f64 {
+    return bounds(d).w - gap;
+}
+
+/// Where the text ends: the card's bottom, or the prompt line above it.
+fn bottom(d: *const Doc) f64 {
+    return bounds(d).h - gap - if (d.mode == .edit) 0 else barH();
+}
+
+/// The window's own color around the card: the theme's background, a
+/// step darker.
+fn chrome(th: *const Theme, dark: bool) Rgb {
+    const k: f64 = if (dark) 0.78 else 0.955;
+    return .{ th.bg[0] * k, th.bg[1] * k, th.bg[2] * k };
 }
 
 /// Font, size, colors and toggles, from the settings file.
@@ -109,11 +133,17 @@ var baseline: f64 = 15;
 var ascii: [2][95]u16 = undefined;
 const Fallback = struct { font: Id, glyph: u16 };
 var fallbacks: std.AutoHashMapUnmanaged(u21, Fallback) = .empty;
-/// The sidebar's fonts: the system font for file names, and a heavier one
-/// for the folder's name, with the baseline that centers them in a row.
+/// The sidebar's fonts: the system font for file names, a heavier one for
+/// the folder's name and the card's header, and a small one for the line
+/// above the folder. Rows are `side_h` tall, with the baseline that centers
+/// the text in one.
 var side_font: Id = null;
+var name_font: Id = null;
 var head_font: Id = null;
-var side_base: f64 = 15;
+var side_h: f64 = 30;
+var side_base: f64 = 19;
+/// From the header's middle line down to the baseline of its text.
+var name_off: f64 = 4;
 
 fn barH() f64 {
     return lh + 12;
@@ -150,12 +180,15 @@ fn setFont() void {
     const desc = objc.CTFontGetDescent(font);
     lh = @round(conf.size * conf.spacing);
     baseline = @round((lh - asc - desc) / 2 + asc);
-    if (side_font != null) _ = msg(void, side_font, "release", .{});
-    if (head_font != null) _ = msg(void, head_font, "release", .{});
+    for ([_]*Id{ &side_font, &name_font, &head_font }) |p| if (p.* != null) msg(void, p.*, "release", .{});
     side_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:", .{conf.size - 1}), "retain", .{});
-    head_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 2, @as(f64, 0.3) }), "retain", .{});
-    side_base = @round((lh - objc.CTFontGetAscent(side_font) - objc.CTFontGetDescent(side_font)) / 2 + objc.CTFontGetAscent(side_font));
+    name_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 1, @as(f64, 0.3) }), "retain", .{});
+    head_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 3, @as(f64, 0.3) }), "retain", .{});
+    side_h = @round((conf.size - 1) * 2.3);
+    side_base = @round((side_h - objc.CTFontGetAscent(side_font) - objc.CTFontGetDescent(side_font)) / 2 + objc.CTFontGetAscent(side_font));
+    name_off = (objc.CTFontGetAscent(name_font) - objc.CTFontGetDescent(name_font)) / 2;
     dropSideLines();
+    for (docs.items) |d| dropHead(d);
     var it = fallbacks.valueIterator();
     while (it.next()) |fb| if (fb.font != font) objc.CFRelease(fb.font.?);
     fallbacks.clearRetainingCapacity();
@@ -261,13 +294,33 @@ fn fillA(ctx: Id, c: Rgb, a: f64, x: f64, y: f64, w: f64, h: f64) void {
     objc.CGContextFillRect(ctx, .{ .x = x, .y = y, .w = w, .h = h });
 }
 
-/// A rounded rectangle, like the sidebar's selection in Finder.
+/// A rounded rectangle: the card, the sidebar's selection, the icon tiles.
 fn pill(ctx: Id, c: Rgb, a: f64, x: f64, y: f64, w: f64, h: f64, radius: f64) void {
     const path = objc.CGPathCreateWithRoundedRect(.{ .x = x, .y = y, .w = w, .h = h }, radius, radius, null);
     defer if (path) |p| objc.CFRelease(p);
     objc.CGContextSetRGBFillColor(ctx, c[0], c[1], c[2], a);
     objc.CGContextAddPath(ctx, path);
     objc.CGContextFillPath(ctx);
+}
+
+/// The one-point outline of the rounded rectangle `pill` fills.
+fn ring(ctx: Id, c: Rgb, a: f64, x: f64, y: f64, w: f64, h: f64, radius: f64) void {
+    const outer = objc.CGPathCreateWithRoundedRect(.{ .x = x, .y = y, .w = w, .h = h }, radius, radius, null);
+    defer if (outer) |p| objc.CFRelease(p);
+    const inner = objc.CGPathCreateWithRoundedRect(.{ .x = x + 1, .y = y + 1, .w = w - 2, .h = h - 2 }, radius - 1, radius - 1, null);
+    defer if (inner) |p| objc.CFRelease(p);
+    objc.CGContextSetRGBFillColor(ctx, c[0], c[1], c[2], a);
+    objc.CGContextAddPath(ctx, outer);
+    objc.CGContextAddPath(ctx, inner);
+    objc.CGContextEOFillPath(ctx);
+}
+
+/// Limits drawing to a rounded rectangle until the state is restored.
+fn clipRound(ctx: Id, x: f64, y: f64, w: f64, h: f64, radius: f64) void {
+    const path = objc.CGPathCreateWithRoundedRect(.{ .x = x, .y = y, .w = w, .h = h }, radius, radius, null);
+    defer if (path) |p| objc.CFRelease(p);
+    objc.CGContextAddPath(ctx, path);
+    objc.CGContextClip(ctx);
 }
 
 fn nscolor(c: Rgb) Id {
@@ -381,8 +434,7 @@ fn moveCaret(d: *Doc, now: f64) void {
         x -= d.vx;
         y -= d.vy;
     }
-    const by = bounds(d).h - barH();
-    const visible = d.shown and (!d.c_text or (x >= left(d) + pad_x - 2 and y >= top_h - 8 and y + lh - 4 <= by));
+    const visible = d.shown and (!d.c_text or (x >= left(d) + pad_x - 2 and x < rightEdge(d) and y >= top_h - 2 and y + lh - 4 <= bottom(d)));
     const t = objc.class("CATransaction");
     msg(void, t, "begin", .{});
     msg(void, t, "setDisableActions:", .{true});
@@ -582,6 +634,8 @@ const Doc = struct {
     side_drag: bool = false,
     /// Scroll the sidebar to the window's file on the next draw.
     side_find: bool = false,
+    /// The header's file name and folder as CoreText lines, made on first draw.
+    head: [2]Id = .{ null, null },
 
     fn name(d: *const Doc) []const u8 {
         return if (d.path) |p| std.fs.path.basename(p) else "untitled";
@@ -604,6 +658,7 @@ const Doc = struct {
         d.states.deinit(gpa);
         d.kinds.deinit(gpa);
         d.vfirst.deinit(gpa);
+        dropHead(d);
         for (d.pages.items) |*p| p.deinit();
         d.pages.deinit(gpa);
     }
@@ -628,7 +683,7 @@ fn bounds(d: *const Doc) Rect {
 }
 
 fn textH(d: *const Doc) f64 {
-    return @max(bounds(d).h - top_h - barH(), lh);
+    return @max(bottom(d) - top_h, lh);
 }
 
 fn pageLines(d: *const Doc) usize {
@@ -757,8 +812,9 @@ pub fn previousFile() void {
 }
 
 fn named(d: *Doc) void {
+    dropHead(d);
     msg(void, d.window, "setTitle:", .{objc.str(d.name())});
-    // The proxy icon, ⌘-click path menu and icon drag come with the URL; an untitled file has none.
+    // Window menu, Mission Control and the Dock show the title; the card's header shows the name.
     const url = if (d.path) |p| msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(p)}) else null;
     msg(void, d.window, "setRepresentedURL:", .{url});
     refresh(d);
@@ -802,7 +858,7 @@ pub fn newDoc() ?*Doc {
     msg(void, d.link, "addToRunLoop:forMode:", .{ msg(Id, objc.class("NSRunLoop"), "mainRunLoop", .{}), NSRunLoopCommonModes });
     msg(void, d.link, "setPaused:", .{true});
     msg(void, win, "setTitlebarAppearsTransparent:", .{true});
-    msg(void, win, "setTitleVisibility:", .{@as(isize, 0)});
+    msg(void, win, "setTitleVisibility:", .{@as(isize, 1)});
     msg(void, win, "setMinSize:", .{Point{ .x = 360, .y = 240 }});
     msg(void, win, "setContentView:", .{view});
     msg(void, view, "release", .{});
@@ -1472,7 +1528,7 @@ fn is(name: []const u8, comptime want: []const u8) bool {
 const Seg = struct { k: usize = 0, start: usize = 0, col: usize = 0, end: usize = 0, ecol: usize = 0 };
 
 fn wrapCols(d: *const Doc) usize {
-    return @max(@as(usize, @intFromFloat((bounds(d).w - left(d) - 2 * pad_x) / cw)), 8);
+    return @max(@as(usize, @intFromFloat((rightEdge(d) - left(d) - 2 * pad_x) / cw)), 8);
 }
 
 /// Brings the row counts up to date after edits, a resize or a font change.
@@ -1626,7 +1682,7 @@ fn reveal(d: *Doc) void {
     if (y + lh > d.sy + th) d.sy = y + lh - th;
     if (!conf.wrap) {
         const x = f(c.col) * cw;
-        const tw = bounds(d).w - left(d) - 2 * pad_x;
+        const tw = rightEdge(d) - left(d) - 2 * pad_x;
         if (x < d.sx) d.sx = @max(0, x - 8 * cw);
         if (x > d.sx + tw - cw) d.sx = x - tw + 8 * cw;
     }
@@ -1661,9 +1717,9 @@ fn syncStates(d: *Doc, upto: usize) void {
 
 // ---- sidebar ----
 
-const Icon = enum { closed, opened, folder, code, text, data, image, notes };
+const Icon = enum { closed, opened, folder, code, text, data, image, notes, sidebar, plus };
 /// SF Symbols, which come with macOS, so they cost ze no size.
-const icon_names = [_][:0]const u8{ "chevron.right", "chevron.down", "folder.fill", "chevron.left.forwardslash.chevron.right", "doc.text", "curlybraces", "photo", "text.alignleft" };
+const icon_names = [_][:0]const u8{ "chevron.right", "chevron.down", "folder.fill", "chevron.left.forwardslash.chevron.right", "doc.text", "curlybraces", "photo", "text.alignleft", "sidebar.left", "plus" };
 /// Symbol images for the light and dark themes, tinted and made on first use.
 var icons: [2][icon_names.len]Id = @splat(@splat(null));
 
@@ -1675,9 +1731,8 @@ fn dropIcons() void {
     };
 }
 
-fn iconFor(row: tree_mod.Row) Icon {
-    if (row.dir) return .folder;
-    const name = row.rel[row.base..];
+fn iconFor(name: []const u8, dir: bool) Icon {
+    if (dir) return .folder;
     const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return .text;
     for ([_][]const u8{ ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".icns", ".heic" }) |e| {
         if (std.ascii.eqlIgnoreCase(name[dot..], e)) return .image;
@@ -1688,19 +1743,48 @@ fn iconFor(row: tree_mod.Row) Icon {
     return if (lang == &syntax.plain) .text else .code;
 }
 
+/// A file kind's color: the folder's and the code's come from the theme's
+/// syntax colors, so every theme gets its own.
+fn iconColor(which: Icon, th: *const Theme) Rgb {
+    const kind: syntax.Kind = switch (which) {
+        .folder => .function,
+        .code => .string,
+        .notes => .keyword,
+        .data => .number,
+        .image => .type,
+        else => return th.muted,
+    };
+    return th.kinds[@intFromEnum(kind)];
+}
+
 fn icon(which: Icon, dark: bool, th: *const Theme) Id {
     const slot = &icons[@intFromBool(dark)][@intFromEnum(which)];
     if (slot.* != null) return slot.*;
-    const small = which == .closed or which == .opened;
-    const color = if (which == .folder) th.kinds[@intFromEnum(syntax.Kind.function)] else th.muted;
+    const scale: f64, const weight: f64 = switch (which) {
+        .closed, .opened => .{ 0.6, 0.3 },
+        .sidebar, .plus => .{ 1.0, 0 },
+        else => .{ 0.62, 0.23 },
+    };
     const cfg = objc.class("NSImageSymbolConfiguration");
-    const sized = msg(Id, cfg, "configurationWithPointSize:weight:", .{ conf.size * @as(f64, if (small) 0.65 else 0.85), @as(f64, if (small) 0.3 else 0) });
-    const tint = msg(Id, cfg, "configurationWithPaletteColors:", .{msg(Id, objc.class("NSArray"), "arrayWithObject:", .{nscolor(color)})});
+    const sized = msg(Id, cfg, "configurationWithPointSize:weight:", .{ conf.size * scale, weight });
+    const tint = msg(Id, cfg, "configurationWithPaletteColors:", .{msg(Id, objc.class("NSArray"), "arrayWithObject:", .{nscolor(iconColor(which, th))})});
     const img = msg(Id, objc.class("NSImage"), "imageWithSystemSymbolName:accessibilityDescription:", .{ objc.str(icon_names[@intFromEnum(which)]), @as(Id, null) });
     if (img == null) return null;
     const made = msg(Id, img, "imageWithSymbolConfiguration:", .{msg(Id, sized, "configurationByApplyingConfiguration:", .{tint})});
     slot.* = msg(Id, made, "retain", .{});
     return slot.*;
+}
+
+fn tileSize() f64 {
+    return @round(conf.size + 5);
+}
+
+/// A file kind's symbol on a small rounded square of its own color, with
+/// its top left at `x`, `y`.
+fn tile(ctx: Id, which: Icon, dark: bool, th: *const Theme, x: f64, y: f64) void {
+    const s = tileSize();
+    pill(ctx, iconColor(which, th), if (dark) 0.2 else 0.14, x, y, s, s, 5);
+    drawIcon(icon(which, dark, th), x, y, s);
 }
 
 /// Draws `img` centered in the square at `x`, `y` with side `s`.
@@ -1718,63 +1802,96 @@ fn rowDirty(d: *const Doc, rel: []const u8) bool {
     return false;
 }
 
-/// The folder's name, then a row per file and open folder, under the
-/// title bar and above the status bar.
-fn drawSide(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, by: f64, dark: bool, key: bool) void {
+/// `p` with the home folder written as ~.
+fn tilde(buf: []u8, p: []const u8) []const u8 {
+    const home = std.mem.span(std.c.getenv("HOME") orelse return p);
+    if (home.len < 2 or !std.mem.startsWith(u8, p, home)) return p;
+    if (p.len > home.len and p[home.len] != '/') return p;
+    return std.fmt.bufPrint(buf, "~{s}", .{p[home.len..]}) catch p;
+}
+
+/// The tree row under `y`, below the line with the folder's parent and the
+/// folder's own row.
+fn sideRow(d: *const Doc, y: f64) ?usize {
+    const at = @floor((y - top_h + d.side_y - label_h) / side_h);
+    if (at < 1 or at > f(tree.rows.items.len)) return null;
+    return @as(usize, @intFromFloat(at)) - 1;
+}
+
+/// The folder's parent, the folder's name, then a row per file and open
+/// folder, from under the traffic lights to the window's bottom.
+fn drawSide(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool) void {
     k.flush();
-    fill(ctx, th.panel, 0, 0, side_w, by);
-    fill(ctx, th.rule, side_w - 1, 0, 1, by);
     const rows = tree.rows.items;
-    const view_h = by - top_h;
+    const view_h = bounds(d).h - top_h;
     const cur = if (d.path) |p| relOf(p) else null;
     if (d.side_find) {
         d.side_find = false;
         if (cur) |c| for (rows, 1..) |row, i| if (std.mem.eql(u8, row.rel, c)) {
-            const y = f(i) * lh;
-            if (y < d.side_y or y + lh > d.side_y + view_h) d.side_y = y - view_h / 3;
+            const y = label_h + f(i) * side_h;
+            if (y < d.side_y or y + side_h > d.side_y + view_h) d.side_y = y - view_h / 3;
             break;
         };
     }
-    d.side_y = std.math.clamp(d.side_y, 0, @max(0, f(rows.len + 2) * lh - view_h));
+    d.side_y = std.math.clamp(d.side_y, 0, @max(0, label_h + f(rows.len + 2) * side_h - view_h));
 
     objc.CGContextSaveGState(ctx);
-    objc.CGContextClipToRect(ctx, .{ .y = top_h - 8, .w = side_w - 1, .h = by - top_h + 8 });
+    objc.CGContextClipToRect(ctx, .{ .y = top_h - 6, .w = side_w - 2, .h = view_h + 6 });
     const y0 = top_h - d.side_y;
-    if (side_head == null) side_head = uiLine(std.fs.path.basename(root.?), head_font, side_w - 36);
-    _ = drawLine(ctx, side_head, th.muted, 22, y0 + side_base);
+    if (side_label == null) {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        side_label = uiLine(tilde(&buf, std.fs.path.dirname(root.?) orelse "/"), head_font, side_w - 32);
+    }
+    _ = drawLine(ctx, side_label, th.muted, 16, y0 + label_h - 8);
+    if (side_head == null) side_head = uiLine(std.fs.path.basename(root.?), name_font, side_w - 32);
+    _ = drawLine(ctx, side_head, th.fg, 16, y0 + label_h + side_base);
     if (side_lines.items.len < rows.len) side_lines.appendNTimes(gpa, null, rows.len - side_lines.items.len) catch return objc.CGContextRestoreGState(ctx);
-    const s = @round(conf.size + 4);
-    const from: usize = @intFromFloat(@max(@floor(d.side_y / lh) - 1, 0));
-    const to: usize = @min(rows.len, @as(usize, @intFromFloat(@ceil((d.side_y + view_h) / lh))));
+    const s = tileSize();
+    const from: usize = @intFromFloat(@max(@floor((d.side_y - label_h) / side_h) - 1, 0));
+    const to: usize = @min(rows.len, @as(usize, @intFromFloat(@max(@ceil((d.side_y + view_h - label_h) / side_h), 0))));
     for (rows[@min(from, to)..to], @min(from, to) + 1..) |row, i| {
-        const y = y0 + f(i) * lh;
-        const x = 18 + f(row.depth) * 14;
-        if (cur != null and std.mem.eql(u8, row.rel, cur.?)) pill(ctx, if (key) th.sel else if (dark) grey_dark else grey_light, 1, side_inset, y, side_w - 1 - 2 * side_inset, lh, side_radius);
-        const iy = y + (lh - s) / 2;
-        if (row.dir) drawIcon(icon(if (tree.isOpen(row.rel)) .opened else .closed, dark, th), x, iy + (s - 14) / 2, 14);
-        drawIcon(icon(iconFor(row), dark, th), x + 15, iy, s);
-        const nx = x + 15 + s + 6;
+        const y = y0 + label_h + f(i) * side_h;
+        const x = 16 + f(row.depth) * 16;
+        if (cur != null and std.mem.eql(u8, row.rel, cur.?)) {
+            const w = side_w - 2 * side_inset - 2;
+            pill(ctx, th.fg, if (key) 0.07 else 0.04, side_inset, y, w, side_h, side_radius);
+            ring(ctx, th.fg, if (key) 0.09 else 0.05, side_inset, y, w, side_h, side_radius);
+        }
+        const iy = y + (side_h - s) / 2;
+        if (row.dir) drawIcon(icon(if (tree.isOpen(row.rel)) .opened else .closed, dark, th), x - 4, iy + (s - 12) / 2, 12);
+        tile(ctx, iconFor(row.rel[row.base..], row.dir), dark, th, x + 10, iy);
+        const nx = x + 10 + s + 8;
         const dirty = !row.dir and rowDirty(d, row.rel);
         const line = &side_lines.items[i - 1];
-        if (line.* == null) line.* = uiLine(row.rel[row.base..], side_font, side_w - nx - if (row.dir) @as(f64, 10) else 22);
+        if (line.* == null) line.* = uiLine(row.rel[row.base..], side_font, side_w - nx - if (row.dir) @as(f64, 14) else 26);
         const w = drawLine(ctx, line.*, th.fg, nx, y + side_base);
-        if (dirty) _ = k.text(" •", null, th, th.caret, nx + w, y + baseline, 0, 2);
+        if (dirty) _ = k.text(" •", null, th, th.caret, nx + w, y + side_base, 0, 2);
     }
     k.flush();
     objc.CGContextRestoreGState(ctx);
 }
 
 /// The sidebar's text as CoreText lines in the system font, made on first
-/// draw: the folder's name, then one per tree row. Dropped when the tree or
-/// the font changes; drawing one costs no layout.
+/// draw: the folder's parent and name, then one per tree row. Dropped when
+/// the tree or the font changes; drawing one costs no layout.
+var side_label: Id = null;
 var side_head: Id = null;
 var side_lines: std.ArrayList(Id) = .empty;
 
 fn dropSideLines() void {
-    if (side_head) |h| objc.CFRelease(h);
-    side_head = null;
+    for ([_]*Id{ &side_label, &side_head }) |p| if (p.*) |l| {
+        objc.CFRelease(l);
+        p.* = null;
+    };
     for (side_lines.items) |l| if (l) |p| objc.CFRelease(p);
     side_lines.clearRetainingCapacity();
+}
+
+fn dropHead(d: *Doc) void {
+    for (&d.head) |*p| if (p.*) |l| {
+        objc.CFRelease(l);
+        p.* = null;
+    };
 }
 
 /// `s` as a line in `fnt` that takes the context's fill color, cut with an
@@ -1814,9 +1931,7 @@ fn drawLine(ctx: Id, line: Id, c: Rgb, x: f64, y: f64) f64 {
 
 /// A folder opens or closes; a file shows here, or with ⌘ in a new window.
 fn sideClick(d: *Doc, p: Point, flags: usize) void {
-    const at = @floor((p.y - top_h + d.side_y) / lh);
-    if (at < 1 or at > f(tree.rows.items.len)) return;
-    const row = tree.rows.items[@as(usize, @intFromFloat(at)) - 1];
+    const row = tree.rows.items[sideRow(d, p.y) orelse return];
     if (row.dir) {
         tree.toggle(gpa, row.rel);
         rebuildTree();
@@ -1840,10 +1955,11 @@ fn draw(d: *Doc, ctx: Id) void {
     const th = if (dark) &conf.dark else &conf.light;
     if (d.dark != dark) {
         d.dark = dark;
-        msg(void, d.window, "setBackgroundColor:", .{nscolor(th.bg)});
+        msg(void, d.window, "setBackgroundColor:", .{nscolor(chrome(th, dark))});
         msg(void, d.caret, "setBackgroundColor:", .{msg(Id, nscolor(th.caret), "CGColor", .{})});
     }
     const r = bounds(d);
+    placeLights(d);
     const b = &d.ed.buf;
     layout(d);
     clampScroll(d);
@@ -1869,17 +1985,23 @@ fn draw(d: *Doc, ctx: Id) void {
     springBack(d, now);
     d.vy = d.ys.at(now) + d.ov[1];
     d.vx = d.xs.at(now) + d.ov[0];
-    fill(ctx, th.bg, 0, 0, r.w, r.h);
+    // The window's chrome, then the card that holds the text, header and
+    // prompt line, which draw inside its rounded corners.
+    const lx = left(d);
+    const card: Rect = .{ .x = lx, .y = gap, .w = rightEdge(d) - lx, .h = r.h - 2 * gap };
+    fill(ctx, chrome(th, dark), 0, 0, r.w, r.h);
+    pill(ctx, th.bg, 1, card.x, card.y, card.w, card.h, card_radius);
+    objc.CGContextSaveGState(ctx);
+    clipRound(ctx, card.x, card.y, card.w, card.h, card_radius);
     objc.flipText(ctx);
 
     const total = totalRows(d);
     const last = @min(total, @as(usize, @intFromFloat(@max(@ceil((d.vy + textH(d)) / lh), 0))) + 1);
     const first: usize = @min(@as(usize, @intFromFloat(@max(@floor(d.vy / lh), 0))), last);
     const skip: usize = @intFromFloat(@max(@ceil(d.vx / cw), 0));
-    const lx = left(d);
     const tx = lx + pad_x;
     const ox = tx + f(skip) * cw - d.vx;
-    const cols: usize = @intFromFloat(@ceil((r.w - ox) / cw));
+    const cols: usize = @intFromFloat(@max(@ceil((card.x + card.w - ox) / cw), 0));
     const s = d.ed.sel();
     const here = caretRow(d);
     const finding = (d.mode == .find or d.mode == .replace) and d.prompt.items.len > 0;
@@ -1909,7 +2031,7 @@ fn draw(d: *Doc, ctx: Id) void {
     const band_on = d.mode == .edit and s[0] == s[1];
     if (band_on and d.band_on) d.band.aim(f(here.row) * lh, now) else d.band.snap(f(here.row) * lh);
     d.band_on = band_on;
-    if (band_on) fill(ctx, th.line, lx, top_h + d.band.at(now) - d.vy, r.w - lx, lh);
+    if (band_on) fill(ctx, th.line, lx, top_h + d.band.at(now) - d.vy, card.w, lh);
 
     // A new selection fades in.
     const has_sel = s[0] != s[1];
@@ -1989,40 +2111,37 @@ fn draw(d: *Doc, ctx: Id) void {
             const track = bar_room - 4;
             const knob = @min(@max(@round(track * bar_room / (bar_span + bar_room)), 24), track);
             const at_y = @round((track - knob) * std.math.clamp(d.vy / bar_span, 0, 1));
-            pill(ctx, th.fg, bar_alpha * alpha, r.w - bar_w - 2, top_h + 2 + at_y, bar_w, knob, bar_w * 0.5);
+            pill(ctx, th.fg, bar_alpha * alpha, card.x + card.w - bar_w - 3, top_h + 2 + at_y, bar_w, knob, bar_w * 0.5);
         }
     }
 
     // The caret only shows in the key window.
-    const by = r.h - barH();
+    const by = bottom(d);
     const key = msg(bool, d.window, "isKeyWindow", .{});
     if (d.mode == .edit) {
         placeCaret(d, now, tx + f(here.col) * cw - 1, top_h + f(here.row) * lh + 2, true, .{ 0, here.row, here.col }, key);
     }
 
-    // The band under the title bar, the quick open list, and the status bar.
-    fill(ctx, th.bg, 0, 0, r.w, top_h - 8);
-    if (lx > 0) drawSide(d, ctx, th, &k, by, dark, key);
+    // The quick open list, rising out of the prompt line.
     const ty = by + 6 + baseline;
     const want_ph: f64 = if (listing(d) != null) f(d.npicks) * lh + 12 else 0;
     d.panel.aim(want_ph, now);
     const ph = d.panel.at(now);
     if (ph > 0.5 and (d.palette or d.list != null)) {
-        // The list rises out of the bottom line, rows riding its top edge.
         objc.CGContextSaveGState(ctx);
-        objc.CGContextClipToRect(ctx, .{ .x = 0, .y = by - ph, .w = r.w, .h = ph });
-        fill(ctx, th.panel, 0, by - ph, r.w, ph);
-        fill(ctx, th.rule, 0, by - ph, r.w, 1);
+        objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = by - ph, .w = card.w, .h = ph });
+        fill(ctx, th.panel, card.x, by - ph, card.w, ph);
+        fill(ctx, th.rule, card.x, by - ph, card.w, 1);
         for (d.picks[0..d.npicks], 0..) |p, i| {
             const y = by - ph + 6 + f(i) * lh;
-            if (i == d.pick) fill(ctx, th.sel, 0, y, r.w, lh);
+            if (i == d.pick) pill(ctx, th.sel, 1, card.x + 8, y, card.w - 16, lh, 6);
             if (d.palette) {
                 if (p >= cmds.items.len) continue;
                 const c = cmds.items[p];
                 const n = k.text(cmd_names.items[p], null, th, th.fg, tx, y + baseline, 0, 200);
                 if (c.on) _ = k.text(" ✓", null, th, th.caret, tx + f(n) * cw, y + baseline, 0, 2);
                 const kc = std.unicode.utf8CountCodepoints(c.keys) catch c.keys.len;
-                _ = k.text(c.keys, null, th, th.muted, r.w - pad_x - f(kc) * cw, y + baseline, 0, 16);
+                _ = k.text(c.keys, null, th, th.muted, card.x + card.w - pad_x - f(kc) * cw, y + baseline, 0, 16);
                 continue;
             }
             const path = d.list.?.paths.items[p];
@@ -2033,21 +2152,15 @@ fn draw(d: *Doc, ctx: Id) void {
         k.flush();
         objc.CGContextRestoreGState(ctx);
     }
-    fill(ctx, th.bg, 0, by, r.w, barH());
-    fill(ctx, th.rule, 0, by, r.w, 1);
+
+    // The prompt line: find, replace, go to line, quick open and the palette.
     var buf: [64]u8 = undefined;
-    var right: []const u8 = "";
-    var x: f64 = tx;
-    // A window that isn't key dims its bottom line a step.
+    // A window that isn't key dims its header and prompt a step.
     const ink = if (key) th.fg else th.muted;
-    if (d.mode == .edit) {
-        x += f(k.text(d.name(), null, th, ink, x, ty, 0, 200)) * cw;
-        if (b.dirty()) x += f(k.text(" •", null, th, th.caret, x, ty, 0, 4)) * cw;
-        if (d.note.len > 0) _ = k.text(d.note, null, th, th.muted, x + 2 * cw, ty, 0, 200);
-        const li = b.lineOf(d.ed.cur);
-        const col = editor.colOf(b.line(li), d.ed.cur - b.lineStart(li));
-        right = std.fmt.bufPrint(&buf, "{d}:{d}", .{ li + 1, col + 1 }) catch "";
-    } else {
+    if (d.mode != .edit) {
+        fill(ctx, th.bg, card.x, by, card.w, barH());
+        fill(ctx, th.rule, card.x, by, card.w, 1);
+        var x: f64 = tx;
         const label = switch (d.mode) {
             .find, .replace => "find",
             .line => "line",
@@ -2070,15 +2183,83 @@ fn draw(d: *Doc, ctx: Id) void {
         k.flush();
         const width = if (d.which == 1 and d.mode == .replace) d.with.items.len else d.prompt.items.len;
         placeCaret(d, now, cx, by + 8, false, .{ 1 + @intFromEnum(d.mode) * 2 + d.which, width, 0 }, key);
-        if (finding) right = if (d.found[1] == 0) "no matches" else std.fmt.bufPrint(&buf, "{d} of {d}", .{ @min(d.found[0], d.found[1]), d.found[1] }) catch "";
-        if (d.mode == .open and d.list != null) right = std.fmt.bufPrint(&buf, "{d} files", .{d.list.?.paths.items.len}) catch "";
-        if (d.mode == .command) right = std.fmt.bufPrint(&buf, "{d} commands", .{cmds.items.len}) catch "";
+        var tally: []const u8 = "";
+        if (finding) tally = if (d.found[1] == 0) "no matches" else std.fmt.bufPrint(&buf, "{d} of {d}", .{ @min(d.found[0], d.found[1]), d.found[1] }) catch "";
+        if (d.mode == .open and d.list != null) tally = std.fmt.bufPrint(&buf, "{d} files", .{d.list.?.paths.items.len}) catch "";
+        if (d.mode == .command) tally = std.fmt.bufPrint(&buf, "{d} commands", .{cmds.items.len}) catch "";
+        _ = k.text(tally, null, th, th.muted, card.x + card.w - pad_x - f(tally.len) * cw, ty, 0, 64);
+        k.flush();
     }
-    _ = k.text(right, null, th, th.muted, r.w - pad_x - f(right.len) * cw, ty, 0, 64);
+
+    // The header, over any text scrolled under it: the file's kind, name,
+    // unsaved dot, folder and note, and the caret's line and column.
+    fill(ctx, th.bg, card.x, card.y, card.w, top_h - gap);
+    const hy = gap + head_h / 2;
+    const mono_y = @round(hy - lh / 2 + baseline);
+    const li = b.lineOf(d.ed.cur);
+    const col = editor.colOf(b.line(li), d.ed.cur - b.lineStart(li));
+    const spot = std.fmt.bufPrint(&buf, "{d}:{d}", .{ li + 1, col + 1 }) catch "";
+    const spot_x = card.x + card.w - 16 - f(spot.len) * cw;
+    _ = k.text(spot, null, th, th.muted, spot_x, mono_y, 0, 32);
     k.flush();
+    objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = @max(spot_x - 16 - card.x, 0), .h = head_h });
+    var hx: f64 = if (sideShown(d)) card.x + 14 else if (root != null) toggle_x + 22 else lights_x + 76;
+    const ts = tileSize();
+    tile(ctx, iconFor(d.name(), false), dark, th, hx, @round(hy - ts / 2));
+    hx += ts + 8;
+    if (d.head[0] == null) d.head[0] = uiLine(d.name(), name_font, 1e5);
+    if (d.head[1] == null) {
+        var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+        const folder = if (d.path) |p| std.fs.path.dirname(p) orelse "/" else "";
+        d.head[1] = uiLine(tilde(&pbuf, folder), side_font, 1e5);
+    }
+    hx += drawLine(ctx, d.head[0], ink, hx, @round(hy + name_off));
+    if (b.dirty()) hx += f(k.text(" •", null, th, th.caret, hx, mono_y, 0, 4)) * cw;
+    k.flush();
+    hx += drawLine(ctx, d.head[1], th.muted, hx + 8, @round(hy + name_off)) + 8;
+    if (d.note.len > 0) _ = k.text(d.note, null, th, th.muted, hx + 2 * cw, mono_y, 0, 200);
+    k.flush();
+    objc.CGContextRestoreGState(ctx);
+
+    // Outside the card: its outline, the sidebar, and the buttons by the
+    // traffic lights.
+    ring(ctx, th.fg, if (dark) 0.1 else 0.08, card.x, card.y, card.w, card.h, card_radius);
+    if (sideShown(d)) {
+        drawSide(d, ctx, th, &k, dark, key);
+        drawIcon(icon(.plus, dark, th), side_w - gap - 30, hy - 10, 20);
+    }
+    if (root != null) drawIcon(icon(.sidebar, dark, th), toggle_x - 10, hy - 10, 20);
 
     d.busy = scenery(d, now);
     if (d.busy or d.cx.moving(now) or d.cy.moving(now)) msg(void, d.link, "setPaused:", .{false});
+}
+
+/// The button by the traffic lights under `p`, if any.
+fn toolAt(d: *const Doc, p: Point) ?Icon {
+    if (@abs(p.y - (gap + head_h / 2)) > 12) return null;
+    if (root != null and @abs(p.x - toggle_x) <= 12) return .sidebar;
+    if (sideShown(d) and @abs(p.x - (side_w - gap - 20)) <= 12) return .plus;
+    return null;
+}
+
+/// Moves the traffic lights in and down so they sit on the header's line.
+/// AppKit puts them back whenever it lays out the title bar, so every draw
+/// checks.
+fn placeLights(d: *Doc) void {
+    if (msg(usize, d.window, "styleMask", .{}) & (1 << 14) != 0) return;
+    const close = msg(Id, d.window, "standardWindowButton:", .{@as(usize, 0)});
+    if (close == null) return;
+    const at = msg(Rect, close, "frame", .{});
+    const bar = msg(Rect, msg(Id, close, "superview", .{}), "bounds", .{});
+    const dx = lights_x - at.x;
+    const dy = @round(bar.h - (gap + head_h / 2) - at.h / 2) - at.y;
+    if (dx == 0 and dy == 0) return;
+    for (0..3) |i| {
+        const btn = msg(Id, d.window, "standardWindowButton:", .{i});
+        if (btn == null) continue;
+        const fr = msg(Rect, btn, "frame", .{});
+        msg(void, btn, "setFrameOrigin:", .{Point{ .x = fr.x + dx, .y = fr.y + dy }});
+    }
 }
 
 // ---- NSView methods ----
@@ -2234,9 +2415,9 @@ fn unitAt(d: *Doc, pos: usize) [2]usize {
     return r;
 }
 
-/// The empty strip along the top stands in for the hidden title bar: it
-/// drags the window, and a double-click does what the Mac's Desktop & Dock
-/// setting says, like any title bar.
+/// The header and the band over the sidebar stand in for the hidden title
+/// bar: they drag the window, and a double-click does what the Mac's
+/// Desktop & Dock setting says, like any title bar.
 fn titleStrip(d: *Doc, ev: Id) void {
     d.side_down = true;
     if (msg(isize, ev, "clickCount", .{}) == 2) {
@@ -2251,9 +2432,20 @@ fn titleStrip(d: *Doc, ev: Id) void {
 fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const d = docOf(self) orelse return;
     const p = local(self, ev);
-    const by = bounds(d).h - barH();
+    const by = bottom(d);
     d.note = "";
-    if (p.y < top_h - 8) return titleStrip(d, ev);
+    if (p.y < top_h) {
+        d.side_down = true;
+        const t = toolAt(d, p) orelse return titleStrip(d, ev);
+        if (t == .sidebar) toggleSidebar() else _ = newDoc();
+        return;
+    }
+    if (sideShown(d) and @abs(p.x - side_w) <= edge_grab) {
+        d.side_drag = true;
+        return;
+    }
+    d.side_down = sideShown(d) and p.x < side_w;
+    if (d.side_down) return sideClick(d, p, msg(usize, ev, "modifierFlags", .{}));
     if (listing(d) != null) {
         const top = by - f(d.npicks) * lh - 6;
         if (p.y >= top and p.y < by) {
@@ -2263,12 +2455,6 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
         }
     }
     if (p.y >= by) return;
-    if (sideShown(d) and @abs(p.x - side_w) <= edge_grab) {
-        d.side_drag = true;
-        return;
-    }
-    d.side_down = p.x < left(d);
-    if (d.side_down) return sideClick(d, p, msg(usize, ev, "modifierFlags", .{}));
     d.mode = .edit;
     const pos = posAt(d, p);
     switch (msg(isize, ev, "clickCount", .{})) {
@@ -2317,7 +2503,7 @@ fn mouseDragged(self: Id, _: Sel, ev: Id) callconv(.c) void {
     d.snap = true;
     const p = local(self, ev);
     if (p.y < top_h) d.sy -= lh;
-    if (p.y > bounds(d).h - barH()) d.sy += lh;
+    if (p.y > bottom(d)) d.sy += lh;
     clampScroll(d);
     d.ys.snap(d.sy);
     const pos = posAt(d, p);
@@ -2332,7 +2518,7 @@ fn mouseDragged(self: Id, _: Sel, ev: Id) callconv(.c) void {
 
 fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const d = docOf(self) orelse return;
-    if (local(self, ev).x < left(d)) {
+    if (sideShown(d) and local(self, ev).x < side_w) {
         const dy = msg(f64, ev, "scrollingDeltaY", .{});
         d.side_y -= if (msg(bool, ev, "hasPreciseScrollingDeltas", .{})) dy else dy * lh;
         return refresh(d);
@@ -2346,9 +2532,8 @@ fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
         const touching: usize = 1 | 2 | 4 | 32; // began, stationary, changed, may begin
         d.relax = msg(usize, ev, "phase", .{}) & touching == 0;
         if (!d.relax) d.ov_v = .{ 0, 0 };
-        const r = bounds(d);
         d.ov_t = now;
-        if (!conf.wrap) pull(&d.sx, &d.ov[0], -dx, std.math.inf(f64), @max(r.w - left(d), cw));
+        if (!conf.wrap) pull(&d.sx, &d.ov[0], -dx, std.math.inf(f64), @max(rightEdge(d) - left(d), cw));
         pull(&d.sy, &d.ov[1], -dy, @max(0, f(totalRows(d)) * lh - textH(d) / 2), textH(d));
     } else {
         dx *= lh;
@@ -2363,21 +2548,15 @@ fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
     refresh(d);
 }
 
-/// An I-beam over the text; the sidebar and the title strip keep the arrow.
+/// An I-beam over the card's text; the sidebar and the header keep the arrow.
 fn resetCursorRects(self: Id, _: Sel) callconv(.c) void {
-    var r = msg(Rect, self, "bounds", .{});
-    r.y += top_h - 8;
-    r.h -= top_h - 8;
-    if (docOf(self)) |d| {
-        const lx = left(d);
-        r.x += lx;
-        r.w -= lx;
+    const d = docOf(self) orelse return;
+    const r = bounds(d);
+    const lx = left(d);
+    msg(void, self, "addCursorRect:cursor:", .{ Rect{ .x = lx, .y = top_h, .w = rightEdge(d) - lx, .h = r.h - gap - top_h }, msg(Id, objc.class("NSCursor"), "IBeamCursor", .{}) });
+    if (sideShown(d)) {
+        msg(void, self, "addCursorRect:cursor:", .{ Rect{ .x = side_w - edge_grab, .y = top_h, .w = 2 * edge_grab, .h = r.h - top_h }, msg(Id, objc.class("NSCursor"), "resizeLeftRightCursor", .{}) });
     }
-    msg(void, self, "addCursorRect:cursor:", .{ r, msg(Id, objc.class("NSCursor"), "IBeamCursor", .{}) });
-    if (docOf(self)) |d| if (sideShown(d)) {
-        const y = top_h - 8;
-        msg(void, self, "addCursorRect:cursor:", .{ Rect{ .x = side_w - edge_grab, .y = y, .w = 2 * edge_grab, .h = bounds(d).h - barH() - y }, msg(Id, objc.class("NSCursor"), "resizeLeftRightCursor", .{}) });
-    };
 }
 
 /// Also the window delegate's key and resign key calls, so the caret shows
@@ -2434,8 +2613,9 @@ fn newMenu() Id {
 fn menuForEvent(self: Id, _: Sel, ev: Id) callconv(.c) Id {
     const d = docOf(self) orelse return null;
     const p = local(self, ev);
-    if (p.y < top_h - 8 or p.y >= bounds(d).h - barH()) return null;
-    if (p.x >= left(d)) {
+    if (p.y < top_h) return null;
+    if (!sideShown(d) or p.x >= side_w) {
+        if (p.y >= bottom(d)) return null;
         if (text_menu == null) {
             const m = newMenu();
             _ = menuItem(m, "Cut", "cut:", "x");
@@ -2448,9 +2628,7 @@ fn menuForEvent(self: Id, _: Sel, ev: Id) callconv(.c) Id {
         }
         return text_menu;
     }
-    const at = @floor((p.y - top_h + d.side_y) / lh);
-    if (at < 1 or at > f(tree.rows.items.len)) return null;
-    const row = tree.rows.items[@as(usize, @intFromFloat(at)) - 1];
+    const row = tree.rows.items[sideRow(d, p.y) orelse return null];
     const path = std.fmt.bufPrint(&menu_path, "{s}/{s}", .{ root.?, row.rel }) catch return null;
     menu_len = path.len;
     if (side_menu == null) {
