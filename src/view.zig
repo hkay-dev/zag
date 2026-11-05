@@ -262,10 +262,10 @@ fn fillA(ctx: Id, c: Rgb, a: f64, x: f64, y: f64, w: f64, h: f64) void {
 }
 
 /// A rounded rectangle, like the sidebar's selection in Finder.
-fn pill(ctx: Id, c: Rgb, x: f64, y: f64, w: f64, h: f64) void {
-    const path = objc.CGPathCreateWithRoundedRect(.{ .x = x, .y = y, .w = w, .h = h }, side_radius, side_radius, null);
+fn pill(ctx: Id, c: Rgb, a: f64, x: f64, y: f64, w: f64, h: f64, radius: f64) void {
+    const path = objc.CGPathCreateWithRoundedRect(.{ .x = x, .y = y, .w = w, .h = h }, radius, radius, null);
     defer if (path) |p| objc.CFRelease(p);
-    objc.CGContextSetRGBFillColor(ctx, c[0], c[1], c[2], 1);
+    objc.CGContextSetRGBFillColor(ctx, c[0], c[1], c[2], a);
     objc.CGContextAddPath(ctx, path);
     objc.CGContextFillPath(ctx);
 }
@@ -340,6 +340,11 @@ const scroll_time = 0.16;
 const caret_time = 0.09;
 const fade_time = 0.12;
 const panel_time = 0.14;
+/// The scroll bar stays a second after the page stops, then fades.
+const bar_hold = 1.0;
+const bar_time = 0.25;
+const bar_w = 7.0;
+const bar_alpha = 0.45;
 /// Keyboard scrolls this many rows or fewer (stepping past the edge) snap.
 const glide_rows = 3;
 
@@ -404,7 +409,7 @@ fn blink(caret: Id) void {
 /// list still has frames to draw.
 fn scenery(d: *const Doc, now: f64) bool {
     const stretched = d.relax and (d.ov[0] != 0 or d.ov[1] != 0);
-    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.panel.moving(now) or (d.had_sel and now < d.sel_t0 + fade_time);
+    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.panel.moving(now) or (d.had_sel and now < d.sel_t0 + fade_time) or now < d.bar_t0 + bar_hold + bar_time;
 }
 
 const spring_k = 380.0;
@@ -509,6 +514,10 @@ const Doc = struct {
     sel_t0: f64 = 0,
     /// Height of the quick open list.
     panel: Tween = .{ .dur = panel_time },
+    /// The scroll bar's opacity, when the page last moved, and where it was.
+    bar: Tween = .{ .dur = bar_time },
+    bar_t0: f64 = 0,
+    bar_vy: f64 = 0,
     cx: Tween = .{ .dur = caret_time },
     cy: Tween = .{ .dur = caret_time },
     /// The caret tween is in page coordinates (else window coordinates).
@@ -1739,7 +1748,7 @@ fn drawSide(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, by: f64, dark: bool, ke
     for (rows[@min(from, to)..to], @min(from, to) + 1..) |row, i| {
         const y = y0 + f(i) * lh;
         const x = 18 + f(row.depth) * 14;
-        if (cur != null and std.mem.eql(u8, row.rel, cur.?)) pill(ctx, if (key) th.sel else if (dark) grey_dark else grey_light, side_inset, y, side_w - 1 - 2 * side_inset, lh);
+        if (cur != null and std.mem.eql(u8, row.rel, cur.?)) pill(ctx, if (key) th.sel else if (dark) grey_dark else grey_light, 1, side_inset, y, side_w - 1 - 2 * side_inset, lh, side_radius);
         const iy = y + (lh - s) / 2;
         if (row.dir) drawIcon(icon(if (tree.isOpen(row.rel)) .opened else .closed, dark, th), x, iy + (s - 14) / 2, 14);
         drawIcon(icon(iconFor(row), dark, th), x + 15, iy, s);
@@ -1962,6 +1971,26 @@ fn draw(d: *Doc, ctx: Id) void {
         _ = k.run(l, v.seg.start, v.seg.end, v.seg.col, kinds, th, th.fg, ox, top_h + f(row) * lh - d.vy + baseline, skip, cols);
     }
     k.flush();
+
+    // The overlay scroll bar shows while the page moves and fades out after.
+    // Nothing draws or waits when the whole file fits.
+    const bar_room = textH(d);
+    const bar_span = f(total) * lh - bar_room / 2;
+    if (bar_span > 0) {
+        if (d.vy != d.bar_vy) {
+            d.bar_vy = d.vy;
+            d.bar_t0 = now;
+            d.bar.snap(1);
+        }
+        if (now >= d.bar_t0 + bar_hold) d.bar.aim(0, now);
+        const alpha = d.bar.at(now);
+        if (alpha > 0.01) {
+            const track = bar_room - 4;
+            const knob = @min(@max(@round(track * bar_room / (bar_span + bar_room)), 24), track);
+            const at_y = @round((track - knob) * std.math.clamp(d.vy / bar_span, 0, 1));
+            pill(ctx, th.fg, bar_alpha * alpha, r.w - bar_w - 2, top_h + 2 + at_y, bar_w, knob, bar_w * 0.5);
+        }
+    }
 
     // The caret only shows in the key window.
     const by = r.h - barH();

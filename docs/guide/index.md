@@ -23,6 +23,10 @@ settles. A mouse wheel stops at the ends. Windows in the background don't show a
 sidebar highlight turns grey and their bottom line dims. The mouse pointer hides while you type and
 comes back when you move the mouse.
 
+A thin scroll bar shows on the right edge of the text while the page scrolls, with its knob
+sized and placed by how much of the file is in view, and fades out a second after it stops. A file
+that fits in the window never shows one.
+
 The window's top strip is its title bar, with the editor drawn behind it: it shows the file's name
 and proxy icon (⌘-click the name for the folder path menu, drag the icon to drag the file; an
 untitled file has no icon), and the close button shows a dot while there are unsaved changes. Drag
