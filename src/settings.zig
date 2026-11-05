@@ -1,5 +1,5 @@
 //! The settings file, `~/.config/ze/settings`: font, size, line height, soft
-//! wrap, auto-closing pairs, the sidebar, light or dark, and the colors of both themes, as `key = value`
+//! wrap, auto-closing pairs, zen mode, the sidebar, light or dark, and the colors of both themes, as `key = value`
 //! lines. ze writes every key into it the first time it's opened, and menu
 //! toggles rewrite just their own line.
 const std = @import("std");
@@ -164,6 +164,8 @@ pub const Settings = struct {
     pairs: bool = true,
     focus: Focus = .off,
     typewriter: bool = false,
+    /// Hides the window's chrome and centers an 80-column grey page.
+    zen: bool = false,
     /// The folder tree on the left of folder windows.
     sidebar: bool = true,
     sidebar_width: f64 = sidebar_default,
@@ -293,6 +295,8 @@ pub fn parse(text: []const u8) Settings {
             s.focus = std.meta.stringToEnum(Focus, val) orelse s.focus;
         } else if (std.mem.eql(u8, key, "typewriter")) {
             s.typewriter = flag(val) orelse s.typewriter;
+        } else if (std.mem.eql(u8, key, "zen")) {
+            s.zen = flag(val) orelse s.zen;
         } else if (std.mem.eql(u8, key, "sidebar")) {
             s.sidebar = flag(val) orelse s.sidebar;
         } else if (std.mem.eql(u8, key, "sidebar-width")) {
@@ -335,6 +339,8 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         \\focus = {s}
         \\# Keep the caret's row in the middle as you type: on or off.
         \\typewriter = {s}
+        \\# Hide the window's chrome and center an 80-column grey page: on or off.
+        \\zen = {s}
         \\# Show the folder's files on the left of the window: on or off.
         \\sidebar = {s}
         \\# How wide the sidebar is, in points: drag its edge to change it.
@@ -360,6 +366,7 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         if (s.pairs) "on" else "off",
         @tagName(s.focus),
         if (s.typewriter) "on" else "off",
+        if (s.zen) "on" else "off",
         if (s.sidebar) "on" else "off",
         decimal(&wbuf, s.sidebar_width),
         @tagName(s.look),
@@ -464,7 +471,7 @@ test "settings read colors, flags and numbers and skip what they don't know" {
 }
 
 test "a written file reads back as the same settings" {
-    var s: Settings = .{ .size = 16, .wrap = true, .focus = .sentence, .typewriter = true, .look = .dark, .sidebar_width = 320 };
+    var s: Settings = .{ .size = 16, .wrap = true, .focus = .sentence, .typewriter = true, .zen = true, .look = .dark, .sidebar_width = 320 };
     s.setFont("Menlo-Regular");
     s.dark.caret = .{ 1, 0, 0 };
     const text = try render(t.allocator, &s);
@@ -475,6 +482,7 @@ test "a written file reads back as the same settings" {
     try t.expect(back.wrap);
     try t.expectEqual(s.focus, back.focus);
     try t.expectEqual(s.typewriter, back.typewriter);
+    try t.expect(back.zen);
     try t.expectEqual(@as(f64, 320), back.sidebar_width);
     try t.expectEqual(Look.dark, back.look);
     try t.expectEqual(s.dark.caret, back.dark.caret);

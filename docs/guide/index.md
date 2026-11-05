@@ -197,6 +197,16 @@ card above the first line or below the last. Scrolling with the mouse or trackpa
 the next caret move brings the row back to the middle. It works with soft wrap and Focus too.
 The choice applies to every window and is remembered.
 
+## Zen mode
+
+**View > Zen Mode** (⌃⌘Z) hides the traffic lights, the sidebar, the cards' headers and outlines,
+turns the theme grey, and pads the text so an 80-column page sits in the middle of the window.
+The text stays left-aligned and wraps at 80 columns, or at the window's edge when the window is
+narrower. With split cards, each card centers its own page. Find, go to line, quick open and the
+command palette still open their prompt line at the bottom. Drag the empty strip at the top to
+move the window. Turn Zen Mode off to bring the window back as it was. The choice applies to
+every window and is remembered; your sidebar, wrap and theme settings don't change.
+
 ## Find and replace
 
 1. Press ⌘F. The prompt starts with the selected text or your last search.
@@ -255,6 +265,7 @@ Appearance: Auto (the default) switches every window when the Mac switches, and 
 ze in that mode whatever the Mac does. Below that it picks the themes: Paper (the default), Ayu Light
 or One Light for light mode, and Ink (the default), Ayu Dark or One Dark for dark mode. Checkmarks
 show the mode and the two themes in use. ze remembers them in the settings file.
+Zen Mode turns every theme color grey while it's on, without changing the saved colors.
 
 ## Font and text size
 
@@ -279,6 +290,7 @@ wrap = off
 pairs = on               # auto-close brackets and quotes
 focus = off              # off, line, sentence or paragraph
 typewriter = off         # keep the caret's row in the middle
+zen = off                # hide the chrome and center an 80-column grey page
 sidebar = on             # the folder's files on the left
 sidebar-width = 250      # in points, from 150 to 500
 appearance = auto        # auto, light or dark

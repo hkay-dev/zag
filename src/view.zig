@@ -91,12 +91,23 @@ const label_h = 24.0;
 /// The sidebar shows when there's a folder, it's turned on, and the window
 /// is wide enough to keep room for the text.
 fn sideShown(w: *const Win) bool {
-    return conf.sidebar and root != null and msg(Rect, w.view, "bounds", .{}).w >= side_w + 360;
+    return !conf.zen and conf.sidebar and root != null and msg(Rect, w.view, "bounds", .{}).w >= side_w + 360;
 }
 
 /// A card's right edge in its pane, which it sits a gap inside of.
 fn rightEdge(d: *const Doc) f64 {
     return d.size.x - gap;
+}
+
+/// From the card's left edge to the text. Zen pads it so an 80-column page
+/// sits in the middle of the card.
+fn padL(d: *const Doc) f64 {
+    return if (conf.zen) @max(pad_x, (d.size.x - 80 * cw) / 2 - gap) else pad_x;
+}
+
+/// Soft wrap is on, or zen wraps at 80 columns.
+fn wrapping() bool {
+    return conf.wrap or conf.zen;
 }
 
 /// Where the text ends: the card's bottom, or the prompt line above it.
@@ -105,14 +116,17 @@ fn bottom(d: *const Doc) f64 {
 }
 
 /// The window's own color around the card: the theme's background, a
-/// step darker.
+/// step darker. Zen leaves no edge around the card.
 fn chrome(th: *const Theme, dark: bool) Rgb {
+    if (conf.zen) return th.bg;
     const k: f64 = if (dark) 0.78 else 0.955;
     return .{ th.bg[0] * k, th.bg[1] * k, th.bg[2] * k };
 }
 
 /// Font, size, colors and toggles, from the settings file.
 var conf: settings.Settings = .{};
+/// The themes that draw: the settings' colors, turned grey in zen.
+var themes: [2]Theme = .{ settings.paper, settings.ink };
 var conf_path: ?[:0]u8 = null;
 var conf_stamp: ?files.Stamp = null;
 /// View menu items that show a checkmark, set by the menu builder.
@@ -121,6 +135,7 @@ pub var pairs_item: Id = null;
 pub var sidebar_item: Id = null;
 pub var focus_items: [4]Id = @splat(null);
 pub var typewriter_item: Id = null;
+pub var zen_item: Id = null;
 /// View > Theme items, in `settings.schemes` order.
 pub var scheme_items: [settings.schemes.len]Id = @splat(null);
 /// View > Theme's Appearance items: Auto, Light, Dark.
@@ -524,7 +539,7 @@ fn moveCaret(d: *Doc, now: f64) void {
         x -= d.vx;
         y -= d.vy;
     }
-    const visible = d.shown and (!d.c_text or (x >= gap + pad_x - 2 and x < rightEdge(d) and y >= top_h - 2 and y + lh - 4 <= bottom(d)));
+    const visible = d.shown and (!d.c_text or (x >= gap + padL(d) - 2 and x < rightEdge(d) and y >= top_h - 2 and y + lh - 4 <= bottom(d)));
     const t = objc.class("CATransaction");
     msg(void, t, "begin", .{});
     msg(void, t, "setDisableActions:", .{true});
@@ -1459,6 +1474,7 @@ pub fn newDoc() ?*Doc {
     msg(void, win, "setTitleVisibility:", .{@as(isize, 1)});
     msg(void, win, "setMinSize:", .{Point{ .x = 360, .y = 240 }});
     msg(void, win, "setContentView:", .{view});
+    hideLights(w);
     msg(void, view, "release", .{});
     msg(void, win, "setDelegate:", .{view});
     msg(void, win, "makeFirstResponder:", .{view});
@@ -1781,6 +1797,13 @@ pub fn loadSettings() void {
     const p = conf_path orelse return;
     const old_lh = lh;
     conf = settings.load(gpa, p);
+    themes = .{ conf.light, conf.dark };
+    if (conf.zen) for (&themes) |*th| {
+        inline for (@typeInfo(Theme).@"struct".field_names) |name| {
+            const c = &@field(th, name);
+            if (@TypeOf(c.*) == Rgb) desaturate(c) else for (c) |*k| desaturate(k);
+        }
+    };
     side_w = conf.sidebar_width;
     conf_stamp = files.stamp(p);
     setFont();
@@ -1791,6 +1814,7 @@ pub fn loadSettings() void {
     for (focus_items, 0..) |it, i| {
         if (it != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(i == @intFromEnum(conf.focus)))});
     }
+    if (zen_item != null) msg(void, zen_item, "setState:", .{@as(isize, @intFromBool(conf.zen))});
     dropIcons();
     for (scheme_items, 0..) |it, i| {
         if (it != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(i == conf.light_scheme or i == conf.dark_scheme))});
@@ -1807,6 +1831,7 @@ pub fn loadSettings() void {
     msg(void, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "setAppearance:", .{look});
     for (wins.items) |w| {
         w.dark = null;
+        hideLights(w);
         w.side_find = true;
         msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
     }
@@ -1854,6 +1879,14 @@ pub fn toggleTypewriter() void {
 
 pub fn pickFocus(i: usize) void {
     if (i < focus_items.len) store("focus", @tagName(@as(settings.Focus, @enumFromInt(i))));
+}
+
+pub fn toggleZen() void {
+    store("zen", if (conf.zen) "off" else "on");
+}
+
+fn desaturate(c: *Rgb) void {
+    c.* = @splat(c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722);
 }
 
 /// Makes built-in theme `i` the one for its own mode, light or dark.
@@ -2159,13 +2192,14 @@ const Seg = struct { k: usize = 0, start: usize = 0, col: usize = 0, end: usize 
 /// Rows wrap at the card's width once it's done springing, so a card that
 /// grows or shrinks doesn't rewrap every frame.
 fn wrapCols(d: *const Doc) usize {
-    return @max(@as(usize, @intFromFloat((d.fin.x - 2 * gap - 2 * pad_x) / cw)), 8);
+    const cols = @max(@as(usize, @intFromFloat((d.fin.x - 2 * gap - 2 * pad_x) / cw)), 8);
+    return if (conf.zen) @min(cols, 80) else cols;
 }
 
 /// Brings the row counts up to date after edits, a resize or a font change.
 fn layout(d: *Doc) void {
     const b = &d.ed.buf;
-    if (!conf.wrap) {
+    if (!wrapping()) {
         if (b.wraps.items.len > 0) b.wraps.clearAndFree(gpa);
         d.vfirst.clearAndFree(gpa);
         return;
@@ -2195,15 +2229,15 @@ fn layout(d: *Doc) void {
 }
 
 fn totalRows(d: *const Doc) usize {
-    return if (conf.wrap) d.vfirst.items[d.vfirst.items.len - 1] else d.ed.buf.lines();
+    return if (wrapping()) d.vfirst.items[d.vfirst.items.len - 1] else d.ed.buf.lines();
 }
 
 fn rowOfLine(d: *const Doc, i: usize) usize {
-    return if (conf.wrap) d.vfirst.items[i] else i;
+    return if (wrapping()) d.vfirst.items[i] else i;
 }
 
 fn lineOfRow(d: *const Doc, r: usize) usize {
-    if (!conf.wrap) return @min(r, d.ed.buf.lines() - 1);
+    if (!wrapping()) return @min(r, d.ed.buf.lines() - 1);
     const v = d.vfirst.items[0 .. d.vfirst.items.len - 1];
     var lo: usize = 0;
     var hi: usize = v.len;
@@ -2216,7 +2250,7 @@ fn lineOfRow(d: *const Doc, r: usize) usize {
 
 /// Fills in where a row that starts at `s.start` ends.
 fn segFrom(d: *const Doc, l: []const u8, s: Seg) Seg {
-    if (!conf.wrap) return .{ .end = l.len };
+    if (!wrapping()) return .{ .end = l.len };
     const r = editor.rowEnd(l, s.start, s.col, d.cols);
     return .{ .k = s.k, .start = s.start, .col = s.col, .end = r.end, .ecol = r.col };
 }
@@ -2310,7 +2344,7 @@ fn scrollRange(d: *Doc) [2]f64 {
 fn clampScroll(d: *Doc) void {
     const range = scrollRange(d);
     d.sy = std.math.clamp(d.sy, range[0], range[1]);
-    d.sx = if (conf.wrap) 0 else @max(d.sx, 0);
+    d.sx = if (wrapping()) 0 else @max(d.sx, 0);
 }
 
 /// Centers the caret's row in typewriter mode; otherwise scrolls just
@@ -2325,7 +2359,7 @@ fn reveal(d: *Doc) void {
         if (y < d.sy) d.sy = y;
         if (y + lh > d.sy + th) d.sy = y + lh - th;
     }
-    if (!conf.wrap) {
+    if (!wrapping()) {
         const x = f(c.col) * cw;
         const tw = rightEdge(d) - gap - 2 * pad_x;
         if (x < d.sx) d.sx = @max(0, x - 8 * cw);
@@ -2854,7 +2888,7 @@ const VRow = struct { line: usize, seg: Seg };
 fn draw(w: *Win, ctx: Id) void {
     const now = CACurrentMediaTime();
     const dark = isDark(w.view);
-    const th = if (dark) &conf.dark else &conf.light;
+    const th = &themes[@intFromBool(dark)];
     if (w.dark != dark) {
         w.dark = dark;
         msg(void, w.window, "setBackgroundColor:", .{nscolor(chrome(th, dark))});
@@ -2912,7 +2946,7 @@ fn draw(w: *Win, ctx: Id) void {
         drawIcon(icon(.plus, dark, th), side_w - gap - 30, hy - 10, 20);
         objc.CGContextRestoreGState(ctx);
     }
-    if (root != null) {
+    if (root != null and !conf.zen) {
         hoverPill(ctx, th, w.hot_t[0].at(now), toggle_x, hy);
         drawIcon(icon(.sidebar, dark, th), toggle_x - 10, hy - 10, 20);
     }
@@ -2974,7 +3008,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     const last = @min(total, @as(usize, @intFromFloat(@max(@ceil((d.vy + textH(d)) / lh), 0))) + 1);
     const first: usize = @min(@as(usize, @intFromFloat(@max(@floor(d.vy / lh), 0))), last);
     const skip: usize = @intFromFloat(@max(@ceil(d.vx / cw), 0));
-    const tx = lx + pad_x;
+    const tx = lx + padL(d);
     const ox = tx + f(skip) * cw - d.vx;
     const cols: usize = @intFromFloat(@max(@ceil((card.x + card.w - ox) / cw), 0));
     const s = d.ed.sel();
@@ -3198,36 +3232,41 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // The header, over any text scrolled under it: the file's name and
     // folder, or the window's tabs, and the caret's line and column.
     // The header has its own shade and a hairline under it, set apart from the text.
-    fill(ctx, th.header, card.x, card.y, card.w, head_h);
-    fill(ctx, th.rule, card.x, card.y + head_h, card.w, 1);
-    fill(ctx, th.bg, card.x, card.y + head_h + 1, card.w, top_h - gap - head_h - 1);
-    const hy = gap + head_h / 2;
-    const mono_y = @round(hy - lh / 2 + baseline);
-    const li = b.lineOf(d.ed.cur);
-    const col = editor.colOf(b.line(li), d.ed.cur - b.lineStart(li));
-    const spot = std.fmt.bufPrint(&buf, "{d}:{d}", .{ li + 1, col + 1 }) catch "";
-    const spot_x = card.x + card.w - 16 - f(spot.len) * cw;
-    _ = k.text(spot, null, th, th.muted, spot_x, mono_y, 0, 32);
-    k.flush();
-    objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = @max(spot_x - 16 - card.x, 0), .h = head_h });
-    // The traffic lights and the sidebar button sit on a card at the window's top left.
-    const lights_end: f64 = if (root != null) toggle_x + 22 else lights_x + 76;
-    drawTabs(d, ctx, th, &k, dark, key, @max(card.x + 14, if (d.org.y < 1) lights_end - d.org.x else 0), spot_x - 16, mono_y, now);
+    // Zen keeps its room as a plain margin.
+    if (conf.zen) fill(ctx, th.bg, card.x, card.y, card.w, top_h - gap) else {
+        fill(ctx, th.header, card.x, card.y, card.w, head_h);
+        fill(ctx, th.rule, card.x, card.y + head_h, card.w, 1);
+        fill(ctx, th.bg, card.x, card.y + head_h + 1, card.w, top_h - gap - head_h - 1);
+        const hy = gap + head_h / 2;
+        const mono_y = @round(hy - lh / 2 + baseline);
+        const li = b.lineOf(d.ed.cur);
+        const col = editor.colOf(b.line(li), d.ed.cur - b.lineStart(li));
+        const spot = std.fmt.bufPrint(&buf, "{d}:{d}", .{ li + 1, col + 1 }) catch "";
+        const spot_x = card.x + card.w - 16 - f(spot.len) * cw;
+        _ = k.text(spot, null, th, th.muted, spot_x, mono_y, 0, 32);
+        k.flush();
+        objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = @max(spot_x - 16 - card.x, 0), .h = head_h });
+        // The traffic lights and the sidebar button sit on a card at the window's top left.
+        const lights_end: f64 = if (root != null) toggle_x + 22 else lights_x + 76;
+        drawTabs(d, ctx, th, &k, dark, key, @max(card.x + 14, if (d.org.y < 1) lights_end - d.org.x else 0), spot_x - 16, mono_y, now);
+    }
     objc.CGContextRestoreGState(ctx);
 
     // The card's outline. In a window with more than one, the card that
     // takes typing also gets a ring in the caret's color, which fades
-    // from card to card.
-    ring(ctx, th.fg, if (dark) 0.1 else 0.08, card.x, card.y, card.w, card.h, card_radius);
-    const lit = d.lit.at(now);
-    if (lit > 0.01) ring(ctx, th.caret, 0.55 * lit, card.x, card.y, card.w, card.h, card_radius);
+    // from card to card. Zen draws neither.
+    if (!conf.zen) {
+        ring(ctx, th.fg, if (dark) 0.1 else 0.08, card.x, card.y, card.w, card.h, card_radius);
+        const lit = d.lit.at(now);
+        if (lit > 0.01) ring(ctx, th.caret, 0.55 * lit, card.x, card.y, card.w, card.h, card_radius);
+    }
     d.busy = scenery(d, now);
 }
 
 /// The sidebar button by the traffic lights, or the + at the sidebar's
 /// top right, under `p` in the view.
 fn toolAt(w: *const Win, p: Point) ?Icon {
-    if (@abs(p.y - (gap + head_h / 2)) > 12) return null;
+    if (conf.zen or @abs(p.y - (gap + head_h / 2)) > 12) return null;
     if (root != null and @abs(p.x - toggle_x) <= 12) return .sidebar;
     if (sideShown(w) and @abs(p.x - (side_w - gap - 20)) <= 12) return .plus;
     return null;
@@ -3235,7 +3274,7 @@ fn toolAt(w: *const Win, p: Point) ?Icon {
 
 /// Whether `p`, in the card's pane, is on the + after its tabs.
 fn onTabPlus(d: *const Doc, p: Point) bool {
-    return d.tabbed.to == 1 and @abs(p.y - (gap + head_h / 2)) <= 12 and @abs(p.x - d.plus_x) <= 12;
+    return !conf.zen and d.tabbed.to == 1 and @abs(p.y - (gap + head_h / 2)) <= 12 and @abs(p.x - d.plus_x) <= 12;
 }
 
 /// Brings the header's slots in line with the window's tabs: a new tab
@@ -3448,13 +3487,18 @@ const TabHit = struct { j: usize, id: u32, close: bool };
 /// The tab under `p`, and whether it's over the tab's close button. Only
 /// with two tabs or more; one is the window's title.
 fn tabAt(d: *const Doc, p: Point) ?TabHit {
-    if (d.tabbed.to != 1 or @abs(p.y - (gap + head_h / 2)) > 12) return null;
+    if (conf.zen or d.tabbed.to != 1 or @abs(p.y - (gap + head_h / 2)) > 12) return null;
     for (d.slots.items) |s| {
         if (s.gone or p.x < s.x or p.x >= s.x + s.w) continue;
         const j = tabIndex(d, s.id) orelse return null;
         return .{ .j = j, .id = s.id, .close = p.x >= s.x + s.w - tab_pad - tab_shut };
     }
     return null;
+}
+
+/// Zen hides the traffic lights; the window still closes, zooms and drags.
+fn hideLights(w: *Win) void {
+    for (0..3) |i| msg(void, msg(Id, w.window, "standardWindowButton:", .{i}), "setHidden:", .{conf.zen});
 }
 
 /// Moves the traffic lights in and down so they sit on the header's line.
@@ -3551,7 +3595,7 @@ fn doCommand(self: Id, _: Sel, sel: Sel) callconv(.c) void {
 fn edit(d: *Doc, name: []const u8, extend: bool) !bool {
     const e = &d.ed;
     for (moves) |m| if (std.mem.eql(u8, m[0], name)) {
-        if (conf.wrap) switch (m[1]) {
+        if (wrapping()) switch (m[1]) {
             .up, .down => {
                 vmove(d, if (m[1] == .up) -1 else 1, extend);
                 return true;
@@ -3611,7 +3655,7 @@ fn posAt(d: *Doc, p: Point) usize {
     const i = lineOfRow(d, row);
     const l = b.line(i);
     const s = segN(d, l, row - rowOfLine(d, i));
-    const x = @max((p.x - gap - pad_x + d.vx) / cw, 0);
+    const x = @max((p.x - gap - padL(d) + d.vx) / cw, 0);
     return b.lineStart(i) + std.math.clamp(editor.byteAtCol(l, f(s.col) + x), s.start, caretEnd(l, s));
 }
 
@@ -3821,7 +3865,7 @@ fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
         d.relax = msg(usize, ev, "phase", .{}) & touching == 0;
         if (!d.relax) d.ov_v = .{ 0, 0 };
         d.ov_t = now;
-        if (!conf.wrap) pull(&d.sx, &d.ov[0], -dx, 0, std.math.inf(f64), @max(rightEdge(d) - gap, cw));
+        if (!wrapping()) pull(&d.sx, &d.ov[0], -dx, 0, std.math.inf(f64), @max(rightEdge(d) - gap, cw));
         const range = scrollRange(d);
         pull(&d.sy, &d.ov[1], -dy, range[0], range[1], textH(d));
     } else {

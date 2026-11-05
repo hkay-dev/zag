@@ -65,6 +65,12 @@ Ghostty's terminal core. ze drops all three.
   the scroll's timing so they move with the page. A wheel scroll alone doesn't recenter; a
   caret move, an edit or a new card height does. Release `__text` goes from 115,952 to 116,684
   bytes (+732); the file goes from 221,968 to 221,760 bytes.
+- **Zen draws from a second, grey copy of the themes** (zig-editor#ge34), made only when the
+  settings load, so the saved colors and the wrap and sidebar settings stay as they were. Zen hides
+  the traffic lights with `setHidden:` and keeps the window's titled style, so ⌘W, zoom and
+  dragging the top strip still work. The header's room stays as a plain top margin, so nothing
+  else in the layout moves. Each split card centers its own 80 columns. Release `__text` goes
+  from 116,684 to 117,640 bytes (+956); the file goes from 221,760 to 222,112 bytes.
 - **No input methods and no accessibility.** ze is for US English typing on Apple Silicon only.
   It has no input method support (Chinese, Japanese or accented-letter composing), no VoiceOver
   or other accessibility support, and none is planned. Harsha set this on 2026-11-05, so new

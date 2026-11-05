@@ -102,6 +102,10 @@ fn toggleTypewriter(_: Id, _: Sel, _: Id) callconv(.c) void {
     view.toggleTypewriter();
 }
 
+fn toggleZen(_: Id, _: Sel, _: Id) callconv(.c) void {
+    view.toggleZen();
+}
+
 fn nextTab(_: Id, _: Sel, _: Id) callconv(.c) void {
     view.stepTab(1);
 }
@@ -224,6 +228,7 @@ fn buildMenu(delegate: Id) void {
     view.wrap_item = item(v, "Soft Wrap", "toggleWrap:", "z", opt);
     view.pairs_item = item(v, "Auto-Close Brackets", "togglePairs:", "", 0);
     view.sidebar_item = item(v, "Sidebar", "toggleSidebar:", "\\", cmd);
+    view.zen_item = item(v, "Zen Mode", "toggleZen:", "z", ctrl | cmd);
     _ = item(v, "Show Next Tab", "nextTab:", "\t", ctrl);
     // ⇧Tab arrives as back tab, so that's the key to match.
     _ = item(v, "Show Previous Tab", "previousTab:", "\x19", ctrl | shift);
@@ -304,6 +309,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     d.method("togglePairs:", @ptrCast(&togglePairs), "v@:@");
     d.method("toggleSidebar:", @ptrCast(&toggleSidebar), "v@:@");
     d.method("toggleTypewriter:", @ptrCast(&toggleTypewriter), "v@:@");
+    d.method("toggleZen:", @ptrCast(&toggleZen), "v@:@");
     d.method("nextTab:", @ptrCast(&nextTab), "v@:@");
     d.method("previousTab:", @ptrCast(&previousTab), "v@:@");
     d.method("pickScheme:", @ptrCast(&pickScheme), "v@:@");
