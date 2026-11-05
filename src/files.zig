@@ -67,6 +67,38 @@ pub fn isDir(path: [:0]const u8) bool {
     return c.stat(path, &st) == 0 and st.mode & c.S.IFMT == c.S.IFDIR;
 }
 
+pub fn exists(path: [:0]const u8) bool {
+    var st: c.Stat = undefined;
+    return c.stat(path, &st) == 0;
+}
+
+/// Makes the folder that `path` goes in, and its parents.
+pub fn makeParent(path: [:0]const u8) !void {
+    var buf: [c.PATH_MAX]u8 = undefined;
+    const dir = std.fs.path.dirname(path) orelse return;
+    if (dir.len >= buf.len) return error.NameTooLong;
+    @memcpy(buf[0..dir.len], dir);
+    buf[dir.len] = 0;
+    for (1..dir.len) |i| if (buf[i] == '/') {
+        buf[i] = 0;
+        _ = c.mkdir(@ptrCast(&buf), 0o755);
+        buf[i] = '/';
+    };
+    _ = c.mkdir(@ptrCast(&buf), 0o755);
+    if (!isDir(buf[0..dir.len :0])) return error.MakeDirFailed;
+}
+
+/// When a file last changed and how big it is, to notice edits from other apps.
+pub const Stamp = struct { sec: i64, nsec: i64, size: i64 };
+
+/// Null when the file doesn't exist.
+pub fn stamp(path: [:0]const u8) ?Stamp {
+    var st: c.Stat = undefined;
+    if (c.stat(path, &st) != 0) return null;
+    const m = st.mtime();
+    return .{ .sec = m.sec, .nsec = m.nsec, .size = st.size };
+}
+
 pub fn cwd(gpa: Allocator) ?[]u8 {
     var buf: [c.PATH_MAX]u8 = undefined;
     const p = c.getcwd(&buf, buf.len) orelse return null;

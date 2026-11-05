@@ -97,6 +97,9 @@ pub fn utf8(ns: Id) []const u8 {
 pub extern fn CFRelease(cf: *anyopaque) void;
 pub extern fn CGContextSetRGBFillColor(ctx: Id, r: f64, g: f64, b: f64, a: f64) void;
 pub extern fn CGContextFillRect(ctx: Id, rect: Rect) void;
+pub extern fn CGContextSaveGState(ctx: Id) void;
+pub extern fn CGContextRestoreGState(ctx: Id) void;
+pub extern fn CGContextClipToRect(ctx: Id, rect: Rect) void;
 extern fn CGContextSetTextMatrix(ctx: Id, t: Transform) void;
 pub extern fn CTFontGetGlyphsForCharacters(font: Id, chars: [*]const u16, glyphs: [*]u16, count: isize) bool;
 pub extern fn CTFontDrawGlyphs(font: Id, glyphs: [*]const u16, positions: [*]const Point, count: usize, ctx: Id) void;

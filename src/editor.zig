@@ -272,6 +272,106 @@ pub const Editor = struct {
         e.select(p, p + q.len);
         return true;
     }
+
+    /// Typing with auto-closing pairs: an opener adds its closer (or wraps
+    /// the selection), and a closer steps over the same closer after the caret.
+    pub fn typePaired(e: *Editor, gpa: Allocator, s: []const u8) !void {
+        if (s.len != 1) return e.insert(gpa, s);
+        const t = e.text();
+        const c = s[0];
+        const next: u8 = if (e.cur < t.len) t[e.cur] else '\n';
+        const close = closerOf(c);
+        const quote = c == '"' or c == '\'' or c == '`';
+        if (!e.hasSel() and (quote or close == null) and isCloser(c) and next == c) {
+            return e.moveTo(e.cur + 1, false);
+        }
+        const pair = close orelse return e.insert(gpa, s);
+        if (e.hasSel()) {
+            const r = e.sel();
+            const inner = try std.mem.concat(gpa, u8, &.{ s, t[r[0]..r[1]], &.{pair} });
+            defer gpa.free(inner);
+            try e.buf.replace(gpa, r[0], r[1], inner, e.cur, false);
+            e.select(r[0] + 1, r[0] + inner.len - 1);
+            return;
+        }
+        const prev: u8 = if (e.cur > 0) t[e.cur - 1] else ' ';
+        const open_after = next == ' ' or next == '\t' or next == '\n' or next == '\r' or isCloser(next) or next == ',' or next == ';';
+        // A quote after a letter is an apostrophe (it's, don't).
+        if (!open_after or (quote and (class(prev) == 0 or prev == c))) return e.insert(gpa, s);
+        try e.insert(gpa, &.{ c, pair });
+        e.select(e.cur - 1, e.cur - 1);
+    }
+
+    /// Backspace between an empty pair deletes both halves. False when the
+    /// caret isn't between one.
+    pub fn deletePair(e: *Editor, gpa: Allocator) !bool {
+        const t = e.text();
+        if (e.hasSel() or e.cur == 0 or e.cur >= t.len) return false;
+        if (closerOf(t[e.cur - 1]) != t[e.cur]) return false;
+        e.select(e.cur + 1, e.cur - 1);
+        try e.cut(gpa, false);
+        return true;
+    }
+
+    /// Replaces the selection with `with` when it's a match of `q`.
+    pub fn replaceOne(e: *Editor, gpa: Allocator, q: []const u8, with: []const u8) !bool {
+        const s = e.sel();
+        if (q.len == 0 or s[1] - s[0] != q.len or !matchAt(e.text(), s[0], q)) return false;
+        e.typing = false;
+        try e.insert(gpa, with);
+        return true;
+    }
+
+    /// Replaces every match of `q` as one undo step. Returns how many.
+    pub fn replaceAll(e: *Editor, gpa: Allocator, q: []const u8, with: []const u8) !usize {
+        const t = e.text();
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(gpa);
+        var n: usize = 0;
+        var first: ?usize = null;
+        var done: usize = 0;
+        var i: usize = 0;
+        while (q.len > 0 and i + q.len <= t.len) {
+            if (!matchAt(t, i, q)) {
+                i += 1;
+                continue;
+            }
+            if (first == null) first = i;
+            try out.appendSlice(gpa, t[done..i]);
+            try out.appendSlice(gpa, with);
+            n += 1;
+            i += q.len;
+            done = i;
+        }
+        const start = first orelse return 0;
+        try e.buf.replace(gpa, start, done, out.items[start..], e.cur, false);
+        e.select(start, start);
+        return n;
+    }
+
+    /// Swaps in a file's new text from disk as one undoable edit of just the
+    /// part that changed, so the caret stays put, and marks it saved.
+    pub fn reload(e: *Editor, gpa: Allocator, bytes: []const u8) !void {
+        const t = e.text();
+        var a: usize = 0;
+        while (a < t.len and a < bytes.len and t[a] == bytes[a]) a += 1;
+        while (a > 0 and a < t.len and t[a] & 0xC0 == 0x80) a -= 1;
+        var z: usize = 0;
+        while (z < t.len - a and z < bytes.len - a and t[t.len - 1 - z] == bytes[bytes.len - 1 - z]) z += 1;
+        const old_len = t.len;
+        const fix = struct {
+            fn at(p: usize, keep: usize, tail: usize, from: usize, to: usize) usize {
+                if (p <= keep) return p;
+                if (p >= from - tail) return p + to - from;
+                return keep;
+            }
+        }.at;
+        const anchor = fix(e.anchor, a, z, old_len, bytes.len);
+        const cur = fix(e.cur, a, z, old_len, bytes.len);
+        try e.buf.replace(gpa, a, old_len - z, bytes[a .. bytes.len - z], e.cur, false);
+        e.buf.markSaved();
+        e.select(anchor, cur);
+    }
 };
 
 /// Matching ignores case unless the query has an uppercase letter.
@@ -320,6 +420,20 @@ fn class(c: u8) u8 {
     if (c == ' ' or c == '\t') return 1;
     if (c == '\n' or c == '\r') return 2;
     return 3;
+}
+
+fn closerOf(c: u8) ?u8 {
+    return switch (c) {
+        '(' => ')',
+        '[' => ']',
+        '{' => '}',
+        '"', '\'', '`' => c,
+        else => null,
+    };
+}
+
+fn isCloser(c: u8) bool {
+    return c == ')' or c == ']' or c == '}' or c == '"' or c == '\'' or c == '`';
 }
 
 fn wordLeft(t: []const u8, from: usize) usize {
@@ -405,6 +519,39 @@ pub fn byteAtCol(l: []const u8, x: f64) usize {
     return l.len;
 }
 
+/// The end of a screen row: its last byte (exclusive) and the line's display
+/// column there, which is where the next row starts.
+pub const RowEnd = struct { end: usize, col: usize };
+
+/// Where the screen row that starts at byte `start` of `line`, at display
+/// column `col`, ends when rows are `cols` cells wide: after the last space
+/// that fits, or mid-word when a word is longer than a row. Ends at
+/// `line.len` when the rest fits.
+pub fn rowEnd(line: []const u8, start: usize, col: usize, cols: usize) RowEnd {
+    var i = start;
+    var c = col;
+    var brk: ?RowEnd = null;
+    while (i < line.len) {
+        const x = cells(line, i, c);
+        if (c + x.w > col + cols and i > start) return brk orelse .{ .end = i, .col = c };
+        c += x.w;
+        i += x.len;
+        if (line[i - 1] == ' ' or line[i - 1] == '\t') brk = .{ .end = i, .col = c };
+    }
+    return .{ .end = line.len, .col = c };
+}
+
+/// How many screen rows `line` takes at `cols` cells a row.
+pub fn rowCount(line: []const u8, cols: usize) usize {
+    var n: usize = 1;
+    var r: RowEnd = .{ .end = 0, .col = 0 };
+    while (true) {
+        r = rowEnd(line, r.end, r.col, cols);
+        if (r.end >= line.len) return n;
+        n += 1;
+    }
+}
+
 const t_ = std.testing;
 const gpa_t = t_.allocator;
 
@@ -475,4 +622,61 @@ test "word motion stops at punctuation and line ends" {
     try t_.expectEqual(@as(usize, 13), wordRight(s, 12));
     try t_.expectEqual(@as(usize, 9), wordLeft(s, 12));
     try t_.expectEqual(@as(usize, 12), wordLeft(s, 13));
+}
+
+test "pairs close openers, step over closers, wrap selections and delete empty pairs" {
+    var e = try Editor.init(gpa_t, "it");
+    defer e.deinit(gpa_t);
+    e.moveTo(2, false);
+    try e.typePaired(gpa_t, "'");
+    try t_.expectEqualStrings("it'", e.text());
+    try e.typePaired(gpa_t, " ");
+    try e.typePaired(gpa_t, "(");
+    try e.typePaired(gpa_t, "\"");
+    try t_.expectEqualStrings("it' (\"\")", e.text());
+    try e.typePaired(gpa_t, "\"");
+    try e.typePaired(gpa_t, ")");
+    try t_.expectEqualStrings("it' (\"\")", e.text());
+    try t_.expectEqual(@as(usize, 8), e.cur);
+    e.moveTo(6, false);
+    try t_.expect(try e.deletePair(gpa_t));
+    try t_.expectEqualStrings("it' ()", e.text());
+    e.select(0, 2);
+    try e.typePaired(gpa_t, "[");
+    try t_.expectEqualStrings("[it]' ()", e.text());
+    try t_.expectEqual([2]usize{ 1, 3 }, e.sel());
+}
+
+test "replace all is one undo step and keeps the case rule" {
+    var e = try Editor.init(gpa_t, "a foo b FOO foo");
+    defer e.deinit(gpa_t);
+    try t_.expectEqual(@as(usize, 3), try e.replaceAll(gpa_t, "foo", "x"));
+    try t_.expectEqualStrings("a x b x x", e.text());
+    try e.undo(gpa_t);
+    try t_.expectEqualStrings("a foo b FOO foo", e.text());
+    try t_.expectEqual(@as(usize, 1), try e.replaceAll(gpa_t, "FOO", "y"));
+    try t_.expectEqualStrings("a foo b y foo", e.text());
+}
+
+test "rows break after the last space that fits, or mid-word" {
+    const l = "aaa bbb ccccccccc d";
+    try t_.expectEqual(@as(usize, 8), rowEnd(l, 0, 0, 9).end);
+    try t_.expectEqual(@as(usize, 17), rowEnd(l, 8, 8, 9).end);
+    try t_.expectEqual(@as(usize, 3), rowCount(l, 9));
+    try t_.expectEqual(@as(usize, 1), rowCount("", 9));
+    try t_.expectEqual(@as(usize, 1), rowCount("abc", 9));
+}
+
+test "reload keeps the caret and undoes back to the old text" {
+    var e = try Editor.init(gpa_t, "one\ntwo\nthree\n");
+    defer e.deinit(gpa_t);
+    e.moveTo(10, false);
+    try e.reload(gpa_t, "zero\none\ntwo\nthree\n");
+    try t_.expectEqualStrings("zero\none\ntwo\nthree\n", e.text());
+    try t_.expectEqual(@as(usize, 15), e.cur);
+    try t_.expect(!e.buf.dirty());
+    try e.reload(gpa_t, "zero\none\nTWO\nthree\n");
+    try t_.expectEqual(@as(usize, 15), e.cur);
+    try e.undo(gpa_t);
+    try t_.expectEqualStrings("zero\none\ntwo\nthree\n", e.text());
 }

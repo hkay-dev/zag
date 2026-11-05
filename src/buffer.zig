@@ -16,6 +16,11 @@ pub const Buffer = struct {
     saved: u64 = 0,
     /// The first line changed since the syntax cache last looked.
     touched: usize = 0,
+    /// Screen rows of each line for soft wrap, kept by the view; empty while
+    /// wrap is off. An edit zeroes the lines it touches, and `wraps_from` is
+    /// the first line zeroed since the view last caught up.
+    wraps: std.ArrayList(u32) = .empty,
+    wraps_from: usize = std.math.maxInt(usize),
 
     pub fn init(gpa: Allocator, bytes: []const u8) !Buffer {
         var b: Buffer = .{};
@@ -30,6 +35,7 @@ pub const Buffer = struct {
         for (b.redos.items) |e| free(gpa, e);
         b.undos.deinit(gpa);
         b.redos.deinit(gpa);
+        b.wraps.deinit(gpa);
         b.starts.deinit(gpa);
         b.text.deinit(gpa);
     }
@@ -139,6 +145,12 @@ pub const Buffer = struct {
         defer added.deinit(gpa);
         for (new, 0..) |c, i| if (c == '\n') try added.append(gpa, @intCast(start + i + 1));
         try b.starts.replaceRange(gpa, first + 1, last - first, added.items);
+        if (b.wraps.items.len > 0) {
+            @memset(added.items, 0);
+            try b.wraps.replaceRange(gpa, first + 1, last - first, added.items);
+            b.wraps.items[first] = 0;
+            b.wraps_from = @min(b.wraps_from, first);
+        }
 
         const delta: i64 = @as(i64, @intCast(new.len)) - @as(i64, @intCast(end - start));
         for (b.starts.items[first + 1 + added.items.len ..]) |*s| s.* = @intCast(@as(i64, s.*) + delta);
@@ -175,6 +187,7 @@ test "line starts stay right through random edits, undo and redo" {
     const r = prng.random();
     var b = try Buffer.init(t.allocator, "one\ntwo\n\nthree\r\nfour");
     defer b.deinit(t.allocator);
+    try b.wraps.appendNTimes(t.allocator, 1, b.lines());
     const pieces = [_][]const u8{ "", "x", "\n", "a\nb", "\n\n", "long piece\nwith\nlines\n" };
     for (0..400) |_| {
         const n = b.text.items.len;
@@ -186,6 +199,7 @@ test "line starts stay right through random edits, undo and redo" {
             else => try b.replace(t.allocator, s, e, pieces[r.uintLessThan(usize, pieces.len)], s, r.boolean()),
         }
         try expectStarts(&b);
+        try t.expectEqual(b.lines(), b.wraps.items.len);
     }
 }
 

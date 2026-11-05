@@ -18,7 +18,8 @@ Ghostty's terminal core. ze drops all three.
   codepoint, one cell wide (two for East Asian wide and emoji), tabs to four. Layout is
   arithmetic, so a 1 MB line costs a walk, not a shaping pass. Missing glyphs fall back to the
   font CoreText picks for that character. No ligatures.
-- **System font** (SF Mono through `monospacedSystemFontOfSize:`), nothing embedded.
+- **System font** (SF Mono through `monospacedSystemFontOfSize:`) unless the settings file names
+  another installed one. Nothing embedded.
 - **libc for file I/O.** Taking `std.process.Init.Minimal` keeps `std.Io.Threaded` out of
   `main`, and reading, saving and the quick open walk use `open`, `read`, `mkstemp`, `rename`
   and `readdir` directly.
@@ -27,12 +28,21 @@ Ghostty's terminal core. ze drops all three.
   through its vtable. Together they were about half the binary: 218 KB before, 107 KB after.
 - `main` returns `void`. An error return makes `start.zig` log through `std.log`, which needs the
   debug Io and brings it all back.
-- **The caret is a `CALayer`** (zig-editor#scw1). Its glide is an implicit animation in a
-  `CATransaction` and its blink is a repeating opacity animation, so both run in the window
-  server: ze redraws nothing while the caret moves or blinks, and the code is about 2.6 KB.
+- **The caret is a `CALayer`** (zig-editor#scw1), so moving it never redraws the text, and its
+  blink is a repeating opacity animation that runs in the window server.
+- **One display link drives all motion** (zig-editor#hpsf, #rccc, #c3kx, #kf52). Each moving
+  value is a small tween (from, to, start time, ease-out cubic). The link runs only while
+  something moves and pauses itself after. When only the caret is gliding, a frame moves the
+  caret layer and draws nothing; scrolling, the line band, a selection fade or the quick open
+  list redraw the view. The caret used to glide by Core Animation's implicit animation, but its
+  position has to follow the scroll as it eases, so it moved to the same tweens.
+- **No float parsing or printing from std.** The settings file only needs numbers like `14` and
+  `1.75`, and `std.fmt`'s float code was 16 KB of the binary, so `settings.zig` has a few lines of
+  its own.
 - **`headerpad_size = 0`.** The binary's size moves in 16 KB pages. Zig's default padding after
   the load commands was enough to push `__TEXT` past 64 KB when the caret code went in
   (107 KB to 123 KB on disk for 2.6 KB of code). Check `size -m` when the file jumps by a page.
+  With settings, wrap, replace, motion and sessions in, the binary is about 143 KB.
 
 ## Gotchas
 

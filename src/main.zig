@@ -35,7 +35,7 @@ fn didFinishLaunching(_: Id, _: Sel, _: Id) callconv(.c) void {
             i += 1;
         } else view.open(a, view.blankDoc());
     }
-    if (view.count() == 0) _ = view.newDoc();
+    if (view.count() == 0 and !view.restoreSession()) _ = view.newDoc();
     // Launched from a terminal there is no bundle and nothing brings the
     // window forward; from the bundle, Launch Services does it (or `open -g` doesn't).
     const bundle = msg(Id, objc.class("NSBundle"), "mainBundle", .{});
@@ -67,13 +67,57 @@ fn openDocument(_: Id, _: Sel, _: Id) callconv(.c) void {
     view.openPanel();
 }
 
-fn item(menu: Id, title: []const u8, action: [:0]const u8, key: []const u8, mods: usize) void {
+fn becameActive(_: Id, _: Sel, _: Id) callconv(.c) void {
+    view.recheckAll();
+}
+
+fn willTerminate(_: Id, _: Sel, _: Id) callconv(.c) void {
+    view.saveSession();
+}
+
+fn openSettings(_: Id, _: Sel, _: Id) callconv(.c) void {
+    view.openSettings();
+}
+
+fn toggleWrap(_: Id, _: Sel, _: Id) callconv(.c) void {
+    view.toggleWrap();
+}
+
+fn togglePairs(_: Id, _: Sel, _: Id) callconv(.c) void {
+    view.togglePairs();
+}
+
+/// Fills File > Open Recent each time it opens.
+fn fillRecent(_: Id, _: Sel, menu: Id) callconv(.c) void {
+    msg(void, menu, "removeAllItems", .{});
+    const paths = view.recentFiles();
+    const n = msg(usize, paths, "count", .{});
+    for (0..n) |i| {
+        const p = msg(Id, paths, "objectAtIndex:", .{i});
+        const it = item(menu, objc.utf8(msg(Id, p, "lastPathComponent", .{})), "openRecent:", "", 0);
+        msg(void, it, "setRepresentedObject:", .{p});
+        msg(void, it, "setToolTip:", .{p});
+    }
+    if (n > 0) separator(menu);
+    _ = item(menu, "Clear Menu", if (n > 0) "clearRecent:" else "noRecent:", "", 0);
+}
+
+fn openRecent(_: Id, _: Sel, sender: Id) callconv(.c) void {
+    view.open(objc.utf8(msg(Id, sender, "representedObject", .{})), view.blankDoc());
+}
+
+fn clearRecent(_: Id, _: Sel, _: Id) callconv(.c) void {
+    view.clearRecent();
+}
+
+fn item(menu: Id, title: []const u8, action: [:0]const u8, key: []const u8, mods: usize) Id {
     const it = msg(Id, msg(Id, objc.class("NSMenuItem"), "alloc", .{}), "initWithTitle:action:keyEquivalent:", .{
         objc.str(title), objc.sel_registerName(action), objc.str(key),
     });
     if (key.len > 0) msg(void, it, "setKeyEquivalentModifierMask:", .{mods});
     msg(void, menu, "addItem:", .{it});
     msg(void, it, "release", .{});
+    return it;
 }
 
 fn separator(menu: Id) void {
@@ -83,6 +127,7 @@ fn separator(menu: Id) void {
 fn submenu(bar: Id, title: []const u8) Id {
     const m = msg(Id, msg(Id, objc.class("NSMenu"), "alloc", .{}), "initWithTitle:", .{objc.str(title)});
     const it = objc.new("NSMenuItem");
+    msg(void, it, "setTitle:", .{objc.str(title)});
     msg(void, it, "setSubmenu:", .{m});
     msg(void, bar, "addItem:", .{it});
     msg(void, it, "release", .{});
@@ -90,51 +135,61 @@ fn submenu(bar: Id, title: []const u8) Id {
     return m;
 }
 
-fn buildMenu() void {
+fn buildMenu(delegate: Id) void {
     const bar = objc.new("NSMenu");
     const a = submenu(bar, "ze");
-    item(a, "About ze", "orderFrontStandardAboutPanel:", "", 0);
+    _ = item(a, "About ze", "orderFrontStandardAboutPanel:", "", 0);
     separator(a);
-    item(a, "Hide ze", "hide:", "h", cmd);
-    item(a, "Hide Others", "hideOtherApplications:", "h", cmd | opt);
-    item(a, "Show All", "unhideAllApplications:", "", 0);
+    _ = item(a, "Settings…", "openSettings:", ",", cmd);
     separator(a);
-    item(a, "Quit ze", "terminate:", "q", cmd);
+    _ = item(a, "Hide ze", "hide:", "h", cmd);
+    _ = item(a, "Hide Others", "hideOtherApplications:", "h", cmd | opt);
+    _ = item(a, "Show All", "unhideAllApplications:", "", 0);
+    separator(a);
+    _ = item(a, "Quit ze", "terminate:", "q", cmd);
 
     const file = submenu(bar, "File");
-    item(file, "New", "newDocument:", "n", cmd);
-    item(file, "Open…", "openDocument:", "o", cmd);
-    item(file, "Quick Open…", "quickOpen:", "p", cmd);
+    _ = item(file, "New", "newDocument:", "n", cmd);
+    _ = item(file, "Open…", "openDocument:", "o", cmd);
+    const recent = submenu(file, "Open Recent");
+    msg(void, recent, "setDelegate:", .{delegate});
+    _ = item(file, "Quick Open…", "quickOpen:", "p", cmd);
     separator(file);
-    item(file, "Close", "performClose:", "w", cmd);
-    item(file, "Save", "saveDocument:", "s", cmd);
-    item(file, "Save As…", "saveDocumentAs:", "s", cmd | shift);
+    _ = item(file, "Close", "performClose:", "w", cmd);
+    _ = item(file, "Save", "saveDocument:", "s", cmd);
+    _ = item(file, "Save As…", "saveDocumentAs:", "s", cmd | shift);
 
     const edit = submenu(bar, "Edit");
-    item(edit, "Undo", "undo:", "z", cmd);
-    item(edit, "Redo", "redo:", "z", cmd | shift);
+    _ = item(edit, "Undo", "undo:", "z", cmd);
+    _ = item(edit, "Redo", "redo:", "z", cmd | shift);
     separator(edit);
-    item(edit, "Cut", "cut:", "x", cmd);
-    item(edit, "Copy", "copy:", "c", cmd);
-    item(edit, "Paste", "paste:", "v", cmd);
-    item(edit, "Select All", "selectAll:", "a", cmd);
+    _ = item(edit, "Cut", "cut:", "x", cmd);
+    _ = item(edit, "Copy", "copy:", "c", cmd);
+    _ = item(edit, "Paste", "paste:", "v", cmd);
+    _ = item(edit, "Select All", "selectAll:", "a", cmd);
     separator(edit);
-    item(edit, "Find…", "findText:", "f", cmd);
-    item(edit, "Find Next", "findNext:", "g", cmd);
-    item(edit, "Find Previous", "findPrevious:", "g", cmd | shift);
-    item(edit, "Go to Line…", "gotoLine:", "l", cmd);
-    item(edit, "Toggle Comment", "toggleComment:", "/", cmd);
+    _ = item(edit, "Find…", "findText:", "f", cmd);
+    _ = item(edit, "Find and Replace…", "findAndReplace:", "f", cmd | opt);
+    _ = item(edit, "Find Next", "findNext:", "g", cmd);
+    _ = item(edit, "Find Previous", "findPrevious:", "g", cmd | shift);
+    _ = item(edit, "Go to Line…", "gotoLine:", "l", cmd);
+    _ = item(edit, "Toggle Comment", "toggleComment:", "/", cmd);
 
     const v = submenu(bar, "View");
-    item(v, "Bigger", "zoomIn:", "=", cmd);
-    item(v, "Smaller", "zoomOut:", "-", cmd);
-    item(v, "Actual Size", "zoomReset:", "0", cmd);
+    const fonts = item(v, "Font…", "orderFrontFontPanel:", "t", cmd);
+    msg(void, fonts, "setTarget:", .{msg(Id, objc.class("NSFontManager"), "sharedFontManager", .{})});
+    _ = item(v, "Bigger", "zoomIn:", "=", cmd);
+    _ = item(v, "Smaller", "zoomOut:", "-", cmd);
+    _ = item(v, "Actual Size", "zoomReset:", "0", cmd);
     separator(v);
-    item(v, "Enter Full Screen", "toggleFullScreen:", "f", cmd | ctrl);
+    view.wrap_item = item(v, "Soft Wrap", "toggleWrap:", "z", opt);
+    view.pairs_item = item(v, "Auto-Close Brackets", "togglePairs:", "", 0);
+    separator(v);
+    _ = item(v, "Enter Full Screen", "toggleFullScreen:", "f", cmd | ctrl);
 
     const w = submenu(bar, "Window");
-    item(w, "Minimize", "performMiniaturize:", "m", cmd);
-    item(w, "Zoom", "performZoom:", "", 0);
+    _ = item(w, "Minimize", "performMiniaturize:", "m", cmd);
+    _ = item(w, "Zoom", "performZoom:", "", 0);
     msg(void, app(), "setWindowsMenu:", .{w});
     msg(void, app(), "setMainMenu:", .{bar});
     msg(void, bar, "release", .{});
@@ -160,10 +215,19 @@ pub fn main(init: std.process.Init.Minimal) void {
     d.method("applicationShouldHandleReopen:hasVisibleWindows:", @ptrCast(&reopen), "c@:@c");
     d.method("newDocument:", @ptrCast(&newDocument), "v@:@");
     d.method("openDocument:", @ptrCast(&openDocument), "v@:@");
+    d.method("applicationDidBecomeActive:", @ptrCast(&becameActive), "v@:@");
+    d.method("applicationWillTerminate:", @ptrCast(&willTerminate), "v@:@");
+    d.method("openSettings:", @ptrCast(&openSettings), "v@:@");
+    d.method("toggleWrap:", @ptrCast(&toggleWrap), "v@:@");
+    d.method("togglePairs:", @ptrCast(&togglePairs), "v@:@");
+    d.method("menuNeedsUpdate:", @ptrCast(&fillRecent), "v@:@");
+    d.method("openRecent:", @ptrCast(&openRecent), "v@:@");
+    d.method("clearRecent:", @ptrCast(&clearRecent), "v@:@");
     const cls = d.finish();
-    msg(void, nsapp, "setDelegate:", .{msg(Id, msg(Id, cls, "alloc", .{}), "init", .{})});
+    const delegate = msg(Id, msg(Id, cls, "alloc", .{}), "init", .{});
+    msg(void, nsapp, "setDelegate:", .{delegate});
 
-    buildMenu();
+    buildMenu(delegate);
     view.setup();
     objc.objc_autoreleasePoolPop(pool);
     msg(void, nsapp, "run", .{});
