@@ -3797,7 +3797,7 @@ const row_fade = 0.12;
 /// Rows that change while typing crossfade over this long.
 const xfade_time = 0.08;
 /// Width of one glyph cell in a shortcut, and of the checkmark column.
-const key_cell = 11.0;
+const key_cell = 13.0;
 const check_col = 18.0;
 var panel_font: Id = null;
 var panel_small: Id = null;
@@ -3865,7 +3865,7 @@ fn panelRow(ctx: Id, d: *const Doc, th: *const Theme, p: usize, left: f64, right
         var at = right - keys_w;
         var it = (std.unicode.Utf8View.init(c.keys) catch return).iterator();
         while (it.nextCodepointSlice()) |g| : (at += key_cell) {
-            const line = uiLine(g, panel_small, key_cell);
+            const line = uiLine(g, panel_small, 1e5);
             defer if (line) |l| objc.CFRelease(l);
             const gw = if (line != null) objc.CTLineGetTypographicBounds(line, null, null, null) else 0;
             const base = @round((prow - objc.CTFontGetAscent(panel_small) - objc.CTFontGetDescent(panel_small)) / 2 + objc.CTFontGetAscent(panel_small));
