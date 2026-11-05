@@ -2496,7 +2496,7 @@ pub fn loadSettings() void {
     conf = settings.load(gpa, p);
     buildThemes();
     // A theme or appearance pick crossfades; zen's own change doesn't.
-    const faded = conf.look != old_look or (conf.zen == old_zen and !std.meta.eql(old_themes, themes));
+    const crossfade = conf.look != old_look or (conf.zen == old_zen and !std.meta.eql(old_themes, themes));
     side_w = conf.sidebar_width;
     conf_stamp = files.stamp(p);
     setFont();
@@ -2523,7 +2523,7 @@ pub fn loadSettings() void {
     };
     msg(void, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "setAppearance:", .{look});
     for (wins.items) |w| {
-        if (faded) fadeTheme(w);
+        if (crossfade) fadeTheme(w);
         w.dark = null;
         hideLights(w);
         w.side_find = true;

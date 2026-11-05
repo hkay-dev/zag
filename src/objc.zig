@@ -112,7 +112,6 @@ pub extern fn CGContextSetAlpha(ctx: Id, alpha: f64) void;
 pub extern fn CGContextBeginTransparencyLayer(ctx: Id, info: ?*anyopaque) void;
 pub extern fn CGContextEndTransparencyLayer(ctx: Id) void;
 pub extern fn CGContextClip(ctx: Id) void;
-pub extern fn CGContextScaleCTM(ctx: Id, sx: f64, sy: f64) void;
 pub const Size = extern struct { w: f64 = 0, h: f64 = 0 };
 pub extern fn CGColorCreateGenericGray(gray: f64, alpha: f64) ?*anyopaque;
 pub extern fn CGContextSetShadowWithColor(ctx: Id, offset: Size, blur: f64, color: ?*anyopaque) void;
