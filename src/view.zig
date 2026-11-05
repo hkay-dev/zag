@@ -604,12 +604,27 @@ const panel_time = 0.14;
 const menu_time = 0.24;
 /// The sidebar slides in and out, and the card's left edge rides with it.
 const slide_time = 0.24;
-/// A newly shown file's text fades in over this long, rising this far.
+/// A file freshly read from disk fades in over this long, rising this far.
+/// A tab switch just fades from `swap_from`, over `fade_time`, with no rise.
 const load_time = 0.18;
 const load_rise = 6.0;
-/// The scroll bar stays a second after the page stops, then fades.
+const swap_from = 0.35;
+/// The scroll bar stays a second after the page stops, then fades. It
+/// arrives over `bar_in` and leaves over `bar_time`.
 const bar_hold = 1.0;
+const bar_in = 0.08;
 const bar_time = 0.25;
+/// The prompt band slides up over `panel_time` and down over `band_out`;
+/// its words rise `words_lag` after the band starts.
+const band_out = 0.12;
+const words_lag = 0.03;
+/// "No matches" shakes the prompt's words this long.
+const shake_time = 0.3;
+/// An empty window's hint appears after `hint_delay`, over `hint_in`, and
+/// leaves over `fade_time`.
+const hint_delay = 0.4;
+const hint_in = 0.3;
+const hint_alpha = 0.6;
 const bar_w = 7.0;
 const bar_alpha = 0.45;
 /// Keyboard scrolls this many rows or fewer (stepping past the edge) snap.
@@ -667,6 +682,16 @@ fn moveCaret(d: *Doc, now: f64) void {
     msg(void, d.caret, "setFrame:", .{Rect{ .x = d.org.x + x, .y = d.org.y + y, .w = 2, .h = lh - 4 }});
     msg(void, d.caret, "setHidden:", .{!visible});
     msg(void, t, "commit", .{});
+}
+
+/// Fades the layer in from clear over `dur`, as an opacity animation.
+fn fadeIn(layer: Id, dur: f64) void {
+    const num = objc.class("NSNumber");
+    const a = msg(Id, objc.class("CABasicAnimation"), "animationWithKeyPath:", .{objc.str("opacity")});
+    msg(void, a, "setFromValue:", .{msg(Id, num, "numberWithDouble:", .{@as(f64, 0)})});
+    msg(void, a, "setToValue:", .{msg(Id, num, "numberWithDouble:", .{@as(f64, 1)})});
+    msg(void, a, "setDuration:", .{dur});
+    msg(void, layer, "addAnimation:forKey:", .{ a, objc.str("fade") });
 }
 
 /// Holds the caret solid for half a second, then fades it out, rests it
@@ -778,15 +803,21 @@ fn haptic(kind: enum { alignment, level }) void {
     msg(void, p, "performFeedbackPattern:performanceTime:", .{ pattern, @as(usize, 2) });
 }
 
+/// How long the file on show fades in: a fresh one rises slower than a tab switch.
+fn loadDur(d: *const Doc) f64 {
+    return if (d.rise) load_time else fade_time;
+}
+
 /// True while scrolling, the line band, a selection fade or the quick open
 /// list still has frames to draw.
 fn scenery(d: *const Doc, now: f64) bool {
     const stretched = d.relax and (d.ov[0] != 0 or d.ov[1] != 0);
     return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or now < d.focus_t0 + focus_time or d.panel.moving(now) or d.lit.moving(now) or
-        d.prompt_t.moving(now) or d.plus_t.moving(now) or !d.pick_s.settled() or tabsMoving(d, now) or
+        d.prompt_t.moving(now) or d.pbar.moving(now) or now < d.shake_t0 + shake_time or d.hint.moving(now) or (d.blank_t0 >= 0 and now < d.blank_t0 + hint_delay) or
+        d.plus_t.moving(now) or !d.pick_s.settled() or tabsMoving(d, now) or
         (d.pick_live and (now < d.rows_t0 + row_lag * 5 + row_fade or now < d.pick_t0 + xfade_time)) or
         !d.pop.settled() or now < d.prev_t0 + fade_time or now < d.stag_t0 + stag_cap + fade_time or (d.flash_n > 0 and now < d.flash_t0 + flash_hold + flash_time) or
-        now < d.load_t + load_time or (d.had_sel and now < d.sel_t0 + fade_time) or now < d.bar_t0 + bar_hold + bar_time;
+        now < d.load_t + loadDur(d) or (d.had_sel and now < d.sel_t0 + fade_time) or d.bar.moving(now);
 }
 
 const spring_k = 380.0;
@@ -847,7 +878,10 @@ fn pull(pos: *f64, o: *f64, delta: f64, lo: f64, hi: f64, dim: f64) void {
 /// moves the carets, and pauses once everything has settled.
 fn tick(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
-    if (w.busy) return msg(void, self, "setNeedsDisplay:", .{true});
+    if (w.busy) {
+        if (w.part) return msg(void, self, "setNeedsDisplayInRect:", .{Rect{ .w = side_w, .h = msg(Rect, self, "bounds", .{}).h }});
+        return msg(void, self, "setNeedsDisplay:", .{true});
+    }
     const now = CACurrentMediaTime();
     var gliding = false;
     for (docs.items) |d| if (d.win == w) {
@@ -855,6 +889,16 @@ fn tick(self: Id, _: Sel, _: Id) callconv(.c) void {
         if (d.cx.moving(now) or d.cy.moving(now)) gliding = true;
     };
     if (!gliding) msg(void, w.link, "setPaused:", .{true});
+}
+
+/// The scroll bar's hold is over: one redraw, and the fade out takes it from there.
+fn barHold(self: Id, _: Sel, _: Id) callconv(.c) void {
+    msg(void, self, "setNeedsDisplay:", .{true});
+}
+
+/// Whether two rectangles overlap.
+fn hits(a: Rect, b: Rect) bool {
+    return a.x < b.x + b.w and b.x < a.x + a.w and a.y < b.y + b.h and b.y < a.y + a.h;
 }
 
 // ---- documents ----
@@ -876,6 +920,8 @@ const Page = struct {
     /// `buf.changes` it last saved.
     draft: ?[:0]u8 = null,
     drafted: u64 = 0,
+    /// Just read from disk, so showing it rises in; set by the loaders.
+    fresh: bool = false,
 
     /// Closing its tab: an untitled file's draft goes too.
     fn deinit(p: *Page) void {
@@ -977,6 +1023,20 @@ const Doc = struct {
     /// The prompt line's words, rising in as it opens.
     prompt_t: Tween = .{ .dur = panel_time },
     prompt_on: bool = false,
+    /// The prompt's band, sliding up from the card's bottom (0 hidden, 1 in
+    /// place), and when it began opening. What it showed is kept in `held_*`
+    /// so it keeps drawing as it slides away.
+    pbar: Tween = .{ .dur = panel_time },
+    pbar_t0: f64 = 0,
+    held: std.ArrayList(u8) = .empty,
+    held_with: std.ArrayList(u8) = .empty,
+    held_mode: Mode = .find,
+    held_which: u1 = 0,
+    held_tally: [64]u8 = undefined,
+    held_n: usize = 0,
+    /// Find has no matches, and when its words last shook for it.
+    nomatch: bool = false,
+    shake_t0: f64 = -1,
     /// The scroll bar's opacity, when the page last moved, and where it was.
     bar: Tween = .{ .dur = bar_time },
     bar_t0: f64 = 0,
@@ -1052,8 +1112,16 @@ const Doc = struct {
     snap: bool = false,
     /// The window's other files, in tab order.
     pages: std.ArrayList(Page) = .empty,
-    /// When the window's file was last swapped in, for its text to fade in.
+    /// When the window's file was last swapped in, for its text to fade in:
+    /// rising when it was just read from disk, else a plain fade. The caret
+    /// fades in with it.
     load_t: f64 = -1,
+    rise: bool = false,
+    caret_fade: bool = false,
+    /// An empty window's hint: its opacity, and since when the card has
+    /// been blank (-1 when it isn't).
+    hint: Tween = .{ .dur = hint_in },
+    blank_t0: f64 = -1,
     /// The header's folder as a CoreText line, cut from the front with an
     /// ellipsis to fit `head_w`, made on first draw.
     head: Id = null,
@@ -1082,6 +1150,8 @@ const Doc = struct {
         if (d.list) |*l| l.deinit();
         d.prompt.deinit(gpa);
         d.with.deinit(gpa);
+        d.held.deinit(gpa);
+        d.held_with.deinit(gpa);
         d.query.deinit(gpa);
         d.states.deinit(gpa);
         d.kinds.deinit(gpa);
@@ -1110,6 +1180,8 @@ const Win = struct {
     dark: ?bool = null,
     /// The last draw had scenery still moving.
     busy: bool = false,
+    /// Only the sidebar's strip has frames to draw, so `tick` redraws just that.
+    part: bool = false,
     /// How far the sidebar is scrolled.
     side_y: f64 = 0,
     /// The mouse went down outside the cards' text (the sidebar, the title
@@ -1363,7 +1435,7 @@ fn loadPage(abs: [:0]const u8) ?Page {
         ed.select(c, c);
         sy = pl.sy;
     }
-    return .{ .ed = ed, .path = z, .lang = syntax.forPath(abs), .stamp = files.stamp(abs), .sx = 0, .sy = sy, .id = newId() };
+    return .{ .ed = ed, .path = z, .lang = syntax.forPath(abs), .stamp = files.stamp(abs), .sx = 0, .sy = sy, .id = newId(), .fresh = true };
 }
 
 fn pageIndex(d: *const Doc, abs: []const u8) ?usize {
@@ -1421,6 +1493,8 @@ fn install(d: *Doc, pg: Page) void {
     d.had_sel = false;
     d.snap = true;
     d.load_t = CACurrentMediaTime();
+    d.rise = pg.fresh;
+    d.caret_fade = true;
     if (d.path) |p| if (relOf(p)) |rel| {
         tree.reveal(gpa, rel);
         rebuildTree();
@@ -2358,7 +2432,7 @@ fn loadDraft(abs: [:0]const u8) ?Page {
         ed.deinit(gpa);
         return null;
     };
-    return .{ .ed = ed, .path = null, .lang = &syntax.plain, .stamp = null, .sx = 0, .sy = 0, .id = newId(), .draft = own, .drafted = ed.buf.changes };
+    return .{ .ed = ed, .path = null, .lang = &syntax.plain, .stamp = null, .sx = 0, .sy = 0, .id = newId(), .draft = own, .drafted = ed.buf.changes, .fresh = true };
 }
 
 /// At launch: drafts that no tab holds, left by a crash or a start that
@@ -3801,7 +3875,7 @@ const VRow = struct { line: usize, seg: Seg };
 
 /// Draws a window: its chrome, each card in its pane, then the sidebar and
 /// the buttons by the traffic lights.
-fn draw(w: *Win, ctx: Id) void {
+fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     const now = CACurrentMediaTime();
     const dark = isDark(w.view);
     const th = &themes[@intFromBool(dark)];
@@ -3826,21 +3900,32 @@ fn draw(w: *Win, ctx: Id) void {
     dropFolded(w, w.cards);
     const end_lx: f64 = if (shown) side_w else gap;
     place(w.cards, .{ .x = w.lx - gap, .w = r.w - w.lx + gap, .h = r.h }, .{ .x = end_lx - gap, .w = r.w - end_lx + gap, .h = r.h }, now);
+    objc.CGContextClipToRect(ctx, dirty);
     fill(ctx, chrome(th, dark), 0, 0, r.w, r.h);
     const key = msg(bool, w.window, "isKeyWindow", .{});
     const many = w.cards.pane == null;
     for (&w.hot_t, 1..) |*t, i| t.aim(if (w.hot == i) 1 else 0, now);
     w.key_a.aim(if (key) 1 else 0, now);
+    // The sidebar's own motion (its picked and hovered rows, the + button)
+    // redraws only its strip; anything else redraws the window.
     var busy = w.side_t.moving(now) or w.side_a.moving(now) or fold.t.moving(now) or fold.closing or cardsMoving(w.cards) or
-        !w.sel.settled() or w.sel_a.moving(now) or w.hot_t[0].moving(now) or w.hot_t[1].moving(now) or
+        w.hot_t[0].moving(now) or
         w.pv_a.moving(now) or w.ghost_a.moving(now) or w.menu_a.moving(now) or w.fly != null or
-        !w.hov.settled() or w.hov_a.moving(now) or !w.lift.settled() or w.key_a.moving(now);
+        !w.lift.settled() or w.key_a.moving(now);
+    const side_busy = !w.sel.settled() or w.sel_a.moving(now) or w.hot_t[1].moving(now) or !w.hov.settled() or w.hov_a.moving(now);
     for (w.pv) |s| busy = busy or !s.settled();
     var gliding = false;
     for (docs.items) |d| if (d.win == w) {
         // A card springing in or folding away fades with its size.
         const grown = std.math.clamp(@min((d.size.x - 2 * gap) / 160, (d.size.y - 2 * gap) / 100), 0, 1);
         if (grown <= 0.01) continue;
+        // A strip redraw that doesn't reach this card leaves it be.
+        const card_rect: Rect = .{ .x = d.org.x + gap - 2, .y = d.org.y, .w = d.size.x - gap + 2, .h = d.size.y };
+        if (!hits(dirty, card_rect)) {
+            busy = busy or d.busy;
+            gliding = gliding or d.cx.moving(now) or d.cy.moving(now);
+            continue;
+        }
         objc.CGContextSaveGState(ctx);
         objc.CGContextTranslateCTM(ctx, d.org.x, d.org.y);
         if (grown < 1) {
@@ -3872,8 +3957,10 @@ fn draw(w: *Win, ctx: Id) void {
         drawIcon(icon(.sidebar, dark, th), toggle_x - 10, hy - 10, 20);
     }
     drawDrag(w, ctx, th, now);
-    w.busy = busy;
-    if (busy or gliding) msg(void, w.link, "setPaused:", .{false});
+    // Only the sidebar's strip moves when its rows' highlights are all that does.
+    w.part = !busy and side_busy and shown and slid >= 1;
+    w.busy = busy or side_busy;
+    if (w.busy or gliding) msg(void, w.link, "setPaused:", .{false});
 }
 
 /// Draws a card in its pane's coordinates: the text, the prompt line and
@@ -3960,13 +4047,16 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     }
     syncStates(d, if (nvis > 0) vis[nvis - 1].line else 0);
 
-    // A newly shown file's text fades in, rising a few points into place.
-    const load = std.math.clamp((now - d.load_t) / load_time, 0, 1);
+    // A file freshly read from disk fades in, rising a few points into
+    // place. A tab switch just fades from a little dim, with no rise.
+    const load = std.math.clamp((now - d.load_t) / loadDur(d), 0, 1);
     const loaded = 1 - (1 - load) * (1 - load) * (1 - load);
     objc.CGContextSaveGState(ctx);
     if (loaded < 1) {
-        objc.CGContextSetAlpha(ctx, loaded);
-        objc.CGContextTranslateCTM(ctx, 0, (1 - loaded) * load_rise);
+        if (d.rise) {
+            objc.CGContextSetAlpha(ctx, loaded);
+            objc.CGContextTranslateCTM(ctx, 0, (1 - loaded) * load_rise);
+        } else objc.CGContextSetAlpha(ctx, swap_from + (1 - swap_from) * loaded);
     }
 
     // The caret line's band slides after the caret, and stays on its line
@@ -4097,7 +4187,9 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     k.focus = null;
     objc.CGContextRestoreGState(ctx);
 
-    // The overlay scroll bar shows while the page moves and fades out after.
+    // The overlay scroll bar fades in while the page moves, and out a second
+    // after it stops. The hold costs no frames: `drawPane`'s end sets a
+    // one-shot timer that redraws once it's over.
     // Nothing draws or waits when the whole file fits.
     const bar_room = textH(d);
     const range = scrollRange(d);
@@ -4106,9 +4198,13 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         if (d.vy != d.bar_vy) {
             d.bar_vy = d.vy;
             d.bar_t0 = now;
-            d.bar.snap(1);
+            if (d.bar.to != 1) d.bar.dur = bar_in;
+            d.bar.aim(1, now);
         }
-        if (now >= d.bar_t0 + bar_hold) d.bar.aim(0, now);
+        if (now >= d.bar_t0 + bar_hold) {
+            if (d.bar.to != 0) d.bar.dur = bar_time;
+            d.bar.aim(0, now);
+        }
         const alpha = d.bar.at(now);
         if (alpha > 0.01) {
             const track = bar_room - 4;
@@ -4123,11 +4219,17 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         const spot: [3]usize = .{ 0, here.row, here.col };
         // A shift-move that extends a selection snaps, like the selection's edge.
         if (has_sel and !std.mem.eql(usize, &spot, &d.spot)) d.snap = true;
-        placeCaret(d, now, tx + f(here.col) * cw - 1, top_h + f(here.row) * lh + 2, true, spot, key and load >= 1);
+        placeCaret(d, now, tx + f(here.col) * cw - 1, top_h + f(here.row) * lh + 2, true, spot, key);
+        // A newly shown file's caret fades in with its text.
+        if (d.caret_fade and key) {
+            d.caret_fade = false;
+            fadeIn(d.caret, loadDur(d));
+        }
     }
 
     // The quick open list, rising out of the prompt line.
-    const ty = by + 6 + baseline;
+    const band_y = card.y + card.h - barH();
+    const ty = band_y + 6 + baseline;
     const want_ph: f64 = if (listing(d) != null) f(d.npicks) * prow + 2 * ppad else 0;
     d.panel.aim(want_ph, now);
     const ph = d.panel.at(now);
@@ -4172,53 +4274,115 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     }
 
     // The prompt line: find, replace, go to line, quick open and the palette.
+    // Its band slides up from the card's bottom as it opens and back down as
+    // it closes, drawing what it last showed until it's gone. The text above
+    // already uses the final `bottom()`.
     var buf: [64]u8 = undefined;
     // A window that isn't key dims its header and prompt a step.
     const ink = if (key) th.fg else th.muted;
-    if (d.mode != .edit) {
-        fill(ctx, th.bg, card.x, by, card.w, barH());
-        fill(ctx, th.rule, card.x, by, card.w, 1);
-        // The prompt's words rise into place as it opens.
-        if (!d.prompt_on) d.prompt_t.snap(0);
+    const prompting = d.mode != .edit;
+    const nomatch = prompting and finding and d.found[1] == 0;
+    if (nomatch and !d.nomatch) d.shake_t0 = now;
+    d.nomatch = nomatch;
+    // "No matches" shakes the words sideways, settling over `shake_time`.
+    const shake_p = (now - d.shake_t0) / shake_time;
+    const shake = if (shake_p >= 0 and shake_p < 1) 6 * @sin(2 * std.math.pi * 3 * shake_p) * (1 - shake_p) else 0;
+    if (prompting) {
+        if (!d.prompt_on) {
+            d.prompt_t.snap(0);
+            d.pbar_t0 = now;
+        }
         d.prompt_on = true;
-        d.prompt_t.aim(1, now);
-        const rise = d.prompt_t.at(now);
+        if (d.pbar.to != 1) d.pbar.dur = panel_time;
+        d.pbar.aim(1, now);
+        // The words rise a beat after the band starts.
+        if (now >= d.pbar_t0 + words_lag) d.prompt_t.aim(1, now);
+        var tally: []const u8 = "";
+        if (finding) tally = if (d.found[1] == 0) "no matches" else std.fmt.bufPrint(&buf, "{d} of {d}", .{ @min(d.found[0], d.found[1]), d.found[1] }) catch "";
+        if (d.mode == .open and d.list != null) tally = std.fmt.bufPrint(&buf, "{d} files", .{d.list.?.paths.items.len}) catch "";
+        if (d.mode == .command) tally = std.fmt.bufPrint(&buf, "{d} commands", .{cmds.items.len}) catch "";
+        d.held_n = @min(tally.len, d.held_tally.len);
+        @memcpy(d.held_tally[0..d.held_n], tally[0..d.held_n]);
+        d.held_mode = d.mode;
+        d.held_which = d.which;
+        d.held.clearRetainingCapacity();
+        d.held.appendSlice(gpa, d.prompt.items) catch {};
+        d.held_with.clearRetainingCapacity();
+        d.held_with.appendSlice(gpa, d.with.items) catch {};
+    } else {
+        d.prompt_on = false;
+        if (d.pbar.to != 0) d.pbar.dur = band_out;
+        d.pbar.aim(0, now);
+    }
+    const slide = d.pbar.at(now);
+    if (prompting or slide > 0.002) {
+        const drop = (1 - slide) * barH();
         objc.CGContextSaveGState(ctx);
+        objc.CGContextTranslateCTM(ctx, 0, drop);
+        fill(ctx, th.bg, card.x, band_y, card.w, barH());
+        fill(ctx, th.rule, card.x, band_y, card.w, hair());
+        // The prompt's words rise into place as it opens.
+        const rise = d.prompt_t.at(now);
         if (rise < 1) {
             objc.CGContextSetAlpha(ctx, rise);
             objc.CGContextTranslateCTM(ctx, 0, (1 - rise) * 6);
         }
-        var x: f64 = tx;
-        const label = switch (d.mode) {
+        var x: f64 = tx + shake;
+        const label = switch (d.held_mode) {
             .find, .replace => "find",
             .line => "line",
             .command => "run",
             else => "open",
         };
         x += f(k.text(label, null, th, th.caret, x, ty, 0, 8) + 1) * cw;
-        if (d.fresh) {
+        if (prompting and d.fresh) {
             k.flush();
-            fill(ctx, th.sel, x, by + 6, f(editor.colOf(d.prompt.items, d.prompt.items.len)) * cw, lh);
+            fill(ctx, th.sel, x, band_y + 6, f(editor.colOf(d.held.items, d.held.items.len)) * cw, lh);
         }
-        x += f(k.text(d.prompt.items, null, th, ink, x, ty, 0, 400)) * cw;
+        x += f(k.text(d.held.items, null, th, ink, x, ty, 0, 400)) * cw;
         var cx = x;
-        if (d.mode == .replace) {
+        if (d.held_mode == .replace) {
             x += 2 * cw;
             x += f(k.text("with", null, th, th.caret, x, ty, 0, 8) + 1) * cw;
-            x += f(k.text(d.with.items, null, th, ink, x, ty, 0, 400)) * cw;
-            if (d.which == 1) cx = x;
+            x += f(k.text(d.held_with.items, null, th, ink, x, ty, 0, 400)) * cw;
+            if (d.held_which == 1) cx = x;
         }
         k.flush();
-        const width = if (d.which == 1 and d.mode == .replace) d.with.items.len else d.prompt.items.len;
-        placeCaret(d, now, cx, by + 8, false, .{ 1 + @as(usize, @intFromEnum(d.mode)) * 2 + d.which, width, 0 }, key);
-        var tally: []const u8 = "";
-        if (finding) tally = if (d.found[1] == 0) "no matches" else std.fmt.bufPrint(&buf, "{d} of {d}", .{ @min(d.found[0], d.found[1]), d.found[1] }) catch "";
-        if (d.mode == .open and d.list != null) tally = std.fmt.bufPrint(&buf, "{d} files", .{d.list.?.paths.items.len}) catch "";
-        if (d.mode == .command) tally = std.fmt.bufPrint(&buf, "{d} commands", .{cmds.items.len}) catch "";
+        if (prompting) {
+            const width = if (d.which == 1 and d.mode == .replace) d.with.items.len else d.prompt.items.len;
+            placeCaret(d, now, cx, band_y + 8 + drop, false, .{ 1 + @as(usize, @intFromEnum(d.mode)) * 2 + d.which, width, 0 }, key);
+        }
+        const tally = d.held_tally[0..d.held_n];
         _ = k.text(tally, null, th, th.muted, card.x + card.w - pad_x - f(tally.len) * cw, ty, 0, 64);
         k.flush();
         objc.CGContextRestoreGState(ctx);
-    } else d.prompt_on = false;
+    }
+
+    // An empty window says what to do: its hint fades in after a pause, so
+    // a restored session never flashes it, and out on the first key.
+    const blank = isBlank(d) and d.mode == .edit and !d.closing;
+    if (blank) {
+        if (d.blank_t0 < 0) d.blank_t0 = now;
+        if (now >= d.blank_t0 + hint_delay) {
+            if (d.hint.to != 1) d.hint.dur = hint_in;
+            d.hint.aim(1, now);
+        }
+    } else {
+        d.blank_t0 = -1;
+        if (d.hint.to != 0) d.hint.dur = fade_time;
+        d.hint.aim(0, now);
+    }
+    const hint_a = d.hint.at(now);
+    if (hint_a > 0.01) {
+        const line = "⌘P Quick Open   ⌘O Open   ⌘K Commands";
+        const n = std.unicode.utf8CountCodepoints(line) catch line.len;
+        k.flush();
+        objc.CGContextSaveGState(ctx);
+        objc.CGContextSetAlpha(ctx, hint_alpha * hint_a);
+        _ = k.text(line, null, th, th.muted, @round(card.x + (card.w - f(n) * cw) / 2), @round((top_h + by - lh) / 2) + baseline, 0, 80);
+        k.flush();
+        objc.CGContextRestoreGState(ctx);
+    }
 
     // The header, over any text scrolled under it: the file's name and
     // folder, or the window's tabs.
@@ -4254,6 +4418,12 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         if (lit > 0.01) ring(ctx, th.caret, 0.55 * lit, card.x, card.y, card.w, card.h, card_radius);
     }
     d.busy = scenery(d, now);
+    // The scroll bar's hold has no frames to draw: a one-shot timer redraws
+    // when it's over, and the fade out takes it from there.
+    if (d.bar.to == 1 and !d.busy) {
+        const left = @max(d.bar_t0 + bar_hold - now, 0) + 0.02;
+        msg(void, d.view, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("barHold:"), @as(Id, null), left });
+    }
 }
 
 /// The sidebar button by the traffic lights, or the + at the sidebar's
@@ -4914,10 +5084,10 @@ fn placeLights(w: *Win) void {
 
 // ---- NSView methods ----
 
-fn drawRect(self: Id, _: Sel, _: Rect) callconv(.c) void {
+fn drawRect(self: Id, _: Sel, dirty: Rect) callconv(.c) void {
     const w = winOf(self) orelse return;
     const gc = msg(Id, objc.class("NSGraphicsContext"), "currentContext", .{});
-    draw(w, msg(Id, gc, "CGContext", .{}));
+    draw(w, msg(Id, gc, "CGContext", .{}), dirty);
 }
 
 fn yes(_: Id, _: Sel) callconv(.c) bool {
@@ -5826,6 +5996,7 @@ pub fn setup() void {
     c.method("windowShouldClose:", @ptrCast(&windowShouldClose), "c@:@");
     c.method("windowWillClose:", @ptrCast(&windowWillClose), "v@:@");
     c.method("tick:", @ptrCast(&tick), "v@:@");
+    c.method("barHold:", @ptrCast(&barHold), "v@:@");
     c.method("saveDrafts:", @ptrCast(&saveDraftsNow), "v@:@");
     c.method("changeFont:", @ptrCast(&changeFont), "v@:@");
     c.method("menuForEvent:", @ptrCast(&menuForEvent), "@@:@");
