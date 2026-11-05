@@ -81,13 +81,22 @@ const lights_x = 15.0;
 const toggle_x = 96.0;
 /// The sidebar's width, shared by every window and kept in the settings file.
 var side_w: f64 = settings.sidebar_default;
+/// While the sidebar's edge is dragged past a limit it stretches, `side_stretch`
+/// pixels beyond `side_rest`, the width it stretches from; letting go springs
+/// it back. Dragging it in past `side_collapse` shuts the sidebar.
+var side_stretch: Spring = .{ .k = spring_k, .c = spring_c, .eps = 0.05 };
+var side_rest: f64 = settings.sidebar_default;
+const side_collapse = 100.0;
+/// The most it stretches, and how much of the mouse's travel it follows.
+const side_stretch_max = 24.0;
+const side_stretch_pull = 0.3;
 /// How far either side of the sidebar's edge grabs it.
 const edge_grab = 4.0;
 /// The sidebar's selection sits this far in from its edges, with rounded corners.
 const side_inset = 8.0;
 const side_radius = 7.0;
-/// The height of the sidebar's line above the folder's name.
-const label_h = 24.0;
+/// The size of a file's icon in the sidebar.
+const side_icon = 16.0;
 
 /// The sidebar shows when there's a folder, it's turned on, and the window
 /// is wide enough to keep room for the text.
@@ -122,6 +131,12 @@ fn chrome(th: *const Theme, dark: bool) Rgb {
     if (conf.zen) return th.bg;
     const k: f64 = if (dark) 0.78 else 0.955;
     return .{ th.bg[0] * k, th.bg[1] * k, th.bg[2] * k };
+}
+
+/// How much of the chrome color paints over the sidebar material: the rest
+/// shows through. Zen has no material.
+fn chromeAlpha(dark: bool) f64 {
+    return if (conf.zen) 1 else if (dark) 0.7 else 0.6;
 }
 
 /// Font, size, colors and toggles, from the settings file.
@@ -908,11 +923,12 @@ var win_ivar: usize = 0;
 const Win = struct {
     window: Id,
     view: Id,
+    /// The sidebar material behind the view, which draws its chrome over it.
+    fx: Id = null,
     link: Id = null,
     cards: *Node,
     /// The card that takes typing, the menu commands and sidebar clicks.
     focus: *Doc,
-    dark: ?bool = null,
     /// The last draw had scenery still moving.
     busy: bool = false,
     /// How far the sidebar is scrolled.
@@ -922,6 +938,8 @@ const Win = struct {
     side_down: bool = false,
     /// The mouse went down on the sidebar's edge and is dragging it.
     side_drag: bool = false,
+    /// Which limit the sidebar's edge is at while dragged: -1 least, 1 most, 0 none.
+    side_lim: i8 = 0,
     /// The gap between two cards that the mouse is dragging.
     grab: ?*Node = null,
     /// Scroll the sidebar to the focused card's file on the next draw.
@@ -980,7 +998,7 @@ const Win = struct {
     hov_row: ?usize = null,
     hov_gen: u32 = 0,
     hov_last: ?usize = null,
-    hov: Spring = .{ .k = 420, .c = 30, .eps = 0.05 },
+    hov: Spring = .{ .k = 700, .c = 53, .eps = 0.05 },
     hov_a: Tween = .{ .dur = fade_time },
 };
 
@@ -1723,7 +1741,19 @@ pub fn newDoc() ?*Doc {
     msg(void, win, "setTitlebarAppearsTransparent:", .{true});
     msg(void, win, "setTitleVisibility:", .{@as(isize, 1)});
     msg(void, win, "setMinSize:", .{Point{ .x = 360, .y = 240 }});
-    msg(void, win, "setContentView:", .{view});
+    // The sidebar material sits behind the view, which paints its chrome
+    // over it with some of the material showing through.
+    const fx = msg(Id, msg(Id, objc.class("NSVisualEffectView"), "alloc", .{}), "initWithFrame:", .{frame});
+    msg(void, fx, "setMaterial:", .{@as(isize, 7)});
+    msg(void, fx, "setBlendingMode:", .{@as(isize, 0)});
+    msg(void, fx, "setState:", .{@as(isize, 0)});
+    msg(void, view, "setAutoresizingMask:", .{@as(usize, 2 | 16)});
+    msg(void, fx, "addSubview:", .{view});
+    msg(void, win, "setContentView:", .{fx});
+    msg(void, fx, "release", .{});
+    w.fx = fx;
+    msg(void, win, "setOpaque:", .{false});
+    msg(void, win, "setBackgroundColor:", .{msg(Id, objc.class("NSColor"), "clearColor", .{})});
     hideLights(w);
     msg(void, view, "release", .{});
     msg(void, win, "setDelegate:", .{view});
@@ -2297,7 +2327,6 @@ pub fn loadSettings() void {
     };
     msg(void, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "setAppearance:", .{look});
     for (wins.items) |w| {
-        w.dark = null;
         hideLights(w);
         w.side_find = true;
         msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
@@ -2947,9 +2976,9 @@ fn tabName(d: *const Doc, j: usize, buf: *[48]u8) []const u8 {
 
 // ---- sidebar ----
 
-const Icon = enum { closed, opened, sidebar, plus, close };
+const Icon = enum { closed, opened, sidebar, plus, close, folder, parents };
 /// SF Symbols, which come with macOS, so they cost ze no size.
-const icon_names = [_][:0]const u8{ "chevron.right", "chevron.down", "sidebar.left", "plus", "xmark" };
+const icon_names = [_][:0]const u8{ "chevron.right", "chevron.down", "sidebar.left", "plus", "xmark", "folder.fill", "chevron.down" };
 /// Symbol images for the light and dark themes, tinted and made on first use.
 var icons: [2][icon_names.len]Id = @splat(@splat(null));
 
@@ -2961,13 +2990,9 @@ fn dropIcons() void {
     };
 }
 
-/// The Mac's own icon for a file of `name`'s kind, or for a folder, the
-/// same ones Finder shows. Made on first use per extension and kept.
-fn iconFor(name: []const u8, dir: bool) Id {
-    if (dir) {
-        if (folder_icon == null) folder_icon = msg(Id, msg(Id, objc.class("NSImage"), "imageNamed:", .{objc.str("NSFolder")}), "retain", .{});
-        return folder_icon;
-    }
+/// The Mac's own icon for a file of `name`'s kind, the same one Finder
+/// shows. Made on first use per extension and kept.
+fn iconFor(name: []const u8) Id {
     const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse 0;
     var low: [16]u8 = undefined;
     const ext = if (dot > 0 and name.len - dot - 1 <= low.len) name[dot + 1 ..] else "";
@@ -2982,7 +3007,6 @@ fn iconFor(name: []const u8, dir: bool) Id {
     return img;
 }
 
-var folder_icon: Id = null;
 /// By lowercase extension, "" for none.
 var kind_icons: std.StringHashMapUnmanaged(Id) = .empty;
 
@@ -2993,10 +3017,16 @@ fn icon(which: Icon, dark: bool, th: *const Theme) Id {
         .closed, .opened => .{ 0.6, 0.3 },
         .close => .{ 0.55, 0.3 },
         .sidebar, .plus => .{ 1.0, 0 },
+        .folder => .{ 15.0 / conf.size, 0 },
+        .parents => .{ 9.0 / conf.size, 0.4 },
     };
     const cfg = objc.class("NSImageSymbolConfiguration");
     const sized = msg(Id, cfg, "configurationWithPointSize:weight:", .{ conf.size * scale, weight });
-    const tint = msg(Id, cfg, "configurationWithPaletteColors:", .{msg(Id, objc.class("NSArray"), "arrayWithObject:", .{nscolor(th.muted)})});
+    // Folders take the caret's color in shades of it; the rest are muted.
+    const tint = if (which == .folder)
+        msg(Id, cfg, "configurationWithHierarchicalColor:", .{msg(Id, nscolor(th.caret), "colorWithAlphaComponent:", .{@as(f64, if (dark) 0.85 else 0.75)})})
+    else
+        msg(Id, cfg, "configurationWithPaletteColors:", .{msg(Id, objc.class("NSArray"), "arrayWithObject:", .{nscolor(th.muted)})});
     const img = msg(Id, objc.class("NSImage"), "imageWithSystemSymbolName:accessibilityDescription:", .{ objc.str(icon_names[@intFromEnum(which)]), @as(Id, null) });
     if (img == null) return null;
     const made = msg(Id, img, "imageWithSymbolConfiguration:", .{msg(Id, sized, "configurationByApplyingConfiguration:", .{tint})});
@@ -3010,7 +3040,11 @@ fn tileSize() f64 {
 
 /// A file's icon from `iconFor`, `tileSize` square, with its top left at `x`, `y`.
 fn tile(img: Id, x: f64, y: f64) void {
-    const s = tileSize();
+    tileAt(img, x, y, tileSize());
+}
+
+/// `tile` with sides of `s`.
+fn tileAt(img: Id, x: f64, y: f64, s: f64) void {
     if (img != null) msg(void, img, "drawInRect:fromRect:operation:fraction:respectFlipped:hints:", .{ Rect{ .x = x, .y = y, .w = s, .h = s }, Rect{}, @as(usize, 2), @as(f64, 1), true, @as(Id, null) });
 }
 
@@ -3045,10 +3079,10 @@ fn tilde(buf: []u8, p: []const u8) []const u8 {
     return std.fmt.bufPrint(buf, "~{s}", .{p[home.len..]}) catch p;
 }
 
-/// The sidebar's rows start under its pinned top: the folder's parent and
-/// the folder's name, which stay put while the rows scroll.
+/// The sidebar's rows start under its pinned top: the folder's name, which
+/// stays put while the rows scroll.
 fn listTop() f64 {
-    return top_h + label_h + side_h;
+    return top_h + side_h;
 }
 
 /// At most this many open folders pin under the folder's name.
@@ -3141,24 +3175,26 @@ fn finishFold() void {
     refreshAll();
 }
 
-/// The sidebar's selection: a soft rounded highlight with a thin outline,
-/// fainter when the window isn't key.
-fn selPill(ctx: Id, th: *const Theme, key: bool, y: f64) void {
+/// The sidebar's selection: a soft rounded fill with no outline, fainter
+/// when the window isn't key.
+fn selPill(ctx: Id, th: *const Theme, dark: bool, key: bool, y: f64) void {
     const hw = side_w - 2 * side_inset - 2;
-    pill(ctx, th.fg, if (key) 0.07 else 0.04, side_inset, y, hw, side_h, side_radius);
-    ring(ctx, th.fg, if (key) 0.09 else 0.05, side_inset, y, hw, side_h, side_radius);
+    const a: f64 = if (dark) (if (key) 0.12 else 0.07) else (if (key) 0.09 else 0.05);
+    pill(ctx, th.fg, a, side_inset, y, hw, side_h, side_radius);
 }
 
 /// One row of the tree with its top at `y`: chevron, icon, name and dot.
 /// `turn` is how far a folding folder's chevron has turned, 0 to 1. The file
-/// on show in the focused card has its name in bold.
+/// on show in the focused card has its name in bold, which fades in as the
+/// selection's highlight arrives and out as it leaves.
 fn drawRow(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, i: usize, y: f64, cur: ?[]const u8, turn: ?f64) void {
     const row = tree.rows.items[i];
-    const s = tileSize();
+    const s = side_icon;
+    const now = CACurrentMediaTime();
     const x = 16 + f(row.depth) * 16;
-    if (cur != null and std.mem.eql(u8, row.rel, cur.?)) selPill(ctx, th, key, y);
+    if (cur != null and std.mem.eql(u8, row.rel, cur.?)) selPill(ctx, th, dark, key, y);
     if (w.menu_row == i and w.menu_gen == tree_gen) {
-        const ma = w.menu_a.at(CACurrentMediaTime());
+        const ma = w.menu_a.at(now);
         if (ma > 0.01) menuMark(ctx, th, ma, side_inset, y, side_w - 2 * side_inset - 2, side_h, side_radius);
     }
     const iy = y + (side_h - s) / 2;
@@ -3175,35 +3211,40 @@ fn drawRow(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, i
         } else drawIcon(icon(if (tree.isOpen(row.rel)) .opened else .closed, dark, th), cx, cy, 12);
     }
     // A row whose file is being dragged out dims, and comes back as its copy goes.
-    const lift = rowLift(w, i, CACurrentMediaTime());
+    const lift = rowLift(w, i, now);
     if (lift > 0.01) {
         objc.CGContextSaveGState(ctx);
         objc.CGContextSetAlpha(ctx, 1 - 0.6 * lift);
     }
-    tile(iconFor(row.rel[row.base..], row.dir), x + 10, iy);
+    if (row.dir) drawIcon(icon(.folder, dark, th), x + 10, iy, s) else tileAt(iconFor(row.rel[row.base..]), x + 10, iy, s);
     const nx = x + 10 + s + 8;
     const room = side_w - nx - if (row.dir) @as(f64, 14) else 26;
-    const line = if (!row.dir and w.sel_row == i) bold: {
-        if (w.bold == null or w.bold_row != i or w.bold_gen != tree_gen) {
+    const plain = &side_lines.items[i];
+    if (plain.* == null) plain.* = uiLine(row.rel[row.base..], side_font, room);
+    // How far the selection's highlight is on this row, for the bold name.
+    const bp: f64 = if (row.dir or w.sel_row == null) 0 else (1 - std.math.clamp(@abs(w.sel.x - f(i) * side_h) / side_h, 0, 1)) * std.math.clamp(w.sel_a.at(now), 0, 1);
+    var nw = drawLineA(ctx, plain.*, th.fg, 1 - bp, nx, y + side_base);
+    if (bp > 0.001) {
+        const selected = w.sel_row == i;
+        if (selected and (w.bold == null or w.bold_row != i or w.bold_gen != tree_gen)) {
             if (w.bold) |l| objc.CFRelease(l);
             w.bold = uiLine(row.rel[row.base..], name_font, room);
             w.bold_row = i;
             w.bold_gen = tree_gen;
         }
-        break :bold w.bold;
-    } else plain: {
-        const l = &side_lines.items[i];
-        if (l.* == null) l.* = uiLine(row.rel[row.base..], side_font, room);
-        break :plain l.*;
-    };
-    const nw = drawLine(ctx, line, th.fg, nx, y + side_base);
+        // The row the highlight is leaving has no cached bold name.
+        const line = if (selected) w.bold else uiLine(row.rel[row.base..], name_font, room);
+        defer if (!selected) if (line) |l| objc.CFRelease(l);
+        const bw = drawLineA(ctx, line, th.fg, bp, nx, y + side_base);
+        nw += (bw - nw) * bp;
+    }
     if (lift > 0.01) objc.CGContextRestoreGState(ctx);
     if (!row.dir and rowDirty(w, row.rel)) _ = k.text(" •", null, th, th.caret, nx + nw, y + side_base, 0, 2);
 }
 
-/// The folder's parent and name pinned at the top, then a row per file and
-/// open folder down to the window's bottom. The open folders holding the
-/// rows at the top pin under the name, and the next folder pushes them up.
+/// The folder's name pinned at the top, then a row per file and open
+/// folder down to the window's bottom. The open folders holding the rows
+/// at the top pin under the name, and the next folder pushes them up.
 /// `fade` is the sidebar's alpha while it slides.
 fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, bg: Rgb, fade: f64, now: f64) void {
     k.flush();
@@ -3238,14 +3279,9 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
 
     objc.CGContextSaveGState(ctx);
     objc.CGContextClipToRect(ctx, .{ .y = top_h - 6, .w = side_w - 2, .h = full_h - top_h + 6 });
-    if (side_label == null) {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        // A long path loses its start, keeping the folders nearest the root.
-        side_label = uiLineCut(tilde(&buf, std.fs.path.dirname(root.?) orelse "/"), head_font, side_w - 32, 0);
-    }
-    _ = drawLine(ctx, side_label, th.muted, 16, top_h + label_h - 8);
-    if (side_head == null) side_head = uiLine(std.fs.path.basename(root.?), name_font, side_w - 32);
-    _ = drawLine(ctx, side_head, th.fg, 16, top_h + label_h + side_base);
+    if (side_head == null) side_head = uiLine(std.fs.path.basename(root.?), name_font, side_w - 32 - 14);
+    const hw = drawLine(ctx, side_head, th.fg, 16, top_h + side_base);
+    drawIcon(icon(.parents, dark, th), 16 + hw + 5, top_h + (side_h - 12) / 2, 12);
 
     objc.CGContextClipToRect(ctx, .{ .y = lt, .w = side_w - 2, .h = view_h });
     const folding = fold.t.moving(now) and fold.at < rows.len and std.mem.eql(u8, rows[fold.at].rel, fold.rel[0..fold.len]);
@@ -3253,9 +3289,9 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
     const off = if (folding) (1 - p) * f(fold.n) * side_h else 0;
     const rest_at = if (folding) fold.at + fold.n + 1 else rows.len;
 
-    // A softer highlight follows the mouse down the list, sliding from row
-    // to row on the selection's spring. It fades in where the mouse comes
-    // in and fades out where it leaves.
+    // A faint highlight follows the mouse down the list, sliding from row
+    // to row on a spring that settles without a bounce. It fades in where
+    // the mouse comes in and fades out where it leaves.
     const hov_a = w.hov_a.at(now);
     if (w.hov_row != null and w.hov_gen == tree_gen and w.hov_row.? < rows.len) {
         const i = w.hov_row.?;
@@ -3271,7 +3307,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
         w.hov_last = i;
         w.hov_a.aim(1, now);
     } else w.hov_a.aim(0, now);
-    if (hov_a > 0.01) pill(ctx, th.fg, (if (key) @as(f64, 0.045) else 0.03) * hov_a * fade, side_inset, lt + w.hov.step(now) - sy, side_w - 2 * side_inset - 2, side_h, side_radius);
+    if (hov_a > 0.01) pill(ctx, th.fg, (if (dark) @as(f64, 0.035) else 0.025) * (if (key) @as(f64, 1) else 0.7) * hov_a * fade, side_inset, lt + w.hov.step(now) - sy, side_w - 2 * side_inset - 2, side_h, side_radius);
 
     // The selection hops from row to row with a little bounce, and rides
     // along when folders above it open or close.
@@ -3301,7 +3337,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
     if (sel_a > 0.01) {
         objc.CGContextSaveGState(ctx);
         objc.CGContextSetAlpha(ctx, sel_a * fade);
-        selPill(ctx, th, key, lt + w.sel.step(now) - sy);
+        selPill(ctx, th, dark, key, lt + w.sel.step(now) - sy);
         objc.CGContextRestoreGState(ctx);
     }
 
@@ -3338,7 +3374,8 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
         while (e < rows.len and rows[e].depth > rows[a].depth) e += 1;
         const y = @min(lt + f(j) * side_h, lt + f(e) * side_h - sy - side_h);
         w.stuck_y[j] = y;
-        fill(ctx, bg, 0, y, side_w, side_h);
+        objc.CGContextClearRect(ctx, .{ .y = y, .w = side_w, .h = side_h });
+        fillA(ctx, bg, chromeAlpha(dark), 0, y, side_w, side_h);
         drawRow(w, ctx, th, k, dark, key, a, y, cur, null);
         low = @max(low, y + side_h);
     }
@@ -3350,9 +3387,8 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
 }
 
 /// The sidebar's text as CoreText lines in the system font, made on first
-/// draw: the folder's parent and name, then one per tree row. Dropped when
-/// the tree or the font changes; drawing one costs no layout.
-var side_label: Id = null;
+/// draw: the folder's name, then one per tree row. Dropped when the tree or
+/// the font changes; drawing one costs no layout.
 var side_head: Id = null;
 var side_lines: std.ArrayList(Id) = .empty;
 
@@ -3361,10 +3397,10 @@ fn dropSideLines() void {
         objc.CFRelease(l);
         w.bold = null;
     };
-    for ([_]*Id{ &side_label, &side_head }) |p| if (p.*) |l| {
+    if (side_head) |l| {
         objc.CFRelease(l);
-        p.* = null;
-    };
+        side_head = null;
+    }
     for (side_lines.items) |l| if (l) |p| objc.CFRelease(p);
     side_lines.clearRetainingCapacity();
 }
@@ -3408,8 +3444,13 @@ fn attributed(s: []const u8, attrs: Id) Id {
 
 /// Draws a `uiLine` with its baseline at `y`, in `c`. Returns its width.
 fn drawLine(ctx: Id, line: Id, c: Rgb, x: f64, y: f64) f64 {
+    return drawLineA(ctx, line, c, 1, x, y);
+}
+
+/// `drawLine` at `a` of full strength.
+fn drawLineA(ctx: Id, line: Id, c: Rgb, a: f64, x: f64, y: f64) f64 {
     if (line == null) return 0;
-    objc.CGContextSetRGBFillColor(ctx, c[0], c[1], c[2], 1);
+    objc.CGContextSetRGBFillColor(ctx, c[0], c[1], c[2], a);
     objc.CGContextSetTextPosition(ctx, x, y);
     objc.CTLineDraw(line, ctx);
     // The grid's glyph runs read the text matrix's offset too, so put it back.
@@ -3453,13 +3494,21 @@ fn draw(w: *Win, ctx: Id) void {
     const now = CACurrentMediaTime();
     const dark = isDark(w.view);
     const th = &themes[@intFromBool(dark)];
-    if (w.dark != dark) {
-        w.dark = dark;
-        msg(void, w.window, "setBackgroundColor:", .{nscolor(chrome(th, dark))});
-    }
     const r = msg(Rect, w.view, "bounds", .{});
     dev_px = 1 / @max(1, msg(f64, w.window, "backingScaleFactor", .{}));
     placeLights(w);
+    // A stretched sidebar edge springs back to its limit.
+    if (side_stretch.x != 0 or side_stretch.v != 0) {
+        _ = side_stretch.step(now);
+        if (side_stretch.to == 0 and side_stretch.settled()) side_stretch.snap(0);
+        const stretched = @round(side_rest + side_stretch.x);
+        if (stretched != side_w) {
+            side_w = stretched;
+            dropSideLines();
+        }
+    }
+    // The material behind the window shows everywhere but in Zen.
+    if (msg(bool, w.fx, "isHidden", .{}) != conf.zen) msg(void, w.fx, "setHidden:", .{conf.zen});
     // A closing folder shuts once its rows have folded away.
     if (fold.closing and !fold.t.moving(now)) finishFold();
     // The sidebar slides in and out, on the first draw it's just there.
@@ -3468,20 +3517,27 @@ fn draw(w: *Win, ctx: Id) void {
     if (w.side_seen) w.side_a.aim(want, now) else w.side_a.snap(want);
     w.side_seen = true;
     const slid = std.math.clamp(w.side_a.at(now), 0, 1);
+    // Once a sidebar that was dragged shut has slid away, its width goes
+    // back to the saved one for when it opens again.
+    if (!conf.sidebar and slid <= 0 and side_w != conf.sidebar_width) {
+        side_w = conf.sidebar_width;
+        dropSideLines();
+    }
     w.lx = @max(gap, side_w * slid);
     // The cards fill the room right of the sidebar, their panes reaching a
     // gap back over it so each card sits a gap in.
     dropFolded(w, w.cards);
     const end_lx: f64 = if (shown) side_w else gap;
     place(w.cards, .{ .x = w.lx - gap, .w = r.w - w.lx + gap, .h = r.h }, .{ .x = end_lx - gap, .w = r.w - end_lx + gap, .h = r.h }, now);
-    fill(ctx, chrome(th, dark), 0, 0, r.w, r.h);
+    objc.CGContextClearRect(ctx, .{ .w = r.w, .h = r.h });
+    fillA(ctx, chrome(th, dark), chromeAlpha(dark), 0, 0, r.w, r.h);
     const key = msg(bool, w.window, "isKeyWindow", .{});
     const many = w.cards.pane == null;
     for (&w.hot_t, 1..) |*t, i| t.aim(if (w.hot == i) 1 else 0, now);
     var busy = w.side_t.moving(now) or w.side_a.moving(now) or fold.t.moving(now) or fold.closing or cardsMoving(w.cards) or
         !w.sel.settled() or w.sel_a.moving(now) or w.hot_t[0].moving(now) or w.hot_t[1].moving(now) or
         w.pv_a.moving(now) or w.ghost_a.moving(now) or w.menu_a.moving(now) or w.fly != null or
-        !w.hov.settled() or w.hov_a.moving(now);
+        !w.hov.settled() or w.hov_a.moving(now) or !side_stretch.settled();
     for (w.pv) |s| busy = busy or !s.settled();
     var gliding = false;
     for (docs.items) |d| if (d.win == w) {
@@ -3917,7 +3973,7 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
         var nb: [48]u8 = undefined;
         const nm = tabName(d, j, &nb);
         s.line = uiLine(nm, name_font, 1e5);
-        s.icon = iconFor(if (tabPath(d, j) != null) nm else "", false);
+        s.icon = iconFor(if (tabPath(d, j) != null) nm else "");
     };
 
     // Squeeze the tabs to a common cap when they don't all fit, down to
@@ -4257,7 +4313,7 @@ fn ghostOf(t: *const TabDrag) ?struct { line: Id, icon: Id } {
         const s = d.slots.items[slotOf(d, t.id) orelse return null];
         return .{ .line = s.line, .icon = s.icon };
     }
-    return .{ .line = t.name, .icon = iconFor(std.fs.path.basename(t.file.?), false) };
+    return .{ .line = t.name, .icon = iconFor(std.fs.path.basename(t.file.?)) };
 }
 
 /// The width of the dragged tab's copy under the mouse.
@@ -4486,6 +4542,10 @@ fn yes(_: Id, _: Sel) callconv(.c) bool {
     return true;
 }
 
+fn no(_: Id, _: Sel) callconv(.c) bool {
+    return false;
+}
+
 fn keyDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const d = docOf(self) orelse return;
     d.note = "";
@@ -4658,10 +4718,15 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const side = sideShown(w);
     if (side and p.y >= top_h and @abs(p.x - side_w) <= edge_grab) {
         w.side_drag = true;
+        w.side_lim = 0;
+        if (side_stretch.x == 0) side_rest = side_w;
+        side_stretch.snap(0);
+        side_w = side_rest;
         return;
     }
     if (side and p.x < side_w) {
         if (p.y < top_h) return titleStrip(w, ev);
+        if (p.y < listTop()) return parentsMenu(w);
         return sideClick(w, p, msg(usize, ev, "modifierFlags", .{}));
     }
     if (gapAt(w.cards, p)) |n| {
@@ -4720,13 +4785,44 @@ fn cardDown(d: *Doc, p: Point, ev: Id) void {
 }
 
 /// Moves the sidebar's edge to `x` in every window, within its limits and
-/// leaving room for the text.
+/// leaving room for the text. Past a limit it stretches against the
+/// mouse, and dragged right in, the sidebar shuts.
 fn resizeSide(w: *Win, x: f64) void {
+    if (x < side_collapse) {
+        const was = side_w;
+        w.side_drag = false;
+        w.side_lim = 0;
+        side_stretch.snap(0);
+        toggleSidebar();
+        // It slides away at the width it had.
+        side_w = was;
+        for (wins.items) |o| msg(void, o.window, "invalidateCursorRectsForView:", .{o.view});
+        return;
+    }
     const room = msg(Rect, w.view, "bounds", .{}).w - 360;
-    const to = @round(std.math.clamp(x, settings.sidebar_min, @max(settings.sidebar_min, @min(settings.sidebar_max, room))));
-    msg(void, msg(Id, objc.class("NSCursor"), "resizeLeftRightCursor", .{}), "set", .{});
-    if (to == side_w) return;
-    side_w = to;
+    const lo = settings.sidebar_min;
+    const hi = @max(lo, @min(settings.sidebar_max, room));
+    const to = @round(std.math.clamp(x, lo, hi));
+    const over: f64 = if (x < lo)
+        -@min(side_stretch_max, (lo - x) * side_stretch_pull)
+    else if (x > hi)
+        @min(@max(0, @min(side_stretch_max, room - hi)), (x - hi) * side_stretch_pull)
+    else
+        0;
+    const lim: i8 = if (x <= lo) -1 else if (x >= hi) 1 else 0;
+    if (lim != w.side_lim) {
+        w.side_lim = lim;
+        if (lim != 0) haptic(.alignment);
+    }
+    // At a limit the edge can only go one way.
+    const NSCursor = objc.class("NSCursor");
+    const cursor = if (lim < 0) msg(Id, NSCursor, "resizeRightCursor", .{}) else if (lim > 0) msg(Id, NSCursor, "resizeLeftCursor", .{}) else msg(Id, NSCursor, "resizeLeftRightCursor", .{});
+    msg(void, cursor, "set", .{});
+    side_rest = to;
+    side_stretch.snap(over);
+    const now_w = @round(to + over);
+    if (now_w == side_w) return;
+    side_w = now_w;
     dropSideLines();
     refreshAll();
 }
@@ -4807,10 +4903,17 @@ fn mouseUp(self: Id, _: Sel, _: Id) callconv(.c) void {
     }
     if (!w.side_drag) return;
     w.side_drag = false;
+    w.side_lim = 0;
     for (wins.items) |o| msg(void, o.window, "invalidateCursorRectsForView:", .{o.view});
-    if (side_w == conf.sidebar_width) return;
-    var buf: [24]u8 = undefined;
-    store("sidebar-width", settings.decimal(&buf, side_w));
+    if (side_rest != conf.sidebar_width) {
+        var buf: [24]u8 = undefined;
+        store("sidebar-width", settings.decimal(&buf, side_rest));
+    }
+    // Let go past a limit and the edge springs back.
+    if (side_stretch.x != 0) {
+        side_stretch.aim(0, CACurrentMediaTime());
+        refreshAll();
+    }
 }
 
 fn mouseDragged(self: Id, _: Sel, ev: Id) callconv(.c) void {
@@ -4944,6 +5047,38 @@ fn newMenu() Id {
 
 fn separator(m: Id) void {
     msg(void, m, "addItem:", .{msg(Id, objc.class("NSMenuItem"), "separatorItem", .{})});
+}
+
+/// A click on the folder's name: a menu of the folder and the folders above
+/// it, each with its icon. Picking one shows it in Finder.
+fn parentsMenu(w: *Win) void {
+    const m = newMenu();
+    defer msg(void, m, "release", .{});
+    const ws = msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{});
+    const fm = msg(Id, objc.class("NSFileManager"), "defaultManager", .{});
+    var path: []const u8 = root.?;
+    var n: isize = 0;
+    while (true) : (n += 1) {
+        const at = objc.str(path);
+        const it = menuItem(m, objc.utf8(msg(Id, fm, "displayNameAtPath:", .{at})), "sideParent:", "");
+        msg(void, it, "setTag:", .{n});
+        const img = msg(Id, msg(Id, ws, "iconForFile:", .{at}), "copy", .{});
+        msg(void, img, "setSize:", .{Point{ .x = 16, .y = 16 }});
+        msg(void, it, "setImage:", .{img});
+        msg(void, img, "release", .{});
+        if (path.len <= 1) break;
+        path = std.fs.path.dirname(path) orelse break;
+    }
+    _ = msg(bool, m, "popUpMenuPositioningItem:atLocation:inView:", .{ @as(Id, null), Point{ .x = 16, .y = listTop() }, w.view });
+}
+
+/// A folder picked in the folder name's menu, by how many levels above the
+/// open folder it is (its tag).
+fn sideParent(_: Id, _: Sel, item: Id) callconv(.c) void {
+    var path: []const u8 = root orelse return;
+    for (0..@as(usize, @intCast(msg(isize, item, "tag", .{})))) |_| path = std.fs.path.dirname(path) orelse break;
+    if (!setMenuPath(path)) return;
+    revealInFinder(null, null, null);
 }
 
 fn setMenuPath(p: []const u8) bool {
@@ -5337,7 +5472,7 @@ pub fn setup() void {
     c.ivar("win");
     c.method("drawRect:", @ptrCast(&drawRect), "v@:{CGRect=dddd}");
     c.method("isFlipped", @ptrCast(&yes), "c@:");
-    c.method("isOpaque", @ptrCast(&yes), "c@:");
+    c.method("isOpaque", @ptrCast(&no), "c@:");
     c.method("acceptsFirstResponder", @ptrCast(&yes), "c@:");
     c.method("keyDown:", @ptrCast(&keyDown), "v@:@");
     c.method("insertText:", @ptrCast(&insertText), "v@:@");
@@ -5370,6 +5505,7 @@ pub fn setup() void {
     c.method("tabSplitDown:", @ptrCast(&tabSplitDown), "v@:@");
     c.method("menuDidClose:", @ptrCast(&menuDidClose), "v@:@");
     c.method("revealInFinder:", @ptrCast(&revealInFinder), "v@:@");
+    c.method("sideParent:", @ptrCast(&sideParent), "v@:@");
     c.method("copyPath:", @ptrCast(&copyPath), "v@:@");
     c.method("runCommand:", @ptrCast(&runCommand), "v@:@");
     const actions = .{
