@@ -27,6 +27,9 @@ A thin scroll bar shows on the right edge of the text while the page scrolls, wi
 sized and placed by how much of the file is in view, and fades out a second after it stops. A file
 that fits in the window never shows one.
 
+Right-click (or control-click) in the text for **Cut**, **Copy**, **Paste**, **Select All** and
+**Toggle Comment**, the same commands as the Edit menu.
+
 The window's top strip is its title bar, with the editor drawn behind it: it shows the file's name
 and proxy icon (⌘-click the name for the folder path menu, drag the icon to drag the file; an
 untitled file has no icon), and the close button shows a dot while there are unsaved changes. Drag
@@ -71,6 +74,8 @@ is marked with a rounded highlight set in from the sidebar's edges, like Finder'
   its unsaved changes and undo, so switching never asks you to save. A dot next to a file in the
   sidebar means it has unsaved changes.
 - ⌘-click a file to open it in a new window.
+- Right-click (or control-click) a file for **Open in New Window**, **Reveal in Finder** and
+  **Copy Path**. A folder has the last two.
 - **View > Previous File** (⌃Tab) goes back to the file the window showed before.
 - **View > Sidebar** (⌘\) shows or hides the sidebar in every window. It also hides when a window
   is too narrow to fit it beside the text.

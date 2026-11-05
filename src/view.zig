@@ -2406,6 +2406,81 @@ fn performDrag(_: Id, _: Sel, sender: Id) callconv(.c) bool {
     return n > 0;
 }
 
+// ---- context menus ----
+
+/// Built on the first right-click and kept. Their items have no target, so
+/// they reach the key window's view through the responder chain.
+var text_menu: Id = null;
+var side_menu: Id = null;
+var side_open_item: Id = null;
+/// The sidebar row the menu was opened on.
+var menu_path: [std.fs.max_path_bytes]u8 = undefined;
+var menu_len: usize = 0;
+
+fn menuItem(menu: Id, title: []const u8, sel: [:0]const u8, key: []const u8) Id {
+    const it = msg(Id, msg(Id, objc.class("NSMenuItem"), "alloc", .{}), "initWithTitle:action:keyEquivalent:", .{ objc.str(title), objc.sel_registerName(sel), objc.str(key) });
+    if (key.len > 0) msg(void, it, "setKeyEquivalentModifierMask:", .{cmd_key});
+    msg(void, menu, "addItem:", .{it});
+    msg(void, it, "release", .{});
+    return it;
+}
+
+fn newMenu() Id {
+    return objc.new("NSMenu");
+}
+
+/// Right-click and control-click: Edit's commands over the text, the file's
+/// commands over a sidebar row, and nothing elsewhere.
+fn menuForEvent(self: Id, _: Sel, ev: Id) callconv(.c) Id {
+    const d = docOf(self) orelse return null;
+    const p = local(self, ev);
+    if (p.y < top_h - 8 or p.y >= bounds(d).h - barH()) return null;
+    if (p.x >= left(d)) {
+        if (text_menu == null) {
+            const m = newMenu();
+            _ = menuItem(m, "Cut", "cut:", "x");
+            _ = menuItem(m, "Copy", "copy:", "c");
+            _ = menuItem(m, "Paste", "paste:", "v");
+            _ = menuItem(m, "Select All", "selectAll:", "a");
+            msg(void, m, "addItem:", .{msg(Id, objc.class("NSMenuItem"), "separatorItem", .{})});
+            _ = menuItem(m, "Toggle Comment", "toggleComment:", "/");
+            text_menu = m;
+        }
+        return text_menu;
+    }
+    const at = @floor((p.y - top_h + d.side_y) / lh);
+    if (at < 1 or at > f(tree.rows.items.len)) return null;
+    const row = tree.rows.items[@as(usize, @intFromFloat(at)) - 1];
+    const path = std.fmt.bufPrint(&menu_path, "{s}/{s}", .{ root.?, row.rel }) catch return null;
+    menu_len = path.len;
+    if (side_menu == null) {
+        const m = newMenu();
+        msg(void, m, "setAutoenablesItems:", .{false});
+        side_open_item = menuItem(m, "Open in New Window", "openInNewWindow:", "");
+        _ = menuItem(m, "Reveal in Finder", "revealInFinder:", "");
+        _ = menuItem(m, "Copy Path", "copyPath:", "");
+        side_menu = m;
+    }
+    msg(void, side_open_item, "setEnabled:", .{!row.dir});
+    return side_menu;
+}
+
+fn openInNewWindow(_: Id, _: Sel, _: Id) callconv(.c) void {
+    open(menu_path[0..menu_len], null);
+}
+
+fn revealInFinder(_: Id, _: Sel, _: Id) callconv(.c) void {
+    const url = msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(menu_path[0..menu_len])});
+    const urls = msg(Id, objc.class("NSArray"), "arrayWithObject:", .{url});
+    msg(void, msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{}), "activateFileViewerSelectingURLs:", .{urls});
+}
+
+fn copyPath(_: Id, _: Sel, _: Id) callconv(.c) void {
+    const pb = pasteboard();
+    _ = msg(isize, pb, "clearContents", .{});
+    _ = msg(bool, pb, "setString:forType:", .{ objc.str(menu_path[0..menu_len]), NSPasteboardTypeString });
+}
+
 fn windowShouldClose(self: Id, _: Sel, _: Id) callconv(.c) bool {
     const d = docOf(self) orelse return true;
     return settle(d);
@@ -2578,6 +2653,10 @@ pub fn setup() void {
     c.method("windowWillClose:", @ptrCast(&windowWillClose), "v@:@");
     c.method("tick:", @ptrCast(&tick), "v@:@");
     c.method("changeFont:", @ptrCast(&changeFont), "v@:@");
+    c.method("menuForEvent:", @ptrCast(&menuForEvent), "@@:@");
+    c.method("openInNewWindow:", @ptrCast(&openInNewWindow), "v@:@");
+    c.method("revealInFinder:", @ptrCast(&revealInFinder), "v@:@");
+    c.method("copyPath:", @ptrCast(&copyPath), "v@:@");
     c.method("runCommand:", @ptrCast(&runCommand), "v@:@");
     const actions = .{
         .{ "copy:", copy },             .{ "cut:", cut },               .{ "paste:", paste },
