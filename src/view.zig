@@ -65,7 +65,10 @@ const Theme = settings.Theme;
 
 const pad_x = 28.0;
 const top_h = 40.0;
-const side_w = 250.0;
+/// The sidebar's width, shared by every window and kept in the settings file.
+var side_w: f64 = settings.sidebar_default;
+/// How far either side of the sidebar's edge grabs it.
+const edge_grab = 4.0;
 /// The sidebar's selection sits this far in from its edges, with rounded corners.
 const side_inset = 8.0;
 const side_radius = 5.0;
@@ -566,6 +569,8 @@ const Doc = struct {
     side_y: f64 = 0,
     /// The mouse went down in the sidebar, so drags don't select text.
     side_down: bool = false,
+    /// The mouse went down on the sidebar's edge and is dragging it.
+    side_drag: bool = false,
     /// Scroll the sidebar to the window's file on the next draw.
     side_find: bool = false,
 
@@ -1096,6 +1101,7 @@ pub fn loadSettings() void {
     const p = conf_path orelse return;
     const old_lh = lh;
     conf = settings.load(gpa, p);
+    side_w = conf.sidebar_width;
     conf_stamp = files.stamp(p);
     setFont();
     if (wrap_item != null) msg(void, wrap_item, "setState:", .{@as(isize, @intFromBool(conf.wrap))});
@@ -2227,6 +2233,10 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
         }
     }
     if (p.y >= by) return;
+    if (sideShown(d) and @abs(p.x - side_w) <= edge_grab) {
+        d.side_drag = true;
+        return;
+    }
     d.side_down = p.x < left(d);
     if (d.side_down) return sideClick(d, p, msg(usize, ev, "modifierFlags", .{}));
     d.mode = .edit;
@@ -2246,8 +2256,33 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     refresh(d);
 }
 
+/// Moves the sidebar's edge to `x` in every window, within its limits and
+/// leaving room for the text.
+fn resizeSide(d: *Doc, x: f64) void {
+    const room = bounds(d).w - 360;
+    const w = @round(std.math.clamp(x, settings.sidebar_min, @max(settings.sidebar_min, @min(settings.sidebar_max, room))));
+    msg(void, msg(Id, objc.class("NSCursor"), "resizeLeftRightCursor", .{}), "set", .{});
+    if (w == side_w) return;
+    side_w = w;
+    dropSideLines();
+    refreshAll();
+}
+
+/// Ends a sidebar drag by saving the width, so new windows and the next
+/// launch use it.
+fn mouseUp(self: Id, _: Sel, _: Id) callconv(.c) void {
+    const d = docOf(self) orelse return;
+    if (!d.side_drag) return;
+    d.side_drag = false;
+    for (docs.items) |o| msg(void, o.window, "invalidateCursorRectsForView:", .{o.view});
+    if (side_w == conf.sidebar_width) return;
+    var buf: [24]u8 = undefined;
+    store("sidebar-width", settings.decimal(&buf, side_w));
+}
+
 fn mouseDragged(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const d = docOf(self) orelse return;
+    if (d.side_drag) return resizeSide(d, local(self, ev).x);
     if (d.side_down) return;
     d.snap = true;
     const p = local(self, ev);
@@ -2309,6 +2344,10 @@ fn resetCursorRects(self: Id, _: Sel) callconv(.c) void {
         r.w -= lx;
     }
     msg(void, self, "addCursorRect:cursor:", .{ r, msg(Id, objc.class("NSCursor"), "IBeamCursor", .{}) });
+    if (docOf(self)) |d| if (sideShown(d)) {
+        const y = top_h - 8;
+        msg(void, self, "addCursorRect:cursor:", .{ Rect{ .x = side_w - edge_grab, .y = y, .w = 2 * edge_grab, .h = bounds(d).h - barH() - y }, msg(Id, objc.class("NSCursor"), "resizeLeftRightCursor", .{}) });
+    };
 }
 
 /// Also the window delegate's key and resign key calls, so the caret shows
@@ -2477,6 +2516,7 @@ pub fn setup() void {
     c.method("doCommandBySelector:", @ptrCast(&doCommand), "v@::");
     c.method("mouseDown:", @ptrCast(&mouseDown), "v@:@");
     c.method("mouseDragged:", @ptrCast(&mouseDragged), "v@:@");
+    c.method("mouseUp:", @ptrCast(&mouseUp), "v@:@");
     c.method("scrollWheel:", @ptrCast(&scrollWheel), "v@:@");
     c.method("resetCursorRects", @ptrCast(&resetCursorRects), "v@:");
     c.method("viewDidChangeEffectiveAppearance", @ptrCast(&appearanceChanged), "v@:");

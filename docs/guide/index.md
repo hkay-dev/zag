@@ -68,6 +68,8 @@ is marked with a rounded highlight set in from the sidebar's edges, like Finder'
 - **View > Previous File** (⌃Tab) goes back to the file the window showed before.
 - **View > Sidebar** (⌘\) shows or hides the sidebar in every window. It also hides when a window
   is too narrow to fit it beside the text.
+- Drag the sidebar's right edge to make it wider or narrower, from 150 to 500 points. Every
+  window follows, and new windows and the next start use the width you left it at.
 
 The sidebar reads the disk again when you come back to ze, so new and deleted files show up.
 
@@ -190,6 +192,7 @@ line-height = 1.75       # as a multiple of the size
 wrap = off
 pairs = on               # auto-close brackets and quotes
 sidebar = on             # the folder's files on the left
+sidebar-width = 250      # in points, from 150 to 500
 appearance = auto        # auto, light or dark
 light-theme = paper      # paper, ayu-light, one-light, ink, ayu-dark or one-dark
 dark-theme = ink

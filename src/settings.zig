@@ -139,6 +139,11 @@ pub const default_size = 14.0;
 /// Light or dark: `auto` follows the Mac.
 pub const Look = enum { auto, light, dark };
 
+/// The sidebar's width in points: where it starts, and how far the edge drags.
+pub const sidebar_default = 250.0;
+pub const sidebar_min = 150.0;
+pub const sidebar_max = 500.0;
+
 pub const Settings = struct {
     font_buf: [128]u8 = undefined,
     font_len: usize = 0,
@@ -149,6 +154,7 @@ pub const Settings = struct {
     pairs: bool = true,
     /// The folder tree on the left of folder windows.
     sidebar: bool = true,
+    sidebar_width: f64 = sidebar_default,
     look: Look = .auto,
     /// Indexes into `schemes`: the theme for light mode and for dark mode.
     light_scheme: u8 = 0,
@@ -272,6 +278,8 @@ pub fn parse(text: []const u8) Settings {
             s.pairs = flag(val) orelse s.pairs;
         } else if (std.mem.eql(u8, key, "sidebar")) {
             s.sidebar = flag(val) orelse s.sidebar;
+        } else if (std.mem.eql(u8, key, "sidebar-width")) {
+            s.sidebar_width = std.math.clamp(number(val) orelse s.sidebar_width, sidebar_min, sidebar_max);
         } else if (std.mem.eql(u8, key, "appearance")) {
             s.look = std.meta.stringToEnum(Look, val) orelse s.look;
         } else {
@@ -293,6 +301,7 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
     errdefer out.deinit(gpa);
     var a: [24]u8 = undefined;
     var b: [24]u8 = undefined;
+    var wbuf: [24]u8 = undefined;
     try out.print(gpa,
         \\# ze settings. Save this file and every window picks up the change.
         \\
@@ -307,6 +316,8 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         \\pairs = {s}
         \\# Show the folder's files on the left of the window: on or off.
         \\sidebar = {s}
+        \\# How wide the sidebar is, in points: drag its edge to change it.
+        \\sidebar-width = {s}
         \\
         \\# Light or dark: auto follows the Mac, light or dark keeps ze in that mode.
         \\appearance = {s}
@@ -326,6 +337,7 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         if (s.wrap) "on" else "off",
         if (s.pairs) "on" else "off",
         if (s.sidebar) "on" else "off",
+        decimal(&wbuf, s.sidebar_width),
         @tagName(s.look),
         schemes[s.light_scheme].key,
         schemes[s.dark_scheme].key,
@@ -411,6 +423,7 @@ test "settings read colors, flags and numbers and skip what they don't know" {
         \\size = 99
         \\wrap = on
         \\pairs = off
+        \\sidebar-width = 900
         \\light.comment = #102030
         \\dark.text = 0A0B0C
         \\dark.bogus = #FFFFFF
@@ -419,6 +432,7 @@ test "settings read colors, flags and numbers and skip what they don't know" {
     try t.expectEqualStrings("Menlo-Regular", s.font());
     try t.expectEqual(@as(f64, 40), s.size);
     try t.expect(s.wrap and !s.pairs);
+    try t.expectEqual(sidebar_max, s.sidebar_width);
     try t.expectEqual(@as(f64, 0x10) / 255, s.light.kinds[3][0]);
     try t.expectEqual(@as(f64, 0x0C) / 255, s.dark.fg[2]);
     try t.expectEqual(s.dark.fg, s.dark.kinds[0]);
@@ -426,7 +440,7 @@ test "settings read colors, flags and numbers and skip what they don't know" {
 }
 
 test "a written file reads back as the same settings" {
-    var s: Settings = .{ .size = 16, .wrap = true, .look = .dark };
+    var s: Settings = .{ .size = 16, .wrap = true, .look = .dark, .sidebar_width = 320 };
     s.setFont("Menlo-Regular");
     s.dark.caret = .{ 1, 0, 0 };
     const text = try render(t.allocator, &s);
@@ -435,6 +449,7 @@ test "a written file reads back as the same settings" {
     try t.expectEqualStrings("Menlo-Regular", back.font());
     try t.expectEqual(s.size, back.size);
     try t.expect(back.wrap);
+    try t.expectEqual(@as(f64, 320), back.sidebar_width);
     try t.expectEqual(Look.dark, back.look);
     try t.expectEqual(s.dark.caret, back.dark.caret);
     try t.expectEqual(s.light, back.light);
