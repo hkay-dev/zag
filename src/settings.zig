@@ -54,6 +54,86 @@ pub const ink: Theme = .{
     .rule = rgb(0x2A2A31),
 };
 
+/// Ayu Light, from the ayu theme family.
+const ayu_light: Theme = .{
+    .bg = rgb(0xF8F9FA),
+    .fg = rgb(0x5C6166),
+    .muted = rgb(0x8A9199),
+    .kinds = .{ rgb(0x5C6166), rgb(0xFA8D3E), rgb(0x86B300), rgb(0xADAEB1), rgb(0xA37ACC), rgb(0xF2AE49), rgb(0x399EE6) },
+    .sel = rgb(0xD3E1F4),
+    .line = rgb(0xEDEFF0),
+    .caret = rgb(0xFFAA33),
+    .match = rgb(0xF5E1A8),
+    .panel = rgb(0xF0F1F2),
+    .rule = rgb(0xE6E8EA),
+};
+
+/// Ayu Dark.
+const ayu_dark: Theme = .{
+    .bg = rgb(0x0B0E14),
+    .fg = rgb(0xBFBDB6),
+    .muted = rgb(0x565B66),
+    .kinds = .{ rgb(0xBFBDB6), rgb(0xFF8F40), rgb(0xAAD94C), rgb(0x646A72), rgb(0xD2A6FF), rgb(0xFFB454), rgb(0x59C2FF) },
+    .sel = rgb(0x1B395A),
+    .line = rgb(0x131721),
+    .caret = rgb(0xE6B450),
+    .match = rgb(0x4A3B1A),
+    .panel = rgb(0x0F131A),
+    .rule = rgb(0x1B1F29),
+};
+
+/// One Light, Atom's light theme.
+const one_light: Theme = .{
+    .bg = rgb(0xFAFAFA),
+    .fg = rgb(0x383A42),
+    .muted = rgb(0x9D9D9F),
+    .kinds = .{ rgb(0x383A42), rgb(0xA626A4), rgb(0x50A14F), rgb(0xA0A1A7), rgb(0x986801), rgb(0x4078F2), rgb(0xC18401) },
+    .sel = rgb(0xE5E5E6),
+    .line = rgb(0xF0F0F1),
+    .caret = rgb(0x526FFF),
+    .match = rgb(0xF2E2A6),
+    .panel = rgb(0xEFEFF0),
+    .rule = rgb(0xDBDBDC),
+};
+
+/// One Dark, Atom's dark theme.
+const one_dark: Theme = .{
+    .bg = rgb(0x282C34),
+    .fg = rgb(0xABB2BF),
+    .muted = rgb(0x636D83),
+    .kinds = .{ rgb(0xABB2BF), rgb(0xC678DD), rgb(0x98C379), rgb(0x5C6370), rgb(0xD19A66), rgb(0x61AFEF), rgb(0xE5C07B) },
+    .sel = rgb(0x3E4451),
+    .line = rgb(0x2C313C),
+    .caret = rgb(0x528BFF),
+    .match = rgb(0x314365),
+    .panel = rgb(0x21252B),
+    .rule = rgb(0x181A1F),
+};
+
+pub const Scheme = struct {
+    /// How the settings file names it.
+    key: []const u8,
+    /// How the View menu names it.
+    title: [:0]const u8,
+    dark: bool,
+    theme: Theme,
+};
+
+/// The built-in themes, light ones first. Either mode can use any of them.
+pub const schemes = [_]Scheme{
+    .{ .key = "paper", .title = "Paper", .dark = false, .theme = paper },
+    .{ .key = "ayu-light", .title = "Ayu Light", .dark = false, .theme = ayu_light },
+    .{ .key = "one-light", .title = "One Light", .dark = false, .theme = one_light },
+    .{ .key = "ink", .title = "Ink", .dark = true, .theme = ink },
+    .{ .key = "ayu-dark", .title = "Ayu Dark", .dark = true, .theme = ayu_dark },
+    .{ .key = "one-dark", .title = "One Dark", .dark = true, .theme = one_dark },
+};
+
+fn schemeIndex(key: []const u8) ?u8 {
+    for (schemes, 0..) |sc, i| if (std.mem.eql(u8, sc.key, key)) return @intCast(i);
+    return null;
+}
+
 pub const default_size = 14.0;
 
 pub const Settings = struct {
@@ -64,6 +144,10 @@ pub const Settings = struct {
     spacing: f64 = 1.75,
     wrap: bool = false,
     pairs: bool = true,
+    /// Indexes into `schemes`: the theme for light mode and for dark mode.
+    light_scheme: u8 = 0,
+    dark_scheme: u8 = 3,
+    /// The chosen themes with the file's single-color lines on top.
     light: Theme = paper,
     dark: Theme = ink,
 
@@ -139,16 +223,37 @@ pub fn decimal(buf: *[24]u8, v: f64) []const u8 {
     return std.fmt.bufPrint(buf, "{d}.{d:0>2}", .{ whole, frac }) catch "";
 }
 
-/// Reads settings text. Lines it doesn't understand keep their defaults.
-pub fn parse(text: []const u8) Settings {
-    var s: Settings = .{};
-    var it = std.mem.splitScalar(u8, text, '\n');
+const Entry = struct { key: []const u8, val: []const u8 };
+
+/// The next `key = value` line, skipping blanks, comments and nonsense.
+fn nextEntry(it: *std.mem.SplitIterator(u8, .scalar)) ?Entry {
     while (it.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '#') continue;
         const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-        const key = std.mem.trim(u8, line[0..eq], " \t");
-        const val = std.mem.trim(u8, line[eq + 1 ..], " \t");
+        return .{ .key = std.mem.trim(u8, line[0..eq], " \t"), .val = std.mem.trim(u8, line[eq + 1 ..], " \t") };
+    }
+    return null;
+}
+
+/// Reads settings text. Lines it doesn't understand keep their defaults.
+/// Single colors apply on top of the chosen themes wherever they sit.
+pub fn parse(text: []const u8) Settings {
+    var s: Settings = .{};
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (nextEntry(&it)) |e| {
+        if (std.mem.eql(u8, e.key, "light-theme")) {
+            s.light_scheme = schemeIndex(e.val) orelse s.light_scheme;
+        } else if (std.mem.eql(u8, e.key, "dark-theme")) {
+            s.dark_scheme = schemeIndex(e.val) orelse s.dark_scheme;
+        }
+    }
+    s.light = schemes[s.light_scheme].theme;
+    s.dark = schemes[s.dark_scheme].theme;
+    it.reset();
+    while (nextEntry(&it)) |e| {
+        const key = e.key;
+        const val = e.val;
         if (std.mem.eql(u8, key, "font")) {
             s.setFont(val);
         } else if (std.mem.eql(u8, key, "size")) {
@@ -171,7 +276,8 @@ pub fn parse(text: []const u8) Settings {
     return s;
 }
 
-/// The whole file for `s`, with a comment on each group.
+/// The whole file for `s`, with a comment on each group. Colors are written
+/// only where they differ from the chosen theme.
 pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
@@ -190,7 +296,14 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         \\# Close brackets and quotes as you type them: on or off.
         \\pairs = {s}
         \\
-        \\# Colors as #rrggbb, for the light theme and the dark theme.
+        \\# The theme for each of the Mac's modes: paper, ayu-light, one-light,
+        \\# ink, ayu-dark or one-dark.
+        \\light-theme = {s}
+        \\dark-theme = {s}
+        \\
+        \\# Change one color of a theme with a line like light.keyword = #9C3D26.
+        \\# The names are background, text, muted, keyword, string, comment,
+        \\# number, function, type, selection, line, caret, match, panel and rule.
         \\
     , .{
         if (s.font_len == 0) "system" else s.font(),
@@ -198,12 +311,15 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         decimal(&b, s.spacing),
         if (s.wrap) "on" else "off",
         if (s.pairs) "on" else "off",
+        schemes[s.light_scheme].key,
+        schemes[s.dark_scheme].key,
     });
     for ([_][]const u8{ "light", "dark" }, 0..) |name, n| {
-        if (n > 0) try out.append(gpa, '\n');
         var th = if (n == 0) s.light else s.dark;
+        var base = schemes[if (n == 0) s.light_scheme else s.dark_scheme].theme;
         for (colors) |c| {
             const v = slot(&th, c).?.*;
+            if (std.mem.eql(f64, &v, &slot(&base, c).?.*)) continue;
             try out.print(gpa, "{s}.{s} = #{X:0>2}{X:0>2}{X:0>2}\n", .{ name, c, byte(v[0]), byte(v[1]), byte(v[2]) });
         }
     }
@@ -314,4 +430,20 @@ test "setting a key rewrites only its line, or adds it" {
     const b = try setLine(t.allocator, "wrap = off", "pairs", "on");
     defer t.allocator.free(b);
     try t.expectEqualStrings("wrap = off\npairs = on\n", b);
+}
+
+test "a single color applies on top of the chosen theme wherever its line sits" {
+    const s = parse(
+        \\dark.keyword = #010203
+        \\dark-theme = one-dark
+        \\light-theme = nonsense
+    );
+    try t.expectEqual(paper, s.light);
+    try t.expectEqual(one_dark.bg, s.dark.bg);
+    try t.expectEqual(@as(f64, 3) / 255, s.dark.kinds[1][2]);
+    const text = try render(t.allocator, &s);
+    defer t.allocator.free(text);
+    try t.expect(std.mem.indexOf(u8, text, "dark-theme = one-dark\n") != null);
+    try t.expect(std.mem.indexOf(u8, text, "dark.background") == null);
+    try t.expectEqual(s.dark, parse(text).dark);
 }

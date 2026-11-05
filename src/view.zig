@@ -40,6 +40,8 @@ var conf_stamp: ?files.Stamp = null;
 /// View menu items that show a checkmark, set by the menu builder.
 pub var wrap_item: Id = null;
 pub var pairs_item: Id = null;
+/// View > Theme items, in `settings.schemes` order.
+pub var scheme_items: [settings.schemes.len]Id = @splat(null);
 
 var font: Id = null;
 var bold: Id = null;
@@ -819,6 +821,9 @@ pub fn loadSettings() void {
     setFont();
     if (wrap_item != null) msg(void, wrap_item, "setState:", .{@as(isize, @intFromBool(conf.wrap))});
     if (pairs_item != null) msg(void, pairs_item, "setState:", .{@as(isize, @intFromBool(conf.pairs))});
+    for (scheme_items, 0..) |it, i| {
+        if (it != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(i == conf.light_scheme or i == conf.dark_scheme))});
+    }
     for (docs.items) |d| {
         d.dark = null;
         d.sy = d.sy / old_lh * lh;
@@ -851,6 +856,13 @@ pub fn toggleWrap() void {
 
 pub fn togglePairs() void {
     store("pairs", if (conf.pairs) "off" else "on");
+}
+
+/// Makes built-in theme `i` the one for its own mode, light or dark.
+pub fn pickScheme(i: usize) void {
+    if (i >= settings.schemes.len) return;
+    const sc = settings.schemes[i];
+    store(if (sc.dark) "dark-theme" else "light-theme", sc.key);
 }
 
 // ---- prompt ----

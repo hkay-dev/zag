@@ -3,6 +3,7 @@ const std = @import("std");
 const objc = @import("objc.zig");
 const view = @import("view.zig");
 const files = @import("files.zig");
+const settings = @import("settings.zig");
 const Id = objc.Id;
 const Sel = objc.Sel;
 const msg = objc.msg;
@@ -85,6 +86,10 @@ fn toggleWrap(_: Id, _: Sel, _: Id) callconv(.c) void {
 
 fn togglePairs(_: Id, _: Sel, _: Id) callconv(.c) void {
     view.togglePairs();
+}
+
+fn pickScheme(_: Id, _: Sel, sender: Id) callconv(.c) void {
+    view.pickScheme(@intCast(msg(isize, sender, "tag", .{})));
 }
 
 /// Fills File > Open Recent each time it opens.
@@ -184,6 +189,17 @@ fn buildMenu(delegate: Id) void {
     separator(v);
     view.wrap_item = item(v, "Soft Wrap", "toggleWrap:", "z", opt);
     view.pairs_item = item(v, "Auto-Close Brackets", "togglePairs:", "", 0);
+    const themes = submenu(v, "Theme");
+    for (settings.schemes, 0..) |sc, i| {
+        if (i == 0 or sc.dark != settings.schemes[i - 1].dark) {
+            if (i > 0) separator(themes);
+            msg(void, item(themes, if (sc.dark) "Dark Mode" else "Light Mode", "", "", 0), "setEnabled:", .{false});
+        }
+        const it = item(themes, sc.title, "pickScheme:", "", 0);
+        msg(void, it, "setTag:", .{@as(isize, @intCast(i))});
+        msg(void, it, "setIndentationLevel:", .{@as(isize, 1)});
+        view.scheme_items[i] = it;
+    }
     separator(v);
     _ = item(v, "Enter Full Screen", "toggleFullScreen:", "f", cmd | ctrl);
 
@@ -220,6 +236,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     d.method("openSettings:", @ptrCast(&openSettings), "v@:@");
     d.method("toggleWrap:", @ptrCast(&toggleWrap), "v@:@");
     d.method("togglePairs:", @ptrCast(&togglePairs), "v@:@");
+    d.method("pickScheme:", @ptrCast(&pickScheme), "v@:@");
     d.method("menuNeedsUpdate:", @ptrCast(&fillRecent), "v@:@");
     d.method("openRecent:", @ptrCast(&openRecent), "v@:@");
     d.method("clearRecent:", @ptrCast(&clearRecent), "v@:@");

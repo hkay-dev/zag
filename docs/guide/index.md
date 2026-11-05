@@ -12,7 +12,7 @@ line at the bottom. That line shows the file's name, a dot when there are unsave
 line and column of the caret. It also turns into a prompt when you find, replace, jump to a line or
 open a file.
 
-ze follows the Mac's light or dark setting: warm paper in light mode, ink in dark mode. Things move
+ze follows the Mac's light or dark setting, with a theme for each (see Themes). Things move
 a little instead of jumping: the caret glides to each new spot and blinks with a soft fade after a
 moment of rest, the band behind the caret's line slides after it, a new selection fades in, the
 quick open list rises out of the bottom line, and the page eases into place when the keyboard
@@ -119,6 +119,13 @@ function color and `[sections]` the keyword color. In Markdown, headings, list m
 **strong** text take the keyword color, `code` and fenced blocks the string color, and links the
 function color with their address dimmed. Other files are plain text.
 
+## Themes
+
+ze has a theme for light mode and one for dark mode, and switches every window between them when
+the Mac switches. **View > Theme** picks them: Paper (the default), Ayu Light or One Light for
+light mode, and Ink (the default), Ayu Dark or One Dark for dark mode. A checkmark shows the two
+in use. ze remembers them in the settings file.
+
 ## Font and text size
 
 - **View > Font…** (⌘T) opens the Mac's Font panel. Pick any font; monospaced ones look best.
@@ -140,13 +147,16 @@ size = 14
 line-height = 1.75       # as a multiple of the size
 wrap = off
 pairs = on               # auto-close brackets and quotes
-light.comment = #B3AEA3  # colors as #rrggbb
-dark.caret = #FF8A3D
+light-theme = paper      # paper, ayu-light, one-light, ink, ayu-dark or one-dark
+dark-theme = ink
+light.comment = #B3AEA3  # one color of the light theme, as #rrggbb
 ```
 
-Colors come in a light set and a dark set, with these names: `background`, `text`, `muted` (the
-bottom line's fainter words), `keyword`, `string`, `comment`, `number`, `function`, `type`,
-`selection`, `line` (the caret's line), `caret`, `match` (other find matches), `panel` (the quick
-open list) and `rule` (the line above the bottom line). A line ze doesn't understand is skipped,
-and a missing line keeps its default. The menu toggles, the size shortcuts and the Font panel
-rewrite their own line in the file and leave the rest of it alone.
+A `light.` or `dark.` line changes one color of that mode's theme, whichever theme it is. The
+names are `background`, `text`, `muted` (the bottom line's fainter words), `keyword`, `string`,
+`comment`, `number`, `function`, `type`, `selection`, `line` (the caret's line), `caret`, `match`
+(other find matches), `panel` (the quick open list) and `rule` (the line above the bottom line).
+Either mode can also use any theme from the file, so `light-theme = one-dark` keeps ze dark all
+the time. A line ze doesn't understand is skipped, and a missing line keeps its default. The menus,
+the size shortcuts and the Font panel rewrite their own line in the file and leave the rest of it
+alone.
