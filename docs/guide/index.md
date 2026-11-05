@@ -19,7 +19,8 @@ quick open list rises out of the bottom line, and the page eases into place when
 scrolls it. Scrolling with the trackpad or mouse follows your fingers exactly. Pull the trackpad
 past the top or bottom of the file (or the left edge) and the page stretches with some resistance,
 then springs back when you lift your fingers; momentum that hits an end overshoots a little and
-settles. A mouse wheel stops at the ends. Windows in the background don't show a caret.
+settles. A mouse wheel stops at the ends. Windows in the background don't show a caret. The mouse
+pointer hides while you type and comes back when you move the mouse.
 
 The window's top strip is its title bar, with the editor drawn behind it: it shows the file's name
 and proxy icon (⌘-click the name for the folder path menu, drag the icon to drag the file; an

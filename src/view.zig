@@ -2050,6 +2050,8 @@ fn keyDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     if (flags & cmd_key != 0) {
         if (std.mem.indexOfScalar(u16, &.{ 51, 117, 115, 119, 123, 124, 125, 126 }, code) == null) return;
     }
+    // Like NSTextView: the pointer hides while typing and returns when the mouse moves.
+    if (code < 123 or code > 126) msg(void, objc.class("NSCursor"), "setHiddenUntilMouseMoves:", .{true});
     const arr = msg(Id, objc.class("NSArray"), "arrayWithObject:", .{ev});
     msg(void, self, "interpretKeyEvents:", .{arr});
 }
