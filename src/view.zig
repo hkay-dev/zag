@@ -1150,7 +1150,11 @@ const Doc = struct {
     drag_from: [2]usize = .{ 0, 0 },
     /// Syntax state at the start of each line, known for this many lines.
     states: std.ArrayList(syntax.State) = .empty,
-    kinds: std.ArrayList(syntax.Kind) = .empty,
+    /// Syntax kinds of the lines that the last frame drew in `lex[0]`, so
+    /// a frame lexes only the lines that it didn't draw before; `lex[1]` is
+    /// the frame before, swapped in as the next one fills. Bound: the
+    /// visible lines. Dropped from the edited line down and with `states`.
+    lex: [2]Kinds = .{ .{}, .{} },
     /// The caret's color was set for dark mode or light.
     dark: ?bool = null,
     /// The caret is a Core Animation layer, so its glide and blink run in
@@ -1208,7 +1212,7 @@ const Doc = struct {
         d.held_with.deinit(gpa);
         d.query.deinit(gpa);
         d.states.deinit(gpa);
-        d.kinds.deinit(gpa);
+        for (&d.lex) |*x| x.deinit();
         d.vfirst.deinit(gpa);
         dropHead(d);
         for (d.pages.items) |*p| p.deinit();
@@ -1558,7 +1562,7 @@ fn install(d: *Doc, pg: Page) void {
     d.draft = pg.draft;
     d.drafted = pg.drafted;
     d.center_at = std.math.maxInt(usize);
-    d.states.clearRetainingCapacity();
+    clearSyntax(d);
     d.vfirst.clearRetainingCapacity();
     d.cols = 0;
     d.mode = .edit;
@@ -2254,7 +2258,7 @@ fn save(d: *Doc, as: bool) bool {
         if (d.path) |old| gpa.free(old);
         d.path = z;
         d.lang = syntax.forPath(z);
-        d.states.clearRetainingCapacity();
+        clearSyntax(d);
         named(d);
     }
     files.write(d.path.?, d.ed.text()) catch {
@@ -3587,6 +3591,7 @@ pub const ax = struct {
 fn syncStates(d: *Doc, upto: usize) void {
     const b = &d.ed.buf;
     if (b.touched < d.states.items.len) d.states.shrinkRetainingCapacity(b.touched + 1);
+    if (b.touched != std.math.maxInt(usize)) d.lex[0].drop(b.touched);
     b.touched = std.math.maxInt(usize);
     if (d.lang == &syntax.plain) return;
     if (d.states.items.len == 0) d.states.append(gpa, .normal) catch return;
@@ -3594,6 +3599,58 @@ fn syncStates(d: *Doc, upto: usize) void {
         const i = d.states.items.len - 1;
         d.states.append(gpa, syntax.lexLine(d.lang, b.line(i), d.states.items[i], null)) catch return;
     }
+}
+
+/// Syntax kinds for some lines, in line order.
+const Kinds = struct {
+    /// Each line and where its kinds start in `kinds`.
+    lines: std.ArrayList(struct { line: usize, at: usize }) = .empty,
+    kinds: std.ArrayList(syntax.Kind) = .empty,
+
+    fn deinit(x: *Kinds) void {
+        x.lines.deinit(gpa);
+        x.kinds.deinit(gpa);
+    }
+
+    fn clear(x: *Kinds) void {
+        x.lines.clearRetainingCapacity();
+        x.kinds.clearRetainingCapacity();
+    }
+
+    /// Forgets line `from` and every line after it.
+    fn drop(x: *Kinds, from: usize) void {
+        for (x.lines.items, 0..) |e, i| if (e.line >= from) {
+            x.lines.shrinkRetainingCapacity(i);
+            x.kinds.shrinkRetainingCapacity(e.at);
+            return;
+        };
+    }
+};
+
+/// For a new language or file: every line lexes again.
+fn clearSyntax(d: *Doc) void {
+    d.states.clearRetainingCapacity();
+    for (&d.lex) |*x| x.clear();
+}
+
+/// Line `i`'s kinds for this frame, added to `lex[0]`: copied from the last
+/// frame when it drew the line, else lexed. `walk` steps through the last
+/// frame's lines, as the frame asks for lines in order.
+fn lineKinds(d: *Doc, i: usize, l: []const u8, walk: *usize) ?[]const syntax.Kind {
+    const now = &d.lex[0];
+    const old = d.lex[1].lines.items;
+    const at = now.kinds.items.len;
+    now.lines.append(gpa, .{ .line = i, .at = at }) catch return null;
+    now.kinds.resize(gpa, at + l.len) catch {
+        now.lines.items.len -= 1;
+        return null;
+    };
+    const out = now.kinds.items[at..];
+    while (walk.* < old.len and old[walk.*].line < i) walk.* += 1;
+    if (walk.* < old.len and old[walk.*].line == i) {
+        @memcpy(out, d.lex[1].kinds.items[old[walk.*].at..][0..l.len]);
+    } else _ = syntax.lexLine(d.lang, l, d.states.items[i], out);
+    return out;
 }
 
 /// The first line with words on it, which names an untitled file.
@@ -4793,20 +4850,16 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     var k: Ink = .{ .ctx = ctx };
     if (d.focus_on) k.focus = .{ .new = d.focus_new, .old = d.focus_old, .t = std.math.clamp((now - d.focus_t0) / focus_time, 0, 1) };
     k.selected = s;
+    std.mem.swap(Kinds, &d.lex[0], &d.lex[1]);
+    d.lex[0].clear();
+    var walk: usize = 0;
     var lexed: usize = std.math.maxInt(usize);
     var kinds: ?[]const syntax.Kind = null;
     for (vis[0..nvis], first..) |v, row| {
         const l = b.line(v.line);
         if (v.line != lexed) {
             lexed = v.line;
-            kinds = null;
-            if (d.lang != &syntax.plain and v.line < d.states.items.len) {
-                if (d.kinds.items.len < l.len) d.kinds.resize(gpa, l.len) catch {};
-                if (d.kinds.items.len >= l.len) {
-                    _ = syntax.lexLine(d.lang, l, d.states.items[v.line], d.kinds.items[0..l.len]);
-                    kinds = d.kinds.items[0..l.len];
-                }
-            }
+            kinds = if (d.lang != &syntax.plain and v.line < d.states.items.len) lineKinds(d, v.line, l, &walk) else null;
         }
         k.offset = b.lineStart(v.line);
         const row_y = top_h + f(row) * lh - d.vy;
