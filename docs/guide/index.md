@@ -46,6 +46,8 @@ under a heading carry its name, like "Appearance: Dark" or "Dark Mode: Ayu Dark"
 - From a terminal, `ze notes.txt` opens a file, and `ze .` opens a folder. A file that doesn't
   exist yet opens empty and is created when you save.
 - **File > Open…** (⌘O) opens files or a folder.
+- Drop files or a folder from Finder onto a window, or onto ze's Dock icon, to open them. A blank
+  window takes the first file; the rest, and any file after that, open in new windows.
 - **File > Open Recent** lists the last 15 files you opened or saved. **Clear Menu** empties it.
 - **File > Quick Open…** (⌘P) lists every file in ze's folder (see Sidebar). Type a few letters
   of the name, use ↑ and ↓ to pick, and press Return.

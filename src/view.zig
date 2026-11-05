@@ -793,6 +793,7 @@ pub fn newDoc() ?*Doc {
     d.window = win;
     d.view = view;
     msg(void, view, "setWantsLayer:", .{true});
+    msg(void, view, "registerForDraggedTypes:", .{msg(Id, objc.class("NSArray"), "arrayWithObject:", .{NSPasteboardTypeFileURL})});
     d.caret = msg(Id, objc.class("CALayer"), "layer", .{});
     msg(void, d.caret, "setCornerRadius:", .{@as(f64, 1)});
     msg(void, d.caret, "setHidden:", .{true});
@@ -2385,6 +2386,26 @@ fn appearanceChanged(self: Id, _: Sel) callconv(.c) void {
     msg(void, self, "setNeedsDisplay:", .{true});
 }
 
+extern const NSPasteboardTypeFileURL: Id;
+extern const NSPasteboardURLReadingFileURLsOnlyKey: Id;
+
+/// Files dragged over the window from Finder copy-drop, which opens them.
+fn draggingEntered(_: Id, _: Sel, _: Id) callconv(.c) usize {
+    return 1;
+}
+
+/// Opens each dropped file or folder the way the Dock does: in this window
+/// when it's blank, else in a new one.
+fn performDrag(_: Id, _: Sel, sender: Id) callconv(.c) bool {
+    const pb = msg(Id, sender, "draggingPasteboard", .{});
+    const classes = msg(Id, objc.class("NSArray"), "arrayWithObject:", .{objc.class("NSURL")});
+    const opts = msg(Id, objc.class("NSDictionary"), "dictionaryWithObject:forKey:", .{ msg(Id, objc.class("NSNumber"), "numberWithBool:", .{true}), NSPasteboardURLReadingFileURLsOnlyKey });
+    const urls = msg(Id, pb, "readObjectsForClasses:options:", .{ classes, opts });
+    const n = if (urls != null) msg(usize, urls, "count", .{}) else 0;
+    for (0..n) |i| open(objc.utf8(msg(Id, msg(Id, urls, "objectAtIndex:", .{i}), "path", .{})), blankDoc());
+    return n > 0;
+}
+
 fn windowShouldClose(self: Id, _: Sel, _: Id) callconv(.c) bool {
     const d = docOf(self) orelse return true;
     return settle(d);
@@ -2551,6 +2572,8 @@ pub fn setup() void {
     c.method("viewDidChangeEffectiveAppearance", @ptrCast(&appearanceChanged), "v@:");
     c.method("windowDidBecomeKey:", @ptrCast(&appearanceChanged), "v@:@");
     c.method("windowDidResignKey:", @ptrCast(&appearanceChanged), "v@:@");
+    c.method("draggingEntered:", @ptrCast(&draggingEntered), "Q@:@");
+    c.method("performDragOperation:", @ptrCast(&performDrag), "c@:@");
     c.method("windowShouldClose:", @ptrCast(&windowShouldClose), "c@:@");
     c.method("windowWillClose:", @ptrCast(&windowWillClose), "v@:@");
     c.method("tick:", @ptrCast(&tick), "v@:@");
