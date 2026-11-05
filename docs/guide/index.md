@@ -25,9 +25,8 @@ background don't show a caret.
   exist yet opens empty and is created when you save.
 - **File > Open…** (⌘O) opens files or a folder.
 - **File > Open Recent** lists the last 15 files you opened or saved. **Clear Menu** empties it.
-- **File > Quick Open…** (⌘P) lists every file in the folder ze started in, or the folder you
-  opened. Type a few letters of the name, use ↑ and ↓ to pick, and press Return. If there's no
-  folder yet, it lists the folder of the file you're looking at.
+- **File > Quick Open…** (⌘P) lists every file in ze's folder (see Sidebar). Type a few letters
+  of the name, use ↑ and ↓ to pick, and press Return.
 - Opening a file that's already open in another window brings that window forward. Quick open
   and the sidebar show the new file in the same window, which keeps the file it had (see Sidebar).
 - A file opens where you left it: the caret and the scroll come back to where they were the last
@@ -36,10 +35,11 @@ background don't show a caret.
 
 ## Sidebar
 
-When ze has a folder (the one it started in from a terminal, or one you opened), the left side
-of each window lists that folder's files, folders first. Files and folders whose names start
-with a dot are left out. Each row has a small icon for its kind: folder, code, Markdown, data,
-image or plain text.
+The left side of each window lists the files of ze's folder, folders first. That's the folder ze
+started in from a terminal, or the one you opened last. Started from the Dock or Finder with no
+folder from last time, it's your home folder. Files and folders whose names start with a dot are
+left out. Each row has a small icon for its kind: folder, code, Markdown, data, image or plain
+text.
 
 - Click a folder to open or close it.
 - Click a file to show it in the same window. The window keeps every file it has shown, with

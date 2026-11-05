@@ -37,6 +37,10 @@ fn didFinishLaunching(_: Id, _: Sel, _: Id) callconv(.c) void {
         } else view.open(a, view.blankDoc());
     }
     if (view.count() == 0 and !view.restoreSession()) _ = view.newDoc();
+    // With no folder from the terminal or the last session, use the home folder.
+    if (view.root == null) if (std.c.getenv("HOME")) |h| {
+        if (view.gpa.dupe(u8, std.mem.span(h))) |dir| view.setRoot(dir) else |_| {}
+    };
     // Launched from a terminal there is no bundle and nothing brings the
     // window forward; from the bundle, Launch Services does it (or `open -g` doesn't).
     const bundle = msg(Id, objc.class("NSBundle"), "mainBundle", .{});
@@ -229,8 +233,8 @@ pub fn main(init: std.process.Init.Minimal) void {
     // No window tabs, so ⌃Tab reaches Previous File.
     msg(void, objc.class("NSWindow"), "setAllowsAutomaticWindowTabbing:", .{false});
 
-    // From a terminal, quick open lists the folder ze started in. Finder
-    // starts apps in /, so there it waits for a folder to be opened.
+    // From a terminal, quick open and the sidebar use the folder ze started
+    // in. Finder starts apps in /, so there the last folder or home is used.
     if (files.cwd(view.gpa)) |dir| {
         if (dir.len > 1) view.setRoot(dir) else view.gpa.free(dir);
     }
