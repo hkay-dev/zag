@@ -76,6 +76,10 @@ left out. Each row has an icon for its kind on a small tile of the kind's color:
 Markdown, data, image or plain text. Names are in the Mac's system font and end in "…" when they
 don't fit. The window's file is marked with a soft rounded highlight with a thin outline.
 
+The folder's parent and name stay pinned at the top while the rows scroll. An open folder whose
+files fill the top of the list pins under the name too, up to three levels deep, until the next
+folder's row pushes it away. Click a pinned folder to scroll back to it.
+
 - Click a folder to open or close it.
 - Click a file to show it in the same window. The window keeps every file it has shown, with
   its unsaved changes and undo, so switching never asks you to save. A dot next to a file in the

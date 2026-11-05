@@ -461,7 +461,7 @@ fn blink(caret: Id) void {
 /// list still has frames to draw.
 fn scenery(d: *const Doc, now: f64) bool {
     const stretched = d.relax and (d.ov[0] != 0 or d.ov[1] != 0);
-    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.panel.moving(now) or (d.had_sel and now < d.sel_t0 + fade_time) or now < d.bar_t0 + bar_hold + bar_time;
+    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.panel.moving(now) or d.side_t.moving(now) or (d.had_sel and now < d.sel_t0 + fade_time) or now < d.bar_t0 + bar_hold + bar_time;
 }
 
 const spring_k = 380.0;
@@ -634,6 +634,12 @@ const Doc = struct {
     side_drag: bool = false,
     /// Scroll the sidebar to the window's file on the next draw.
     side_find: bool = false,
+    /// The open folders pinned under the folder's name, and where each drew.
+    stuck: [max_stuck]usize = undefined,
+    stuck_y: [max_stuck]f64 = undefined,
+    nstuck: usize = 0,
+    /// A sidebar scroll that glides, like a click on a pinned folder.
+    side_t: Tween = .{ .dur = scroll_time },
     /// The header's file name and folder as CoreText lines, made on first draw.
     head: [2]Id = .{ null, null },
 
@@ -1810,64 +1816,129 @@ fn tilde(buf: []u8, p: []const u8) []const u8 {
     return std.fmt.bufPrint(buf, "~{s}", .{p[home.len..]}) catch p;
 }
 
-/// The tree row under `y`, below the line with the folder's parent and the
-/// folder's own row.
-fn sideRow(d: *const Doc, y: f64) ?usize {
-    const at = @floor((y - top_h + d.side_y - label_h) / side_h);
-    if (at < 1 or at > f(tree.rows.items.len)) return null;
-    return @as(usize, @intFromFloat(at)) - 1;
+/// The sidebar's rows start under its pinned top: the folder's parent and
+/// the folder's name, which stay put while the rows scroll.
+fn listTop() f64 {
+    return top_h + label_h + side_h;
 }
 
-/// The folder's parent, the folder's name, then a row per file and open
-/// folder, from under the traffic lights to the window's bottom.
-fn drawSide(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool) void {
+/// At most this many open folders pin under the folder's name.
+const max_stuck = 3;
+
+/// The open folders that hold the first row in view, outermost first, into
+/// `out`. They pin over the rows they cover, so the row they hold is the one
+/// under them: a few passes settle it.
+fn stuckRows(sy: f64, out: *[max_stuck]usize) usize {
+    const rows = tree.rows.items;
+    var n: usize = 0;
+    for (0..max_stuck + 1) |_| {
+        const t = @as(usize, @intFromFloat(@max(@floor(sy / side_h), 0))) + n;
+        if (t >= rows.len) break;
+        // Walking back from a row, the first one a level up is its folder.
+        var m: usize = 0;
+        var need = @as(isize, rows[t].depth) - 1;
+        var i = t;
+        while (need >= 0 and i > 0) {
+            i -= 1;
+            if (rows[i].depth != need) continue;
+            if (need < max_stuck) {
+                out[@intCast(need)] = i;
+                m += 1;
+            }
+            need -= 1;
+        }
+        if (m == n) break;
+        n = m;
+    }
+    return n;
+}
+
+/// The tree row under `y`: a pinned folder, or a row in the list.
+fn sideRow(d: *const Doc, y: f64) ?usize {
+    for (d.stuck[0..d.nstuck], d.stuck_y[0..d.nstuck]) |i, sy| if (y >= sy and y < sy + side_h) return i;
+    if (y < listTop()) return null;
+    const at = @floor((y - listTop() + d.side_y) / side_h);
+    if (at < 0 or at >= f(tree.rows.items.len)) return null;
+    return @intFromFloat(at);
+}
+
+/// One row of the tree with its top at `y`: chevron, tile, name and dot.
+fn drawRow(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, i: usize, y: f64, cur: ?[]const u8) void {
+    const row = tree.rows.items[i];
+    const s = tileSize();
+    const x = 16 + f(row.depth) * 16;
+    if (cur != null and std.mem.eql(u8, row.rel, cur.?)) {
+        const w = side_w - 2 * side_inset - 2;
+        pill(ctx, th.fg, if (key) 0.07 else 0.04, side_inset, y, w, side_h, side_radius);
+        ring(ctx, th.fg, if (key) 0.09 else 0.05, side_inset, y, w, side_h, side_radius);
+    }
+    const iy = y + (side_h - s) / 2;
+    if (row.dir) drawIcon(icon(if (tree.isOpen(row.rel)) .opened else .closed, dark, th), x - 4, iy + (s - 12) / 2, 12);
+    tile(ctx, iconFor(row.rel[row.base..], row.dir), dark, th, x + 10, iy);
+    const nx = x + 10 + s + 8;
+    const line = &side_lines.items[i];
+    if (line.* == null) line.* = uiLine(row.rel[row.base..], side_font, side_w - nx - if (row.dir) @as(f64, 14) else 26);
+    const w = drawLine(ctx, line.*, th.fg, nx, y + side_base);
+    if (!row.dir and rowDirty(d, row.rel)) _ = k.text(" •", null, th, th.caret, nx + w, y + side_base, 0, 2);
+}
+
+/// The folder's parent and name pinned at the top, then a row per file and
+/// open folder down to the window's bottom. The open folders holding the
+/// rows at the top pin under the name, and the next folder pushes them up.
+fn drawSide(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, bg: Rgb, now: f64) void {
     k.flush();
     const rows = tree.rows.items;
-    const view_h = bounds(d).h - top_h;
+    const lt = listTop();
+    const view_h = bounds(d).h - lt;
     const cur = if (d.path) |p| relOf(p) else null;
     if (d.side_find) {
         d.side_find = false;
-        if (cur) |c| for (rows, 1..) |row, i| if (std.mem.eql(u8, row.rel, c)) {
-            const y = label_h + f(i) * side_h;
+        if (cur) |c| for (rows, 0..) |row, i| if (std.mem.eql(u8, row.rel, c)) {
+            const y = f(i) * side_h;
             if (y < d.side_y or y + side_h > d.side_y + view_h) d.side_y = y - view_h / 3;
             break;
         };
     }
-    d.side_y = std.math.clamp(d.side_y, 0, @max(0, label_h + f(rows.len + 2) * side_h - view_h));
+    d.side_y = std.math.clamp(d.side_y, 0, @max(0, f(rows.len + 1) * side_h - view_h));
+    if (d.side_t.to != d.side_y) d.side_t.snap(d.side_y);
+    const sy = if (d.side_t.moving(now)) d.side_t.at(now) else d.side_y;
+    if (side_lines.items.len < rows.len) side_lines.appendNTimes(gpa, null, rows.len - side_lines.items.len) catch return;
 
     objc.CGContextSaveGState(ctx);
-    objc.CGContextClipToRect(ctx, .{ .y = top_h - 6, .w = side_w - 2, .h = view_h + 6 });
-    const y0 = top_h - d.side_y;
+    objc.CGContextClipToRect(ctx, .{ .y = top_h - 6, .w = side_w - 2, .h = bounds(d).h - top_h + 6 });
     if (side_label == null) {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         side_label = uiLine(tilde(&buf, std.fs.path.dirname(root.?) orelse "/"), head_font, side_w - 32);
     }
-    _ = drawLine(ctx, side_label, th.muted, 16, y0 + label_h - 8);
+    _ = drawLine(ctx, side_label, th.muted, 16, top_h + label_h - 8);
     if (side_head == null) side_head = uiLine(std.fs.path.basename(root.?), name_font, side_w - 32);
-    _ = drawLine(ctx, side_head, th.fg, 16, y0 + label_h + side_base);
-    if (side_lines.items.len < rows.len) side_lines.appendNTimes(gpa, null, rows.len - side_lines.items.len) catch return objc.CGContextRestoreGState(ctx);
-    const s = tileSize();
-    const from: usize = @intFromFloat(@max(@floor((d.side_y - label_h) / side_h) - 1, 0));
-    const to: usize = @min(rows.len, @as(usize, @intFromFloat(@max(@ceil((d.side_y + view_h - label_h) / side_h), 0))));
-    for (rows[@min(from, to)..to], @min(from, to) + 1..) |row, i| {
-        const y = y0 + label_h + f(i) * side_h;
-        const x = 16 + f(row.depth) * 16;
-        if (cur != null and std.mem.eql(u8, row.rel, cur.?)) {
-            const w = side_w - 2 * side_inset - 2;
-            pill(ctx, th.fg, if (key) 0.07 else 0.04, side_inset, y, w, side_h, side_radius);
-            ring(ctx, th.fg, if (key) 0.09 else 0.05, side_inset, y, w, side_h, side_radius);
-        }
-        const iy = y + (side_h - s) / 2;
-        if (row.dir) drawIcon(icon(if (tree.isOpen(row.rel)) .opened else .closed, dark, th), x - 4, iy + (s - 12) / 2, 12);
-        tile(ctx, iconFor(row.rel[row.base..], row.dir), dark, th, x + 10, iy);
-        const nx = x + 10 + s + 8;
-        const dirty = !row.dir and rowDirty(d, row.rel);
-        const line = &side_lines.items[i - 1];
-        if (line.* == null) line.* = uiLine(row.rel[row.base..], side_font, side_w - nx - if (row.dir) @as(f64, 14) else 26);
-        const w = drawLine(ctx, line.*, th.fg, nx, y + side_base);
-        if (dirty) _ = k.text(" •", null, th, th.caret, nx + w, y + side_base, 0, 2);
+    _ = drawLine(ctx, side_head, th.fg, 16, top_h + label_h + side_base);
+
+    objc.CGContextClipToRect(ctx, .{ .y = lt, .w = side_w - 2, .h = view_h });
+    const from: usize = @intFromFloat(@max(@floor(sy / side_h), 0));
+    const to: usize = @min(rows.len, @as(usize, @intFromFloat(@max(@ceil((sy + view_h) / side_h), 0))));
+    for (@min(from, to)..to) |i| drawRow(d, ctx, th, k, dark, key, i, lt + f(i) * side_h - sy, cur);
+
+    // Pinned folders, each held up by the end of its rows, the outer ones
+    // drawn last so they stay on top.
+    d.nstuck = stuckRows(sy, &d.stuck);
+    var low = lt;
+    var j = d.nstuck;
+    while (j > 0) {
+        j -= 1;
+        const a = d.stuck[j];
+        var e = a + 1;
+        while (e < rows.len and rows[e].depth > rows[a].depth) e += 1;
+        const y = @min(lt + f(j) * side_h, lt + f(e) * side_h - sy - side_h);
+        d.stuck_y[j] = y;
+        fill(ctx, bg, 0, y, side_w, side_h);
+        drawRow(d, ctx, th, k, dark, key, a, y, cur);
+        low = @max(low, y + side_h);
     }
     k.flush();
+    // A hairline under whatever is pinned, once rows pass under it.
+    const shade = std.math.clamp(sy / side_h, 0, 1);
+    if (shade > 0) fillA(ctx, th.fg, 0.08 * shade, 12, low - 1, side_w - 24, 1);
     objc.CGContextRestoreGState(ctx);
 }
 
@@ -1931,7 +2002,15 @@ fn drawLine(ctx: Id, line: Id, c: Rgb, x: f64, y: f64) f64 {
 
 /// A folder opens or closes; a file shows here, or with ⌘ in a new window.
 fn sideClick(d: *Doc, p: Point, flags: usize) void {
-    const row = tree.rows.items[sideRow(d, p.y) orelse return];
+    const i = sideRow(d, p.y) orelse return;
+    // A pinned folder scrolls back to where its rows start.
+    if (std.mem.indexOfScalar(usize, d.stuck[0..d.nstuck], i) != null and p.y < listTop() + f(d.nstuck) * side_h) {
+        d.side_t.snap(d.side_y);
+        d.side_y = f(i) * side_h;
+        d.side_t.aim(d.side_y, CACurrentMediaTime());
+        return refresh(d);
+    }
+    const row = tree.rows.items[i];
     if (row.dir) {
         tree.toggle(gpa, row.rel);
         rebuildTree();
@@ -2228,7 +2307,7 @@ fn draw(d: *Doc, ctx: Id) void {
     // traffic lights.
     ring(ctx, th.fg, if (dark) 0.1 else 0.08, card.x, card.y, card.w, card.h, card_radius);
     if (sideShown(d)) {
-        drawSide(d, ctx, th, &k, dark, key);
+        drawSide(d, ctx, th, &k, dark, key, chrome(th, dark), now);
         drawIcon(icon(.plus, dark, th), side_w - gap - 30, hy - 10, 20);
     }
     if (root != null) drawIcon(icon(.sidebar, dark, th), toggle_x - 10, hy - 10, 20);
