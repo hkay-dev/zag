@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FBF8F1"/>
+      <stop offset="1" stop-color="#E4DBC7"/>
+    </linearGradient>
+  </defs>
+  <g id="background">
+    <rect width="1024" height="1024" fill="url(#bg)"/>
+  </g>
+  <g id="foreground">
+    <!-- the orange line the nib has just drawn -->
+    <path d="M430 650 C 380 700, 320 650, 230 700" fill="none" stroke="#E8590C" stroke-width="44" stroke-linecap="round"/>
+    <g transform="translate(580 460) rotate(40) scale(0.72)">
+      <!-- collar -->
+      <rect x="-176" y="-360" width="352" height="92" rx="20" fill="#14110E"/>
+      <!-- nib, lit half -->
+      <path d="M0 -268 L -150 -268 L -150 -60 C -150 60 -60 190 0 330 Z" fill="#3A342D"/>
+      <!-- nib, shaded half -->
+      <path d="M0 -268 L 150 -268 L 150 -60 C 150 60 60 190 0 330 Z" fill="#221E1A"/>
+      <!-- slit and breather hole -->
+      <rect x="-9" y="20" width="18" height="300" fill="#F3EEE3"/>
+      <circle cx="0" cy="10" r="34" fill="#F3EEE3"/>
+    </g>
+  </g>
+</svg>

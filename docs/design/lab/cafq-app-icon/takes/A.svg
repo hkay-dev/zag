@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3A332B"/>
+      <stop offset="1" stop-color="#17140F"/>
+    </linearGradient>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFFDF7"/>
+      <stop offset="1" stop-color="#E9E1CF"/>
+    </linearGradient>
+  </defs>
+  <g id="background">
+    <rect width="1024" height="1024" fill="url(#bg)"/>
+  </g>
+  <g id="foreground">
+    <!-- shaded edge under the sheet -->
+    <rect x="252" y="196" width="520" height="644" rx="34" fill="#0C0A08" opacity="0.45"/>
+    <!-- the one sheet -->
+    <rect x="252" y="180" width="520" height="644" rx="34" fill="url(#paper)"/>
+    <!-- lit edge -->
+    <rect x="252" y="180" width="520" height="644" rx="34" fill="none" stroke="#FFFFFF" stroke-opacity="0.5" stroke-width="4"/>
+    <!-- ink lines -->
+    <rect x="318" y="270" width="360" height="60" rx="30" fill="#2B2620"/>
+    <rect x="318" y="374" width="240" height="60" rx="30" fill="#2B2620"/>
+    <!-- the orange caret, waiting on a fresh line -->
+    <rect x="318" y="472" width="52" height="150" rx="18" fill="#E8590C"/>
+    <!-- status line -->
+    <rect x="252" y="716" width="520" height="6" fill="#2B2620" opacity="0.14"/>
+    <rect x="318" y="752" width="130" height="30" rx="15" fill="#2B2620" opacity="0.55"/>
+  </g>
+</svg>
