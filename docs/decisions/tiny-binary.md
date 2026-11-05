@@ -42,9 +42,19 @@ Ghostty's terminal core. ze drops all three.
 - **`headerpad_size = 0`.** The binary's size moves in 16 KB pages. Zig's default padding after
   the load commands was enough to push `__TEXT` past 64 KB when the caret code went in
   (107 KB to 123 KB on disk for 2.6 KB of code). Check `size -m` when the file jumps by a page.
-  With settings, wrap, replace, motion, sessions and the sidebar in, the binary is about 162 KB.
+  With settings, wrap, replace, motion, sessions and the sidebar in, the binary was about 162 KB;
+  the command palette, appearance and the sidebar's system font took it to 183 KB (6 KB of code,
+  the rest a page step).
 - **Icons are SF Symbols.** The sidebar's icons come from macOS through
   `imageWithSystemSymbolName:`, tinted with the theme's colors, so ze ships no images for them.
+- **The sidebar is the one place off the grid** (zig-editor#5teh). Its names are `CTLine`s in the
+  system font, made once per row and kept until the tree or the font changes, so a scroll frame
+  draws them without laying anything out. They take the context's fill color, so a theme change
+  keeps them. `CTLineDraw` leaves its position in the text matrix, which the grid's glyph runs
+  also read, so drawing one resets the matrix after.
+- **The command palette reads the menu bar** (zig-editor#2eb7). It lists the menus' items as it
+  opens and runs a pick through `performActionForItemAtIndex:`, so every menu command is in it
+  with no second list to keep in step.
 - **No input methods and no accessibility.** ze is for US English typing on Apple Silicon only.
   It has no input method support (Chinese, Japanese or accented-letter composing), no VoiceOver
   or other accessibility support, and none is planned. Harsha set this on 2026-11-05, so new

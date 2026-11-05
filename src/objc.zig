@@ -107,6 +107,11 @@ pub extern fn CTFontGetAdvancesForGlyphs(font: Id, orientation: u32, glyphs: [*]
 pub extern fn CTFontGetAscent(font: Id) f64;
 pub extern fn CTFontGetDescent(font: Id) f64;
 extern fn CTFontCreateForString(font: Id, s: Id, range: Range) Id;
+pub extern fn CTLineCreateWithAttributedString(s: Id) Id;
+pub extern fn CTLineCreateTruncatedLine(line: Id, width: f64, kind: u32, token: Id) Id;
+pub extern fn CTLineDraw(line: Id, ctx: Id) void;
+pub extern fn CTLineGetTypographicBounds(line: Id, ascent: ?*f64, descent: ?*f64, leading: ?*f64) f64;
+pub extern fn CGContextSetTextPosition(ctx: Id, x: f64, y: f64) void;
 
 /// Flips glyphs upright in a flipped view.
 pub fn flipText(ctx: Id) void {

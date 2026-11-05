@@ -100,6 +100,10 @@ fn previousFile(_: Id, _: Sel, _: Id) callconv(.c) void {
     view.previousFile();
 }
 
+fn pickAppearance(_: Id, _: Sel, sender: Id) callconv(.c) void {
+    view.pickLook(@intCast(msg(isize, sender, "tag", .{})));
+}
+
 fn pickScheme(_: Id, _: Sel, sender: Id) callconv(.c) void {
     view.pickScheme(@intCast(msg(isize, sender, "tag", .{})));
 }
@@ -193,6 +197,8 @@ fn buildMenu(delegate: Id) void {
     _ = item(edit, "Toggle Comment", "toggleComment:", "/", cmd);
 
     const v = submenu(bar, "View");
+    _ = item(v, "Command Palette…", "commandPalette:", "k", cmd);
+    separator(v);
     const fonts = item(v, "Font…", "orderFrontFontPanel:", "t", cmd);
     msg(void, fonts, "setTarget:", .{msg(Id, objc.class("NSFontManager"), "sharedFontManager", .{})});
     _ = item(v, "Bigger", "zoomIn:", "=", cmd);
@@ -204,9 +210,16 @@ fn buildMenu(delegate: Id) void {
     view.sidebar_item = item(v, "Sidebar", "toggleSidebar:", "\\", cmd);
     _ = item(v, "Previous File", "previousFile:", "\t", ctrl);
     const themes = submenu(v, "Theme");
+    msg(void, item(themes, "Appearance", "", "", 0), "setEnabled:", .{false});
+    for ([_][]const u8{ "Auto", "Light", "Dark" }, 0..) |title, i| {
+        const it = item(themes, title, "pickAppearance:", "", 0);
+        msg(void, it, "setTag:", .{@as(isize, @intCast(i))});
+        msg(void, it, "setIndentationLevel:", .{@as(isize, 1)});
+        view.look_items[i] = it;
+    }
     for (settings.schemes, 0..) |sc, i| {
         if (i == 0 or sc.dark != settings.schemes[i - 1].dark) {
-            if (i > 0) separator(themes);
+            separator(themes);
             msg(void, item(themes, if (sc.dark) "Dark Mode" else "Light Mode", "", "", 0), "setEnabled:", .{false});
         }
         const it = item(themes, sc.title, "pickScheme:", "", 0);
@@ -255,6 +268,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     d.method("toggleSidebar:", @ptrCast(&toggleSidebar), "v@:@");
     d.method("previousFile:", @ptrCast(&previousFile), "v@:@");
     d.method("pickScheme:", @ptrCast(&pickScheme), "v@:@");
+    d.method("pickAppearance:", @ptrCast(&pickAppearance), "v@:@");
     d.method("menuNeedsUpdate:", @ptrCast(&fillRecent), "v@:@");
     d.method("openRecent:", @ptrCast(&openRecent), "v@:@");
     d.method("clearRecent:", @ptrCast(&clearRecent), "v@:@");

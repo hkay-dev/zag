@@ -1,5 +1,5 @@
 //! The settings file, `~/.config/ze/settings`: font, size, line height, soft
-//! wrap, auto-closing pairs, the sidebar and the colors of both themes, as `key = value`
+//! wrap, auto-closing pairs, the sidebar, light or dark, and the colors of both themes, as `key = value`
 //! lines. ze writes every key into it the first time it's opened, and menu
 //! toggles rewrite just their own line.
 const std = @import("std");
@@ -136,6 +136,9 @@ fn schemeIndex(key: []const u8) ?u8 {
 
 pub const default_size = 14.0;
 
+/// Light or dark: `auto` follows the Mac.
+pub const Look = enum { auto, light, dark };
+
 pub const Settings = struct {
     font_buf: [128]u8 = undefined,
     font_len: usize = 0,
@@ -146,6 +149,7 @@ pub const Settings = struct {
     pairs: bool = true,
     /// The folder tree on the left of folder windows.
     sidebar: bool = true,
+    look: Look = .auto,
     /// Indexes into `schemes`: the theme for light mode and for dark mode.
     light_scheme: u8 = 0,
     dark_scheme: u8 = 3,
@@ -268,6 +272,8 @@ pub fn parse(text: []const u8) Settings {
             s.pairs = flag(val) orelse s.pairs;
         } else if (std.mem.eql(u8, key, "sidebar")) {
             s.sidebar = flag(val) orelse s.sidebar;
+        } else if (std.mem.eql(u8, key, "appearance")) {
+            s.look = std.meta.stringToEnum(Look, val) orelse s.look;
         } else {
             const dot = std.mem.indexOfScalar(u8, key, '.') orelse continue;
             const theme = if (std.mem.eql(u8, key[0..dot], "light")) &s.light else if (std.mem.eql(u8, key[0..dot], "dark")) &s.dark else continue;
@@ -302,7 +308,9 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         \\# Show the folder's files on the left of the window: on or off.
         \\sidebar = {s}
         \\
-        \\# The theme for each of the Mac's modes: paper, ayu-light, one-light,
+        \\# Light or dark: auto follows the Mac, light or dark keeps ze in that mode.
+        \\appearance = {s}
+        \\# The theme for each mode: paper, ayu-light, one-light,
         \\# ink, ayu-dark or one-dark.
         \\light-theme = {s}
         \\dark-theme = {s}
@@ -318,6 +326,7 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         if (s.wrap) "on" else "off",
         if (s.pairs) "on" else "off",
         if (s.sidebar) "on" else "off",
+        @tagName(s.look),
         schemes[s.light_scheme].key,
         schemes[s.dark_scheme].key,
     });
@@ -417,7 +426,7 @@ test "settings read colors, flags and numbers and skip what they don't know" {
 }
 
 test "a written file reads back as the same settings" {
-    var s: Settings = .{ .size = 16, .wrap = true };
+    var s: Settings = .{ .size = 16, .wrap = true, .look = .dark };
     s.setFont("Menlo-Regular");
     s.dark.caret = .{ 1, 0, 0 };
     const text = try render(t.allocator, &s);
@@ -426,6 +435,7 @@ test "a written file reads back as the same settings" {
     try t.expectEqualStrings("Menlo-Regular", back.font());
     try t.expectEqual(s.size, back.size);
     try t.expect(back.wrap);
+    try t.expectEqual(Look.dark, back.look);
     try t.expectEqual(s.dark.caret, back.dark.caret);
     try t.expectEqual(s.light, back.light);
 }

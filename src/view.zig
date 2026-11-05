@@ -1,7 +1,7 @@
 //! One window per file: an NSView subclass that draws the text with
 //! CoreText glyph runs on a monospace grid, and turns key and mouse events
 //! into editor commands. The bottom line is the status bar and the prompt
-//! for find, go to line and quick open.
+//! for find, go to line, quick open and the command palette.
 const std = @import("std");
 const objc = @import("objc.zig");
 const editor = @import("editor.zig");
@@ -39,6 +39,7 @@ pub fn setRoot(dir: []const u8) void {
 
 fn rebuildTree() void {
     if (root) |r| tree.rebuild(gpa, r);
+    dropSideLines();
 }
 
 /// `p` relative to the folder, when it's inside it.
@@ -87,6 +88,8 @@ pub var pairs_item: Id = null;
 pub var sidebar_item: Id = null;
 /// View > Theme items, in `settings.schemes` order.
 pub var scheme_items: [settings.schemes.len]Id = @splat(null);
+/// View > Theme's Appearance items: Auto, Light, Dark.
+pub var look_items: [3]Id = @splat(null);
 
 var font: Id = null;
 var bold: Id = null;
@@ -96,6 +99,11 @@ var baseline: f64 = 15;
 var ascii: [2][95]u16 = undefined;
 const Fallback = struct { font: Id, glyph: u16 };
 var fallbacks: std.AutoHashMapUnmanaged(u21, Fallback) = .empty;
+/// The sidebar's fonts: the system font for file names, and a heavier one
+/// for the folder's name, with the baseline that centers them in a row.
+var side_font: Id = null;
+var head_font: Id = null;
+var side_base: f64 = 15;
 
 fn barH() f64 {
     return lh + 12;
@@ -132,6 +140,12 @@ fn setFont() void {
     const desc = objc.CTFontGetDescent(font);
     lh = @round(conf.size * conf.spacing);
     baseline = @round((lh - asc - desc) / 2 + asc);
+    if (side_font != null) _ = msg(void, side_font, "release", .{});
+    if (head_font != null) _ = msg(void, head_font, "release", .{});
+    side_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:", .{conf.size - 1}), "retain", .{});
+    head_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 2, @as(f64, 0.3) }), "retain", .{});
+    side_base = @round((lh - objc.CTFontGetAscent(side_font) - objc.CTFontGetDescent(side_font)) / 2 + objc.CTFontGetAscent(side_font));
+    dropSideLines();
     var it = fallbacks.valueIterator();
     while (it.next()) |fb| if (fb.font != font) objc.CFRelease(fb.font.?);
     fallbacks.clearRetainingCapacity();
@@ -385,7 +399,7 @@ fn tick(self: Id, _: Sel, _: Id) callconv(.c) void {
 
 // ---- documents ----
 
-const Mode = enum { edit, find, line, open, replace };
+const Mode = enum { edit, find, line, open, replace, command };
 const Drag = enum { char, word, line };
 
 /// A file a window holds but isn't showing: the sidebar and quick open
@@ -454,6 +468,8 @@ const Doc = struct {
     picks: [10]usize = undefined,
     npicks: usize = 0,
     pick: usize = 0,
+    /// The list shows menu commands (⌘K) rather than files.
+    palette: bool = false,
     /// A word for the status bar, cleared by the next key or click.
     note: []const u8 = "",
     drag: Drag = .char,
@@ -1013,6 +1029,16 @@ pub fn loadSettings() void {
     for (scheme_items, 0..) |it, i| {
         if (it != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(i == conf.light_scheme or i == conf.dark_scheme))});
     }
+    for (look_items, 0..) |it, i| {
+        if (it != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(i == @intFromEnum(conf.look)))});
+    }
+    // Auto leaves it to the Mac; Light and Dark pin every window.
+    const look: Id = switch (conf.look) {
+        .auto => null,
+        .light => msg(Id, objc.class("NSAppearance"), "appearanceNamed:", .{objc.str("NSAppearanceNameAqua")}),
+        .dark => msg(Id, objc.class("NSAppearance"), "appearanceNamed:", .{objc.str("NSAppearanceNameDarkAqua")}),
+    };
+    msg(void, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "setAppearance:", .{look});
     for (docs.items) |d| {
         d.dark = null;
         d.sy = d.sy / old_lh * lh;
@@ -1060,6 +1086,12 @@ pub fn pickScheme(i: usize) void {
     store(if (sc.dark) "dark-theme" else "light-theme", sc.key);
 }
 
+/// View > Theme > Appearance: 0 Auto, 1 Light, 2 Dark.
+pub fn pickLook(i: usize) void {
+    if (i > 2) return;
+    store("appearance", @tagName(@as(settings.Look, @enumFromInt(i))));
+}
+
 // ---- prompt ----
 
 fn startPrompt(d: *Doc, m: Mode) void {
@@ -1092,6 +1124,12 @@ fn startPrompt(d: *Doc, m: Mode) void {
                 break :blk root.?;
             };
             d.list = finder.scan(gpa, r) catch null;
+            d.palette = false;
+            pickFiles(d);
+        },
+        .command => {
+            listCommands();
+            d.palette = true;
             pickFiles(d);
         },
         else => {},
@@ -1099,10 +1137,101 @@ fn startPrompt(d: *Doc, m: Mode) void {
     refresh(d);
 }
 
+/// The names quick open or the palette picks from, while it's open.
+fn listing(d: *const Doc) ?[]const []const u8 {
+    return switch (d.mode) {
+        .open => if (d.list) |l| l.paths.items else null,
+        .command => cmd_names.items,
+        else => null,
+    };
+}
+
 fn pickFiles(d: *Doc) void {
-    const l = d.list orelse return;
-    d.npicks = finder.best(l.paths.items, d.prompt.items, &d.picks);
+    d.npicks = finder.best(listing(d) orelse return, d.prompt.items, &d.picks);
     d.pick = 0;
+}
+
+// ---- command palette ----
+
+/// A menu item the palette lists, with its shortcut and whether it's checked.
+const Command = struct { item: Id, keys: []const u8, on: bool };
+var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
+var cmd_names: std.ArrayList([]const u8) = .empty;
+var cmds: std.ArrayList(Command) = .empty;
+
+/// Lists every command in the menu bar, the View menu's first since the
+/// palette is mostly for settings. Running one runs its menu item, so the
+/// palette never needs its own copy of a command.
+fn listCommands() void {
+    _ = cmd_arena.reset(.retain_capacity);
+    cmd_names = .empty;
+    cmds = .empty;
+    const bar = msg(Id, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "mainMenu", .{});
+    const n: usize = @intCast(msg(isize, bar, "numberOfItems", .{}));
+    for (0..2) |pass| for (0..n) |i| {
+        const it = msg(Id, bar, "itemAtIndex:", .{@as(isize, @intCast(i))});
+        const sub = msg(Id, it, "submenu", .{});
+        if (sub == null) continue;
+        const view_menu = std.mem.eql(u8, objc.utf8(msg(Id, it, "title", .{})), "View");
+        if (view_menu == (pass == 0)) addCommands(sub, "");
+    };
+}
+
+/// Adds `menu`'s items. A submenu's items are named after it ("Theme: Dark"),
+/// or after the greyed-out heading above them ("Light Mode: Paper").
+fn addCommands(menu: Id, prefix: []const u8) void {
+    const a = cmd_arena.allocator();
+    var section = prefix;
+    const n: usize = @intCast(msg(isize, menu, "numberOfItems", .{}));
+    for (0..n) |i| {
+        const it = msg(Id, menu, "itemAtIndex:", .{@as(isize, @intCast(i))});
+        if (msg(bool, it, "isSeparatorItem", .{})) {
+            section = prefix;
+            continue;
+        }
+        if (msg(bool, it, "isHidden", .{})) continue;
+        const title = objc.utf8(msg(Id, it, "title", .{}));
+        const sub = msg(Id, it, "submenu", .{});
+        if (sub != null) {
+            // Open Recent fills itself only as it opens.
+            if (msg(Id, sub, "delegate", .{}) == null) addCommands(sub, title);
+            continue;
+        }
+        const act = msg(Sel, it, "action", .{});
+        if (act == null or objc.sel_getName(act)[0] == 0) {
+            section = title;
+            continue;
+        }
+        if (act == objc.sel_registerName("commandPalette:")) continue;
+        const name = (if (section.len > 0) std.fmt.allocPrint(a, "{s}: {s}", .{ section, title }) else a.dupe(u8, title)) catch return;
+        cmd_names.append(a, name) catch return;
+        cmds.append(a, .{ .item = it, .keys = keysOf(a, it) catch "", .on = msg(isize, it, "state", .{}) == 1 }) catch return;
+    }
+}
+
+/// A menu item's shortcut as the menu shows it, like ⇧⌘S.
+fn keysOf(a: std.mem.Allocator, it: Id) ![]const u8 {
+    const key = objc.utf8(msg(Id, it, "keyEquivalent", .{}));
+    if (key.len == 0) return "";
+    const mods = msg(usize, it, "keyEquivalentModifierMask", .{});
+    var out: std.ArrayList(u8) = .empty;
+    if (mods & ctrl_key != 0) try out.appendSlice(a, "⌃");
+    if (mods & opt_key != 0) try out.appendSlice(a, "⌥");
+    if (mods & shift_key != 0) try out.appendSlice(a, "⇧");
+    if (mods & cmd_key != 0) try out.appendSlice(a, "⌘");
+    if (std.mem.eql(u8, key, "\t")) {
+        try out.appendSlice(a, "⇥");
+    } else for (key) |ch| try out.append(a, std.ascii.toUpper(ch));
+    return out.items;
+}
+
+/// Runs a palette pick after the event that chose it, so a command that
+/// closes the window doesn't pull the window out from under the prompt.
+fn runCommand(_: Id, _: Sel, it: Id) callconv(.c) void {
+    const menu = msg(Id, it, "menu", .{});
+    if (menu == null) return;
+    const i = msg(isize, menu, "indexOfItem:", .{it});
+    if (i >= 0) msg(void, menu, "performActionForItemAtIndex:", .{i});
 }
 
 fn countFound(d: *Doc) void {
@@ -1134,7 +1263,7 @@ fn promptChanged(d: *Doc) void {
             countFound(d);
             center(d);
         },
-        .open => pickFiles(d),
+        .open, .command => pickFiles(d),
         else => {},
     }
 }
@@ -1168,6 +1297,12 @@ fn accept(d: *Doc) void {
             var buf: [std.c.PATH_MAX]u8 = undefined;
             const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ root.?, rel }) catch return;
             open(path, d);
+        },
+        .command => {
+            d.mode = .edit;
+            if (d.npicks == 0) return;
+            const it = cmds.items[d.picks[d.pick]].item;
+            msg(void, d.view, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("runCommand:"), it, @as(f64, 0) });
         },
         .replace => {
             remember(d);
@@ -1227,7 +1362,7 @@ fn promptCommand(d: *Doc, name: []const u8) void {
         into.items.len = editor.prevChar(into.items, into.items.len);
     } else if (is(name, "deleteWordBackward") or is(name, "deleteToBeginningOfLine")) {
         into.clearRetainingCapacity();
-    } else if (d.mode == .open and (is(name, "moveUp") or is(name, "moveDown"))) {
+    } else if (listing(d) != null and (is(name, "moveUp") or is(name, "moveDown"))) {
         if (is(name, "moveUp")) d.pick -|= 1 else d.pick = @min(d.pick + 1, d.npicks -| 1);
         return;
     } else return;
@@ -1513,8 +1648,9 @@ fn drawSide(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, by: f64, dark: bool) vo
     objc.CGContextSaveGState(ctx);
     objc.CGContextClipToRect(ctx, .{ .y = top_h - 8, .w = side_w - 1, .h = by - top_h + 8 });
     const y0 = top_h - d.side_y;
-    const cells: usize = @intFromFloat(@max((side_w - 28) / cw, 0));
-    _ = k.text(std.fs.path.basename(root.?), null, th, th.muted, 14, y0 + baseline, 0, cells);
+    if (side_head == null) side_head = uiLine(std.fs.path.basename(root.?), head_font, side_w - 28);
+    _ = drawLine(ctx, side_head, th.muted, 14, y0 + side_base);
+    if (side_lines.items.len < rows.len) side_lines.appendNTimes(gpa, null, rows.len - side_lines.items.len) catch return objc.CGContextRestoreGState(ctx);
     const s = @round(conf.size + 4);
     const from: usize = @intFromFloat(@max(@floor(d.side_y / lh) - 1, 0));
     const to: usize = @min(rows.len, @as(usize, @intFromFloat(@ceil((d.side_y + view_h) / lh))));
@@ -1526,12 +1662,62 @@ fn drawSide(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, by: f64, dark: bool) vo
         if (row.dir) drawIcon(icon(if (tree.isOpen(row.rel)) .opened else .closed, dark, th), x, iy + (s - 14) / 2, 14);
         drawIcon(icon(iconFor(row), dark, th), x + 15, iy, s);
         const nx = x + 15 + s + 6;
-        const room: usize = @intFromFloat(@max((side_w - nx - 10) / cw, 0));
-        const n = k.text(row.rel[row.base..], null, th, th.fg, nx, y + baseline, 0, room);
-        if (!row.dir and rowDirty(d, row.rel)) _ = k.text(" •", null, th, th.caret, nx + f(n) * cw, y + baseline, 0, 2);
+        const dirty = !row.dir and rowDirty(d, row.rel);
+        const line = &side_lines.items[i - 1];
+        if (line.* == null) line.* = uiLine(row.rel[row.base..], side_font, side_w - nx - if (row.dir) @as(f64, 10) else 22);
+        const w = drawLine(ctx, line.*, th.fg, nx, y + side_base);
+        if (dirty) _ = k.text(" •", null, th, th.caret, nx + w, y + baseline, 0, 2);
     }
     k.flush();
     objc.CGContextRestoreGState(ctx);
+}
+
+/// The sidebar's text as CoreText lines in the system font, made on first
+/// draw: the folder's name, then one per tree row. Dropped when the tree or
+/// the font changes; drawing one costs no layout.
+var side_head: Id = null;
+var side_lines: std.ArrayList(Id) = .empty;
+
+fn dropSideLines() void {
+    if (side_head) |h| objc.CFRelease(h);
+    side_head = null;
+    for (side_lines.items) |l| if (l) |p| objc.CFRelease(p);
+    side_lines.clearRetainingCapacity();
+}
+
+/// `s` as a line in `fnt` that takes the context's fill color, cut with an
+/// ellipsis past `width`. Owned: CFRelease it.
+fn uiLine(s: []const u8, fnt: Id, width: f64) Id {
+    const objs = [2]Id{ fnt, msg(Id, objc.class("NSNumber"), "numberWithBool:", .{true}) };
+    const keys = [2]Id{ objc.str("NSFont"), objc.str("CTForegroundColorFromContext") };
+    const attrs = msg(Id, objc.class("NSDictionary"), "dictionaryWithObjects:forKeys:count:", .{ &objs, &keys, @as(usize, 2) });
+    const text = attributed(s, attrs);
+    defer msg(void, text, "release", .{});
+    const line = objc.CTLineCreateWithAttributedString(text);
+    if (line == null or objc.CTLineGetTypographicBounds(line, null, null, null) <= width) return line;
+    const dots = attributed("…", attrs);
+    defer msg(void, dots, "release", .{});
+    const token = objc.CTLineCreateWithAttributedString(dots);
+    defer if (token) |t| objc.CFRelease(t);
+    const short = objc.CTLineCreateTruncatedLine(line, width, 1, token);
+    if (short == null) return line;
+    objc.CFRelease(line.?);
+    return short;
+}
+
+fn attributed(s: []const u8, attrs: Id) Id {
+    return msg(Id, msg(Id, objc.class("NSAttributedString"), "alloc", .{}), "initWithString:attributes:", .{ objc.str(s), attrs });
+}
+
+/// Draws a `uiLine` with its baseline at `y`, in `c`. Returns its width.
+fn drawLine(ctx: Id, line: Id, c: Rgb, x: f64, y: f64) f64 {
+    if (line == null) return 0;
+    objc.CGContextSetRGBFillColor(ctx, c[0], c[1], c[2], 1);
+    objc.CGContextSetTextPosition(ctx, x, y);
+    objc.CTLineDraw(line, ctx);
+    // The grid's glyph runs read the text matrix's offset too, so put it back.
+    objc.flipText(ctx);
+    return objc.CTLineGetTypographicBounds(line, null, null, null);
 }
 
 /// A folder opens or closes; a file shows here, or with ⌘ in a new window.
@@ -1705,10 +1891,10 @@ fn draw(d: *Doc, ctx: Id) void {
     fill(ctx, th.bg, 0, 0, r.w, top_h - 8);
     if (lx > 0) drawSide(d, ctx, th, &k, by, dark);
     const ty = by + 6 + baseline;
-    const want_ph: f64 = if (d.mode == .open and d.list != null) f(d.npicks) * lh + 12 else 0;
+    const want_ph: f64 = if (listing(d) != null) f(d.npicks) * lh + 12 else 0;
     d.panel.aim(want_ph, now);
     const ph = d.panel.at(now);
-    if (ph > 0.5 and d.list != null) {
+    if (ph > 0.5 and (d.palette or d.list != null)) {
         // The list rises out of the bottom line, rows riding its top edge.
         objc.CGContextSaveGState(ctx);
         objc.CGContextClipToRect(ctx, .{ .x = 0, .y = by - ph, .w = r.w, .h = ph });
@@ -1717,6 +1903,15 @@ fn draw(d: *Doc, ctx: Id) void {
         for (d.picks[0..d.npicks], 0..) |p, i| {
             const y = by - ph + 6 + f(i) * lh;
             if (i == d.pick) fill(ctx, th.sel, 0, y, r.w, lh);
+            if (d.palette) {
+                if (p >= cmds.items.len) continue;
+                const c = cmds.items[p];
+                const n = k.text(cmd_names.items[p], null, th, th.fg, tx, y + baseline, 0, 200);
+                if (c.on) _ = k.text(" ✓", null, th, th.caret, tx + f(n) * cw, y + baseline, 0, 2);
+                const kc = std.unicode.utf8CountCodepoints(c.keys) catch c.keys.len;
+                _ = k.text(c.keys, null, th, th.muted, r.w - pad_x - f(kc) * cw, y + baseline, 0, 16);
+                continue;
+            }
             const path = d.list.?.paths.items[p];
             const slash = if (std.mem.lastIndexOfScalar(u8, path, '/')) |j| j + 1 else 0;
             const n = k.text(path[slash..], null, th, th.fg, tx, y + baseline, 0, 200);
@@ -1741,6 +1936,7 @@ fn draw(d: *Doc, ctx: Id) void {
         const label = switch (d.mode) {
             .find, .replace => "find",
             .line => "line",
+            .command => "run",
             else => "open",
         };
         x += f(k.text(label, null, th, th.caret, x, ty, 0, 8) + 1) * cw;
@@ -1761,6 +1957,7 @@ fn draw(d: *Doc, ctx: Id) void {
         placeCaret(d, now, cx, by + 8, false, .{ 1 + @intFromEnum(d.mode) * 2 + d.which, width, 0 }, key);
         if (finding) right = if (d.found[1] == 0) "no matches" else std.fmt.bufPrint(&buf, "{d} of {d}", .{ @min(d.found[0], d.found[1]), d.found[1] }) catch "";
         if (d.mode == .open and d.list != null) right = std.fmt.bufPrint(&buf, "{d} files", .{d.list.?.paths.items.len}) catch "";
+        if (d.mode == .command) right = std.fmt.bufPrint(&buf, "{d} commands", .{cmds.items.len}) catch "";
     }
     _ = k.text(right, null, th, th.muted, r.w - pad_x - f(right.len) * cw, ty, 0, 64);
     k.flush();
@@ -1920,12 +2117,27 @@ fn unitAt(d: *Doc, pos: usize) [2]usize {
     return r;
 }
 
+/// The empty strip along the top stands in for the hidden title bar: it
+/// drags the window, and a double-click does what the Mac's Desktop & Dock
+/// setting says, like any title bar.
+fn titleStrip(d: *Doc, ev: Id) void {
+    d.side_down = true;
+    if (msg(isize, ev, "clickCount", .{}) == 2) {
+        const act = objc.utf8(msg(Id, defaults(), "stringForKey:", .{objc.str("AppleActionOnDoubleClick")}));
+        if (is(act, "Minimize")) return msg(void, d.window, "performMiniaturize:", .{@as(Id, null)});
+        if (!is(act, "None")) msg(void, d.window, "performZoom:", .{@as(Id, null)});
+        return;
+    }
+    msg(void, d.window, "performWindowDragWithEvent:", .{ev});
+}
+
 fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const d = docOf(self) orelse return;
     const p = local(self, ev);
     const by = bounds(d).h - barH();
     d.note = "";
-    if (d.mode == .open and d.list != null) {
+    if (p.y < top_h - 8) return titleStrip(d, ev);
+    if (listing(d) != null) {
         const top = by - f(d.npicks) * lh - 6;
         if (p.y >= top and p.y < by) {
             d.pick = @min(@as(usize, @intFromFloat((p.y - top) / lh)), d.npicks -| 1);
@@ -1993,9 +2205,11 @@ fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
     refresh(d);
 }
 
-/// An I-beam over the text; the sidebar keeps the arrow.
+/// An I-beam over the text; the sidebar and the title strip keep the arrow.
 fn resetCursorRects(self: Id, _: Sel) callconv(.c) void {
     var r = msg(Rect, self, "bounds", .{});
+    r.y += top_h - 8;
+    r.h -= top_h - 8;
     if (docOf(self)) |d| {
         const lx = left(d);
         r.x += lx;
@@ -2118,6 +2332,10 @@ fn quickOpen(d: *Doc) void {
     startPrompt(d, .open);
 }
 
+fn palette(d: *Doc) void {
+    startPrompt(d, .command);
+}
+
 fn comment(d: *Doc) void {
     if (d.mode != .edit) return;
     d.ed.toggleComment(gpa, d.lang.line_comment) catch {};
@@ -2175,6 +2393,7 @@ pub fn setup() void {
     c.method("windowWillClose:", @ptrCast(&windowWillClose), "v@:@");
     c.method("tick:", @ptrCast(&tick), "v@:@");
     c.method("changeFont:", @ptrCast(&changeFont), "v@:@");
+    c.method("runCommand:", @ptrCast(&runCommand), "v@:@");
     const actions = .{
         .{ "copy:", copy },             .{ "cut:", cut },               .{ "paste:", paste },
         .{ "selectAll:", selectAll },   .{ "undo:", undo },             .{ "redo:", redo },
@@ -2182,6 +2401,7 @@ pub fn setup() void {
         .{ "findNext:", findNext },         .{ "findPrevious:", findPrev }, .{ "gotoLine:", gotoLine },
         .{ "quickOpen:", quickOpen },       .{ "toggleComment:", comment }, .{ "zoomIn:", zoomIn },
         .{ "zoomOut:", zoomOut },           .{ "zoomReset:", zoomReset },   .{ "findAndReplace:", findReplace },
+        .{ "commandPalette:", palette },
     };
     inline for (actions) |a| c.method(a[0], action(a[1]), "v@:@");
     view_class = c.finish();

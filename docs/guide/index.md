@@ -12,12 +12,24 @@ one line at the bottom. When you've opened a folder, a sidebar on the left lists
 bottom line shows the file's name, a dot when there are unsaved changes, and the line and column
 of the caret. It also turns into a prompt when you find, replace, jump to a line or open a file.
 
-ze follows the Mac's light or dark setting, with a theme for each (see Themes). Things move
+ze follows the Mac's light or dark setting unless you pick one, with a theme for each (see Themes). Things move
 a little instead of jumping: the caret glides to each new spot and blinks with a soft fade after a
 moment of rest, the band behind the caret's line slides after it, a new selection fades in, the
 quick open list rises out of the bottom line, and the page eases into place when the keyboard
 scrolls it. Scrolling with the trackpad or mouse follows your fingers exactly. Windows in the
 background don't show a caret.
+
+The window has no title bar, so the empty strip along its top stands in for one: drag it to move
+the window, and double-click it to zoom (or minimize, or nothing, as Desktop & Dock's "Double-click
+a window's title bar" setting says).
+
+## Command palette
+
+**View > Command Palette…** (⌘K) lists every command in ze's menus in the bottom line, the View
+menu's first, each with its shortcut and a checkmark when it's on. Type a few letters, use ↑ and
+↓ to pick, and press Return to run it, or Escape to close the list. Commands inside a submenu or
+under a heading carry its name, like "Appearance: Dark" or "Dark Mode: Ayu Dark", so typing
+`dark` finds them all.
 
 ## Open files
 
@@ -39,7 +51,7 @@ The left side of each window lists the files of ze's folder, folders first. That
 started in from a terminal, or the one you opened last. Started from the Dock or Finder with no
 folder from last time, it's your home folder. Files and folders whose names start with a dot are
 left out. Each row has a small icon for its kind: folder, code, Markdown, data, image or plain
-text.
+text. Names are in the Mac's system font and end in "…" when they don't fit.
 
 - Click a folder to open or close it.
 - Click a file to show it in the same window. The window keeps every file it has shown, with
@@ -143,10 +155,11 @@ function color with their address dimmed. Other files are plain text.
 
 ## Themes
 
-ze has a theme for light mode and one for dark mode, and switches every window between them when
-the Mac switches. **View > Theme** picks them: Paper (the default), Ayu Light or One Light for
-light mode, and Ink (the default), Ayu Dark or One Dark for dark mode. A checkmark shows the two
-in use. ze remembers them in the settings file.
+ze has a theme for light mode and one for dark mode. **View > Theme** picks the mode under
+Appearance: Auto (the default) switches every window when the Mac switches, and Light or Dark keeps
+ze in that mode whatever the Mac does. Below that it picks the themes: Paper (the default), Ayu Light
+or One Light for light mode, and Ink (the default), Ayu Dark or One Dark for dark mode. Checkmarks
+show the mode and the two themes in use. ze remembers them in the settings file.
 
 ## Font and text size
 
@@ -170,6 +183,7 @@ line-height = 1.75       # as a multiple of the size
 wrap = off
 pairs = on               # auto-close brackets and quotes
 sidebar = on             # the folder's files on the left
+appearance = auto        # auto, light or dark
 light-theme = paper      # paper, ayu-light, one-light, ink, ayu-dark or one-dark
 dark-theme = ink
 light.comment = #B3AEA3  # one color of the light theme, as #rrggbb
