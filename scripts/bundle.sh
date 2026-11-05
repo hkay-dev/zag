@@ -6,8 +6,17 @@ cd "$(dirname "$0")/.."
 zig build --release
 app=zig-out/ze.app
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp zig-out/bin/ze "$app/Contents/MacOS/ze"
+# The icon. actool also writes a 1.9 MB Assets.car for macOS 26's glass
+# modes; ze ships only the 37 KB AppIcon.icns (up to 256 px), which every
+# macOS shows in the same shape.
+icon=$(mktemp -d)
+xcrun actool "$PWD/AppIcon.icon" --compile "$icon" --app-icon AppIcon \
+  --platform macosx --minimum-deployment-target 15.0 \
+  --output-partial-info-plist /dev/null >/dev/null
+cp "$icon/AppIcon.icns" "$app/Contents/Resources/"
+rm -rf "$icon"
 cat > "$app/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -20,6 +29,7 @@ cat > "$app/Contents/Info.plist" <<'EOF'
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>
