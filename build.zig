@@ -1,0 +1,40 @@
+const std = @import("std");
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{ .default_target = .{
+        .cpu_arch = .aarch64,
+        .os_tag = .macos,
+        .os_version_min = .{ .semver = .{ .major = 15, .minor = 0, .patch = 0 } },
+    } });
+    // `zig build --release` makes it small: the point of ze is a tiny binary.
+    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .small });
+
+    const mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .strip = optimize != .debug,
+    });
+    if (!target.query.isNative()) {
+        if (std.zig.system.darwin.getSdk(b.allocator, b.graph.io, &target.result)) |sdk| {
+            mod.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System/Library/Frameworks" }) });
+            mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr/lib" }) });
+        }
+    }
+    mod.linkFramework("AppKit", .{});
+
+    const exe = b.addExecutable(.{ .name = "ze", .root_module = mod });
+    b.installArtifact(exe);
+
+    const run = b.addRunArtifact(exe);
+    run.addPassthruArgs();
+    b.step("run", "Run ze").dependOn(&run.step);
+
+    const tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/tests.zig"),
+        .target = b.graph.host,
+        .link_libc = true,
+    }) });
+    b.step("test", "Run the editing tests").dependOn(&b.addRunArtifact(tests).step);
+}
