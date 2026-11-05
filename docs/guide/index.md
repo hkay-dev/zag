@@ -12,7 +12,9 @@ line at the bottom. That line shows the file's name, a dot when there are unsave
 line and column of the caret. It also turns into a prompt when you find, jump to a line or open a
 file.
 
-ze follows the Mac's light or dark setting: warm paper in light mode, ink in dark mode.
+ze follows the Mac's light or dark setting: warm paper in light mode, ink in dark mode. The caret
+glides to each new spot, and after a moment of rest it blinks with a soft fade. Windows in the
+background don't show a caret.
 
 ## Open files
 

@@ -23,8 +23,12 @@ pub fn build(b: *std.Build) void {
         }
     }
     mod.linkFramework("AppKit", .{});
+    mod.linkFramework("QuartzCore", .{});
 
     const exe = b.addExecutable(.{ .name = "ze", .root_module = mod });
+    // No spare room after the load commands: ze never gets its install names
+    // rewritten, and the padding alone can push __TEXT onto another 16 KB page.
+    exe.headerpad_size = 0;
     b.installArtifact(exe);
 
     const run = b.addRunArtifact(exe);

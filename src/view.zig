@@ -199,6 +199,49 @@ fn fill(ctx: Id, c: Rgb, x: f64, y: f64, w: f64, h: f64) void {
     objc.CGContextFillRect(ctx, .{ .x = x, .y = y, .w = w, .h = h });
 }
 
+fn nscolor(c: Rgb) Id {
+    return msg(Id, objc.class("NSColor"), "colorWithDeviceRed:green:blue:alpha:", .{ c[0], c[1], c[2], @as(f64, 1) });
+}
+
+// ---- the caret ----
+
+extern fn CACurrentMediaTime() f64;
+
+/// Moves the caret layer. A new spot glides there; the same spot at a new
+/// place on screen (scrolling, resizing) or a caret that was hidden snaps.
+fn placeCaret(d: *Doc, x: f64, y: f64, spot: [3]usize, show: bool) void {
+    const t = objc.class("CATransaction");
+    const moved = !std.mem.eql(usize, &spot, &d.spot);
+    const glide = moved and d.shown and show and !d.snap;
+    msg(void, t, "begin", .{});
+    msg(void, t, "setDisableActions:", .{!glide});
+    if (glide) {
+        msg(void, t, "setAnimationDuration:", .{@as(f64, 0.09)});
+        msg(void, t, "setAnimationTimingFunction:", .{msg(Id, objc.class("CAMediaTimingFunction"), "functionWithName:", .{objc.str("easeOut")})});
+    }
+    msg(void, d.caret, "setFrame:", .{Rect{ .x = x, .y = y, .w = 2, .h = lh - 4 }});
+    msg(void, d.caret, "setHidden:", .{!show});
+    if (show and (moved or !d.shown)) blink(d.caret);
+    msg(void, t, "commit", .{});
+    d.spot = spot;
+    d.shown = show;
+    d.snap = false;
+}
+
+/// Holds the caret solid for half a second, then fades it out and in.
+fn blink(caret: Id) void {
+    const num = objc.class("NSNumber");
+    const a = msg(Id, objc.class("CABasicAnimation"), "animationWithKeyPath:", .{objc.str("opacity")});
+    msg(void, a, "setFromValue:", .{msg(Id, num, "numberWithDouble:", .{@as(f64, 1)})});
+    msg(void, a, "setToValue:", .{msg(Id, num, "numberWithDouble:", .{@as(f64, 0)})});
+    msg(void, a, "setDuration:", .{@as(f64, 0.5)});
+    msg(void, a, "setAutoreverses:", .{true});
+    msg(void, a, "setRepeatCount:", .{std.math.inf(f32)});
+    msg(void, a, "setBeginTime:", .{CACurrentMediaTime() + 0.5});
+    msg(void, a, "setTimingFunction:", .{msg(Id, objc.class("CAMediaTimingFunction"), "functionWithName:", .{objc.str("easeInEaseOut")})});
+    msg(void, caret, "addAnimation:forKey:", .{ a, objc.str("blink") });
+}
+
 // ---- documents ----
 
 const Mode = enum { edit, find, line, open };
@@ -234,6 +277,14 @@ const Doc = struct {
     states: std.ArrayList(syntax.State) = .empty,
     kinds: std.ArrayList(syntax.Kind) = .empty,
     dark: ?bool = null,
+    /// The caret is a Core Animation layer, so its glide and blink run in
+    /// the window server instead of redrawing the text.
+    caret: Id = null,
+    /// What the caret last stood for: mode, then row and column or prompt width.
+    spot: [3]usize = .{ std.math.maxInt(usize), 0, 0 },
+    shown: bool = false,
+    /// Place the caret without gliding (mouse drags).
+    snap: bool = false,
 
     fn name(d: *const Doc) []const u8 {
         return if (d.path) |p| std.fs.path.basename(p) else "untitled";
@@ -348,6 +399,11 @@ pub fn newDoc() ?*Doc {
     setDoc(view, d);
     d.window = win;
     d.view = view;
+    msg(void, view, "setWantsLayer:", .{true});
+    d.caret = msg(Id, objc.class("CALayer"), "layer", .{});
+    msg(void, d.caret, "setCornerRadius:", .{@as(f64, 1)});
+    msg(void, d.caret, "setHidden:", .{true});
+    msg(void, msg(Id, view, "layer", .{}), "addSublayer:", .{d.caret});
     msg(void, win, "setTitlebarAppearsTransparent:", .{true});
     msg(void, win, "setTitleVisibility:", .{@as(isize, 1)});
     msg(void, win, "setMinSize:", .{Point{ .x = 360, .y = 240 }});
@@ -642,8 +698,8 @@ fn draw(d: *Doc, ctx: Id) void {
     const th = if (dark) &ink else &paper;
     if (d.dark != dark) {
         d.dark = dark;
-        const c = msg(Id, objc.class("NSColor"), "colorWithDeviceRed:green:blue:alpha:", .{ th.bg[0], th.bg[1], th.bg[2], @as(f64, 1) });
-        msg(void, d.window, "setBackgroundColor:", .{c});
+        msg(void, d.window, "setBackgroundColor:", .{nscolor(th.bg)});
+        msg(void, d.caret, "setBackgroundColor:", .{msg(Id, nscolor(th.caret), "CGColor", .{})});
     }
     const r = bounds(d);
     const b = &d.ed.buf;
@@ -703,14 +759,19 @@ fn draw(d: *Doc, ctx: Id) void {
     }
     k.flush();
 
+    // The caret only shows in the key window, and only on a line that's fully
+    // inside the text area.
+    const by = r.h - barH();
+    const key = msg(bool, d.window, "isKeyWindow", .{});
     if (d.mode == .edit) {
-        const x = pad_x + f(editor.colOf(b.line(cur_row), d.ed.cur - b.lineStart(cur_row))) * cw - d.sx;
-        if (x >= pad_x - 1) fill(ctx, th.caret, x - 1, top_h + f(cur_row) * lh - d.sy + 2, 2, lh - 4);
+        const col = editor.colOf(b.line(cur_row), d.ed.cur - b.lineStart(cur_row));
+        const x = pad_x + f(col) * cw - d.sx - 1;
+        const y = top_h + f(cur_row) * lh - d.sy + 2;
+        placeCaret(d, x, y, .{ 0, cur_row, col }, key and x >= pad_x - 2 and y >= top_h - 8 and y + lh - 4 <= by);
     }
 
     // The band under the title bar, the quick open list, and the status bar.
     fill(ctx, th.bg, 0, 0, r.w, top_h - 8);
-    const by = r.h - barH();
     const ty = by + 6 + baseline;
     if (d.mode == .open and d.list != null) {
         const ph = f(d.npicks) * lh + 12;
@@ -750,7 +811,7 @@ fn draw(d: *Doc, ctx: Id) void {
         const n = k.text(d.prompt.items, null, th, th.fg, x, ty, 0, 400);
         x += f(n) * cw;
         k.flush();
-        fill(ctx, th.caret, x, by + 8, 2, lh - 4);
+        placeCaret(d, x, by + 8, .{ @intFromEnum(d.mode), d.prompt.items.len, 0 }, key);
         if (d.mode == .find and d.prompt.items.len > 0) right = if (d.found[1] == 0) "no matches" else std.fmt.bufPrint(&buf, "{d} of {d}", .{ @min(d.found[0], d.found[1]), d.found[1] }) catch "";
         if (d.mode == .open and d.list != null) right = std.fmt.bufPrint(&buf, "{d} files", .{d.list.?.paths.items.len}) catch "";
     }
@@ -921,6 +982,7 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
 
 fn mouseDragged(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const d = docOf(self) orelse return;
+    d.snap = true;
     const p = local(self, ev);
     if (p.y < top_h) d.sy -= lh;
     if (p.y > bounds(d).h - barH()) d.sy += lh;
@@ -953,6 +1015,8 @@ fn resetCursorRects(self: Id, _: Sel) callconv(.c) void {
     msg(void, self, "addCursorRect:cursor:", .{ msg(Rect, self, "bounds", .{}), msg(Id, objc.class("NSCursor"), "IBeamCursor", .{}) });
 }
 
+/// Also the window delegate's key and resign key calls, so the caret shows
+/// only in the key window.
 fn appearanceChanged(self: Id, _: Sel) callconv(.c) void {
     msg(void, self, "setNeedsDisplay:", .{true});
 }
@@ -1101,6 +1165,8 @@ pub fn setup() void {
     c.method("scrollWheel:", @ptrCast(&scrollWheel), "v@:@");
     c.method("resetCursorRects", @ptrCast(&resetCursorRects), "v@:");
     c.method("viewDidChangeEffectiveAppearance", @ptrCast(&appearanceChanged), "v@:");
+    c.method("windowDidBecomeKey:", @ptrCast(&appearanceChanged), "v@:@");
+    c.method("windowDidResignKey:", @ptrCast(&appearanceChanged), "v@:@");
     c.method("windowShouldClose:", @ptrCast(&windowShouldClose), "c@:@");
     c.method("windowWillClose:", @ptrCast(&windowWillClose), "v@:@");
     const actions = .{
