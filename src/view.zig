@@ -612,6 +612,7 @@ fn scenery(d: *const Doc, now: f64) bool {
     const stretched = d.relax and (d.ov[0] != 0 or d.ov[1] != 0);
     return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or now < d.focus_t0 + focus_time or d.panel.moving(now) or d.lit.moving(now) or
         d.prompt_t.moving(now) or d.plus_t.moving(now) or !d.pick_s.settled() or tabsMoving(d, now) or
+        (d.pick_live and (now < d.rows_t0 + row_lag * 5 + row_fade or now < d.pick_t0 + xfade_time)) or
         now < d.load_t + load_time or (d.had_sel and now < d.sel_t0 + fade_time) or now < d.bar_t0 + bar_hold + bar_time;
 }
 
@@ -794,6 +795,12 @@ const Doc = struct {
     /// row once the list is up.
     pick_s: Spring = .{ .k = 520, .c = 34, .eps = 0.05 },
     pick_live: bool = false,
+    /// When the list opened (its first rows stagger in), the picks shown
+    /// before the last typing, and when the picks last changed.
+    rows_t0: f64 = 0,
+    prev_picks: [10]usize = undefined,
+    prev_n: usize = 0,
+    pick_t0: f64 = -1,
     /// The prompt line's words, rising in as it opens.
     prompt_t: Tween = .{ .dur = panel_time },
     prompt_on: bool = false,
@@ -2424,7 +2431,12 @@ fn listing(d: *const Doc) ?[]const []const u8 {
 }
 
 fn pickFiles(d: *Doc) void {
-    d.npicks = finder.best(listing(d) orelse return, d.prompt.items, &d.picks);
+    const names = listing(d) orelse return;
+    // Rows that change under the typing crossfade from the last picks.
+    d.prev_picks = d.picks;
+    d.prev_n = if (d.pick_live) d.npicks else 0;
+    d.pick_t0 = CACurrentMediaTime();
+    d.npicks = finder.best(names, d.prompt.items, &d.picks);
     d.pick = 0;
 }
 
@@ -3026,6 +3038,106 @@ fn drawIcon(img: Id, x: f64, y: f64, s: f64) void {
     const size = msg(Point, img, "size", .{});
     const r: Rect = .{ .x = @round(x + (s - size.x) / 2), .y = @round(y + (s - size.y) / 2), .w = size.x, .h = size.y };
     msg(void, img, "drawInRect:fromRect:operation:fraction:respectFlipped:hints:", .{ r, Rect{}, @as(usize, 2), @as(f64, 1), true, @as(Id, null) });
+}
+
+/// The palette and quick open rows: 26pt tall, with the list 4pt in from
+/// its top and bottom.
+const prow = 26.0;
+const ppad = 4.0;
+/// Rows fade in a step apart (the first six), each over `row_fade`.
+const row_lag = 0.012;
+const row_fade = 0.12;
+/// Rows that change while typing crossfade over this long.
+const xfade_time = 0.08;
+/// Width of one glyph cell in a shortcut, and of the checkmark column.
+const key_cell = 14.0;
+const check_col = 18.0;
+var panel_font: Id = null;
+var panel_small: Id = null;
+var check_img: Id = null;
+var check_rgb: Rgb = .{ -1, -1, -1 };
+
+/// `c` mixed toward `bg` by `1 - a`, for text fading in over a flat panel.
+fn faded(c: Rgb, bg: Rgb, a: f64) Rgb {
+    return .{ bg[0] + (c[0] - bg[0]) * a, bg[1] + (c[1] - bg[1]) * a, bg[2] + (c[2] - bg[2]) * a };
+}
+
+/// Draws `s` in `fnt` with its left edge at `x`, cut to `room`, vertically
+/// centered in a row whose top is `y`. Returns its width.
+fn rowText(ctx: Id, s: []const u8, fnt: Id, c: Rgb, x: f64, y: f64, room: f64) f64 {
+    if (room < 4 or s.len == 0) return 0;
+    const line = uiLine(s, fnt, room);
+    defer if (line) |l| objc.CFRelease(l);
+    const base = @round((prow - objc.CTFontGetAscent(fnt) - objc.CTFontGetDescent(fnt)) / 2 + objc.CTFontGetAscent(fnt));
+    return drawLine(ctx, line, c, x, y + base);
+}
+
+/// The caret-colored checkmark symbol, made again when the caret color changes.
+fn checkImage(th: *const Theme) Id {
+    if (check_img != null and std.mem.eql(f64, &check_rgb, &th.caret)) return check_img;
+    if (check_img != null) msg(void, check_img, "release", .{});
+    check_img = null;
+    check_rgb = th.caret;
+    const cfg = objc.class("NSImageSymbolConfiguration");
+    const sized = msg(Id, cfg, "configurationWithPointSize:weight:", .{ @as(f64, 11), @as(f64, 0.3) });
+    const tint = msg(Id, cfg, "configurationWithPaletteColors:", .{msg(Id, objc.class("NSArray"), "arrayWithObject:", .{nscolor(th.caret)})});
+    const img = msg(Id, objc.class("NSImage"), "imageWithSystemSymbolName:accessibilityDescription:", .{ objc.str("checkmark"), @as(Id, null) });
+    if (img == null) return null;
+    const made = msg(Id, img, "imageWithSymbolConfiguration:", .{msg(Id, sized, "configurationByApplyingConfiguration:", .{tint})});
+    check_img = msg(Id, made, "retain", .{});
+    return check_img;
+}
+
+/// One row of the palette or quick open list, picked by `p`, whose content
+/// runs from `left` to `right`, with its top at `y` (pushed down by `rise`),
+/// drawn at opacity `a`.
+fn panelRow(ctx: Id, d: *const Doc, th: *const Theme, p: usize, left: f64, right: f64, top: f64, a: f64, rise: f64) void {
+    if (a < 0.01) return;
+    if (panel_font == null) {
+        panel_font = msg(Id, msg(Id, objc.class("NSFont"), "systemFontOfSize:", .{@as(f64, 13)}), "retain", .{});
+        panel_small = msg(Id, msg(Id, objc.class("NSFont"), "systemFontOfSize:", .{@as(f64, 12)}), "retain", .{});
+    }
+    const y = top + rise;
+    const ink = faded(th.fg, th.panel, a);
+    const dim = faded(th.muted, th.panel, a);
+    if (d.palette) {
+        if (p >= cmds.items.len) return;
+        const c = cmds.items[p];
+        const x = left + check_col;
+        if (c.on) {
+            const img = checkImage(th);
+            if (img != null) {
+                const size = msg(Point, img, "size", .{});
+                const r: Rect = .{ .x = @round(left + (check_col - size.x) / 2), .y = @round(y + (prow - size.y) / 2), .w = size.x, .h = size.y };
+                msg(void, img, "drawInRect:fromRect:operation:fraction:respectFlipped:hints:", .{ r, Rect{}, @as(usize, 2), a, true, @as(Id, null) });
+            }
+        }
+        // Shortcuts: one glyph to a cell, flush right like a menu's.
+        const cells = std.unicode.utf8CountCodepoints(c.keys) catch 0;
+        const keys_w = f(cells) * key_cell;
+        var at = right - keys_w;
+        var it = (std.unicode.Utf8View.init(c.keys) catch return).iterator();
+        while (it.nextCodepointSlice()) |g| : (at += key_cell) {
+            const line = uiLine(g, panel_small, key_cell);
+            defer if (line) |l| objc.CFRelease(l);
+            const gw = if (line != null) objc.CTLineGetTypographicBounds(line, null, null, null) else 0;
+            const base = @round((prow - objc.CTFontGetAscent(panel_small) - objc.CTFontGetDescent(panel_small)) / 2 + objc.CTFontGetAscent(panel_small));
+            _ = drawLine(ctx, line, dim, at + (key_cell - gw) / 2, y + base);
+        }
+        const room = right - keys_w - (if (cells > 0) @as(f64, 12) else 0) - x;
+        const name = cmd_names.items[p];
+        if (std.mem.indexOf(u8, name, ": ")) |j| {
+            const pw = rowText(ctx, name[0 .. j + 1], panel_font, dim, x, y, room);
+            _ = rowText(ctx, name[j + 2 ..], panel_font, ink, x + pw + 4, y, room - pw - 4);
+        } else _ = rowText(ctx, name, panel_font, ink, x, y, room);
+        return;
+    }
+    const paths = d.list.?.paths.items;
+    if (p >= paths.len) return;
+    const path = paths[p];
+    const slash = if (std.mem.lastIndexOfScalar(u8, path, '/')) |j| j + 1 else 0;
+    const nw = rowText(ctx, path[slash..], panel_font, ink, left, y, right - left);
+    _ = rowText(ctx, path[0..slash], panel_small, dim, left + nw + 8, y, right - left - nw - 8);
 }
 
 /// Whether this window holds `rel` with unsaved changes, in any card.
@@ -3717,35 +3829,42 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
 
     // The quick open list, rising out of the prompt line.
     const ty = by + 6 + baseline;
-    const want_ph: f64 = if (listing(d) != null) f(d.npicks) * lh + 12 else 0;
+    const want_ph: f64 = if (listing(d) != null) f(d.npicks) * prow + 2 * ppad else 0;
     d.panel.aim(want_ph, now);
     const ph = d.panel.at(now);
     if (listing(d) == null) d.pick_live = false;
     if (ph > 0.5 and (d.palette or d.list != null)) {
+        const px = card.x + 6;
+        const pw = card.w - 12;
+        // A soft shadow above the panel instead of a rule.
+        for (0..10) |sh| {
+            const fall = 1 - (f(sh) + 0.5) / 10;
+            fillA(ctx, th.fg, 0.06 * fall * fall, px + 4, by - ph - f(sh) - 1, pw - 8, 1);
+        }
         objc.CGContextSaveGState(ctx);
-        objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = by - ph, .w = card.w, .h = ph });
-        fill(ctx, th.panel, card.x, by - ph, card.w, ph);
-        fill(ctx, th.rule, card.x, by - ph, card.w, 1);
+        objc.CGContextClipToRect(ctx, .{ .x = px, .y = by - ph, .w = pw, .h = ph });
+        clipRound(ctx, px, by - ph, pw, ph + 8, 8);
+        fill(ctx, th.panel, px, by - ph, pw, ph);
         // The picked row's highlight springs from row to row.
-        const pick_y = f(d.pick) * lh;
+        const pick_y = f(d.pick) * prow;
         if (d.pick_live) d.pick_s.aim(pick_y, now) else d.pick_s.snap(pick_y);
+        if (!d.pick_live) d.rows_t0 = now;
         d.pick_live = true;
-        if (d.npicks > 0) pill(ctx, th.sel, 1, card.x + 8, by - ph + 6 + d.pick_s.step(now), card.w - 16, lh, 6);
+        if (d.npicks > 0) pill(ctx, th.fg, 0.10, px + 6, by - ph + ppad + d.pick_s.step(now), pw - 12, prow, 6);
+        // The first rows fade in a step apart; rows that changed under the
+        // typing crossfade from what was there.
+        const swap = std.math.clamp((now - d.pick_t0) / xfade_time, 0, 1);
+        const crossing = swap < 1;
         for (d.picks[0..d.npicks], 0..) |p, i| {
-            const y = by - ph + 6 + f(i) * lh;
-            if (d.palette) {
-                if (p >= cmds.items.len) continue;
-                const c = cmds.items[p];
-                const n = k.text(cmd_names.items[p], null, th, th.fg, tx, y + baseline, 0, 200);
-                if (c.on) _ = k.text(" ✓", null, th, th.caret, tx + f(n) * cw, y + baseline, 0, 2);
-                const kc = std.unicode.utf8CountCodepoints(c.keys) catch c.keys.len;
-                _ = k.text(c.keys, null, th, th.muted, card.x + card.w - pad_x - f(kc) * cw, y + baseline, 0, 16);
-                continue;
-            }
-            const path = d.list.?.paths.items[p];
-            const slash = if (std.mem.lastIndexOfScalar(u8, path, '/')) |j| j + 1 else 0;
-            const n = k.text(path[slash..], null, th, th.fg, tx, y + baseline, 0, 200);
-            _ = k.text(path[0..slash], null, th, th.muted, tx + f(n + 2) * cw, y + baseline, 0, 200);
+            const y = by - ph + ppad + f(i) * prow;
+            const lag = row_lag * f(@min(i, 5));
+            const t = std.math.clamp((now - d.rows_t0 - lag) / row_fade, 0, 1);
+            const a = t * t * (3 - 2 * t);
+            const rise = (1 - a) * 2;
+            if (crossing and i < d.prev_n and d.prev_picks[i] != p) {
+                panelRow(ctx, d, th, d.prev_picks[i], px + 14, px + pw - 14, y, a * (1 - swap), rise);
+                panelRow(ctx, d, th, p, px + 14, px + pw - 14, y, a * swap, rise);
+            } else panelRow(ctx, d, th, p, px + 14, px + pw - 14, y, a, rise);
         }
         k.flush();
         objc.CGContextRestoreGState(ctx);
@@ -4691,9 +4810,9 @@ fn cardDown(d: *Doc, p: Point, ev: Id) void {
     }
     d.win.side_down = false;
     if (listing(d) != null) {
-        const top = by - f(d.npicks) * lh - 6;
+        const top = by - f(d.npicks) * prow - ppad;
         if (p.y >= top and p.y < by) {
-            d.pick = @min(@as(usize, @intFromFloat((p.y - top) / lh)), d.npicks -| 1);
+            d.pick = @min(@as(usize, @intFromFloat((p.y - top) / prow)), d.npicks -| 1);
             accept(d);
             return refresh(d);
         }

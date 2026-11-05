@@ -36,7 +36,28 @@ fn closeAction(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     close(owner);
 }
 pub fn rename(w: Id, old: []const u8, new: []const u8) void {
-    if (owner == w and std.mem.eql(u8, objc.utf8(path), old)) msg(void, path, "setString:", .{objc.str(new)});
+    if (owner == w and std.mem.eql(u8, objc.utf8(path), old)) {
+        msg(void, path, "setString:", .{objc.str(new)});
+        retitle();
+    }
+}
+/// Titles the window "<file> Preview" and gives it the file's proxy icon.
+fn retitle() void {
+    const name = objc.utf8(path);
+    var buf: [512]u8 = undefined;
+    const title = std.fmt.bufPrint(&buf, "{s} Preview", .{if (name.len == 0) "Untitled" else std.fs.path.basename(name)}) catch "Preview";
+    msg(void, window, "setTitle:", .{objc.str(title)});
+    const url = if (name.len == 0) null else msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{path});
+    msg(void, window, "setRepresentedURL:", .{url});
+}
+/// The widest the text column gets, in points.
+const column = 680.0;
+/// Keeps the text in a centered column at most `column` wide by widening
+/// the side insets as the window grows.
+fn resized(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
+    if (text == null) return;
+    const w = msg(objc.Rect, text, "frame", .{}).w;
+    msg(void, text, "setTextContainerInset:", .{objc.Point{ .x = @max(28, @floor((w - column) / 2)), .y = 24 }});
 }
 pub fn update(d: anytype, conf: *const settings.Settings) void {
     if (owner != d.window) return;
@@ -59,6 +80,7 @@ pub fn toggle(w: Id, name: []const u8, bytes: []const u8, th: *const settings.Th
         const c = objc.ClassBuilder.begin("NSObject", "ZePreview");
         c.method("render:", @ptrCast(&render), "v@:@");
         c.method("windowWillClose:", @ptrCast(&closed), "v@:@");
+        c.method("windowDidResize:", @ptrCast(&resized), "v@:@");
         c.method("markdownPreview:", @ptrCast(&closeAction), "v@:@");
         target = msg(Id, msg(Id, c.finish(), "alloc", .{}), "init", .{});
     }
@@ -68,7 +90,7 @@ pub fn toggle(w: Id, name: []const u8, bytes: []const u8, th: *const settings.Th
     source = msg(Id, objc.str(bytes), "retain", .{});
     const frame: objc.Rect = .{ .w = 620, .h = 700 };
     window = msg(Id, msg(Id, objc.class("NSWindow"), "alloc", .{}), "initWithContentRect:styleMask:backing:defer:", .{ frame, @as(usize, 1 | 2 | 4 | 8), @as(usize, 2), false });
-    msg(void, window, "setTitle:", .{objc.str("Markdown Preview")});
+    retitle();
     msg(void, window, "setTitlebarAppearsTransparent:", .{true});
     msg(void, window, "setDelegate:", .{target});
     const scroll = msg(Id, msg(Id, objc.class("NSScrollView"), "alloc", .{}), "initWithFrame:", .{frame});
@@ -84,6 +106,7 @@ pub fn toggle(w: Id, name: []const u8, bytes: []const u8, th: *const settings.Th
     msg(void, text, "release", .{});
     const fr = msg(objc.Rect, w, "frame", .{});
     msg(void, window, "setFrameTopLeftPoint:", .{objc.Point{ .x = fr.x + fr.w - 80, .y = fr.y + fr.h }});
+    resized(null, null, null);
     render(null, null, null);
     msg(void, window, "orderFront:", .{@as(Id, null)});
 }
@@ -106,18 +129,25 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
         const intent = msg(Id, attrs, "objectForKey:", .{objc.str("NSPresentationIntent")});
         const identity = msg(usize, intent, "identity", .{});
         const fresh = identity != previous;
-        if (fresh and i > 0) msg(void, msg(Id, out, "mutableString", .{}), "appendString:", .{objc.str("\n\n")});
-        var font = msg(Id, fonts, "systemFontOfSize:", .{@as(f64, 16)});
+        if (fresh and i > 0) msg(void, msg(Id, out, "mutableString", .{}), "appendString:", .{objc.str("\n")});
+        var font = msg(Id, fonts, "systemFontOfSize:", .{@as(f64, 15)});
         var ink = color(theme.fg);
         const all: Range = .{ .loc = 0, .len = r.len };
         const paragraph = objc.new("NSMutableParagraphStyle");
         defer msg(void, paragraph, "release", .{});
+        msg(void, paragraph, "setLineHeightMultiple:", .{@as(f64, 1.35)});
+        msg(void, paragraph, "setParagraphSpacing:", .{@as(f64, 10)});
         var prefix: Id = null;
         var c = intent;
         while (c != null) : (c = msg(Id, c, "parentIntent", .{})) {
             switch (msg(isize, c, "intentKind", .{})) {
-                1 => font = msg(Id, fonts, "boldSystemFontOfSize:", .{@as(f64, if (msg(usize, c, "headerLevel", .{}) == 1) 30 else if (msg(usize, c, "headerLevel", .{}) == 2) 24 else 20)}),
+                1 => {
+                    const level = msg(usize, c, "headerLevel", .{});
+                    font = msg(Id, fonts, "systemFontOfSize:weight:", .{ @as(f64, if (level == 1) 26 else if (level == 2) 20 else 17), @as(f64, 0.3) });
+                    if (i > 0) msg(void, paragraph, "setParagraphSpacingBefore:", .{@as(f64, 18)});
+                },
                 4 => {
+                    msg(void, paragraph, "setParagraphSpacing:", .{@as(f64, 4)});
                     msg(void, paragraph, "setHeadIndent:", .{@as(f64, 24)});
                     const ordered = msg(isize, msg(Id, c, "parentIntent", .{}), "intentKind", .{}) == 2;
                     // stringWithFormat: is variadic, which msg can't pass on arm64.
@@ -146,7 +176,7 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     const clip = msg(Id, msg(Id, text, "enclosingScrollView", .{}), "contentView", .{});
     const position = msg(objc.Rect, clip, "bounds", .{});
     msg(void, text, "setBackgroundColor:", .{color(theme.bg)});
-    msg(void, window, "setBackgroundColor:", .{color(theme.header)});
+    msg(void, window, "setBackgroundColor:", .{color(theme.bg)});
     msg(void, text, "setLinkTextAttributes:", .{msg(Id, objc.class("NSDictionary"), "dictionaryWithObject:forKey:", .{ color(theme.kinds[5]), objc.str("NSColor") })});
     msg(void, msg(Id, text, "textStorage", .{}), "setAttributedString:", .{out});
     msg(void, text, "scrollPoint:", .{objc.Point{ .x = position.x, .y = position.y }});
