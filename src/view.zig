@@ -69,6 +69,10 @@ const side_w = 250.0;
 /// The sidebar's selection sits this far in from its edges, with rounded corners.
 const side_inset = 8.0;
 const side_radius = 5.0;
+/// The selection's neutral grey in a window that isn't key, near what the
+/// system's unemphasized selection color gives in light and dark.
+const grey_light: Rgb = .{ 0.86, 0.86, 0.86 };
+const grey_dark: Rgb = .{ 0.27, 0.27, 0.27 };
 
 /// The sidebar shows when there's a folder, it's turned on, and the window
 /// is wide enough to keep room for the text.
@@ -1700,7 +1704,7 @@ fn rowDirty(d: *const Doc, rel: []const u8) bool {
 
 /// The folder's name, then a row per file and open folder, under the
 /// title bar and above the status bar.
-fn drawSide(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, by: f64, dark: bool) void {
+fn drawSide(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, by: f64, dark: bool, key: bool) void {
     k.flush();
     fill(ctx, th.panel, 0, 0, side_w, by);
     fill(ctx, th.rule, side_w - 1, 0, 1, by);
@@ -1729,7 +1733,7 @@ fn drawSide(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, by: f64, dark: bool) vo
     for (rows[@min(from, to)..to], @min(from, to) + 1..) |row, i| {
         const y = y0 + f(i) * lh;
         const x = 18 + f(row.depth) * 14;
-        if (cur != null and std.mem.eql(u8, row.rel, cur.?)) pill(ctx, th.sel, side_inset, y, side_w - 1 - 2 * side_inset, lh);
+        if (cur != null and std.mem.eql(u8, row.rel, cur.?)) pill(ctx, if (key) th.sel else if (dark) grey_dark else grey_light, side_inset, y, side_w - 1 - 2 * side_inset, lh);
         const iy = y + (lh - s) / 2;
         if (row.dir) drawIcon(icon(if (tree.isOpen(row.rel)) .opened else .closed, dark, th), x, iy + (s - 14) / 2, 14);
         drawIcon(icon(iconFor(row), dark, th), x + 15, iy, s);
@@ -1962,7 +1966,7 @@ fn draw(d: *Doc, ctx: Id) void {
 
     // The band under the title bar, the quick open list, and the status bar.
     fill(ctx, th.bg, 0, 0, r.w, top_h - 8);
-    if (lx > 0) drawSide(d, ctx, th, &k, by, dark);
+    if (lx > 0) drawSide(d, ctx, th, &k, by, dark, key);
     const ty = by + 6 + baseline;
     const want_ph: f64 = if (listing(d) != null) f(d.npicks) * lh + 12 else 0;
     d.panel.aim(want_ph, now);
@@ -1998,8 +2002,10 @@ fn draw(d: *Doc, ctx: Id) void {
     var buf: [64]u8 = undefined;
     var right: []const u8 = "";
     var x: f64 = tx;
+    // A window that isn't key dims its bottom line a step.
+    const ink = if (key) th.fg else th.muted;
     if (d.mode == .edit) {
-        x += f(k.text(d.name(), null, th, th.fg, x, ty, 0, 200)) * cw;
+        x += f(k.text(d.name(), null, th, ink, x, ty, 0, 200)) * cw;
         if (b.dirty()) x += f(k.text(" •", null, th, th.caret, x, ty, 0, 4)) * cw;
         if (d.note.len > 0) _ = k.text(d.note, null, th, th.muted, x + 2 * cw, ty, 0, 200);
         const li = b.lineOf(d.ed.cur);
@@ -2017,12 +2023,12 @@ fn draw(d: *Doc, ctx: Id) void {
             k.flush();
             fill(ctx, th.sel, x, by + 6, f(editor.colOf(d.prompt.items, d.prompt.items.len)) * cw, lh);
         }
-        x += f(k.text(d.prompt.items, null, th, th.fg, x, ty, 0, 400)) * cw;
+        x += f(k.text(d.prompt.items, null, th, ink, x, ty, 0, 400)) * cw;
         var cx = x;
         if (d.mode == .replace) {
             x += 2 * cw;
             x += f(k.text("with", null, th, th.caret, x, ty, 0, 8) + 1) * cw;
-            x += f(k.text(d.with.items, null, th, th.fg, x, ty, 0, 400)) * cw;
+            x += f(k.text(d.with.items, null, th, ink, x, ty, 0, 400)) * cw;
             if (d.which == 1) cx = x;
         }
         k.flush();
