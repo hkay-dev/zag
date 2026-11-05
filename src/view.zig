@@ -346,16 +346,93 @@ fn pill(ctx: Id, c: Rgb, a: f64, x: f64, y: f64, w: f64, h: f64, radius: f64) vo
     objc.CGContextFillPath(ctx);
 }
 
-/// The one-point outline of the rounded rectangle `pill` fills.
+/// The hairline outline of the rounded rectangle `pill` fills: one device
+/// pixel thick.
 fn ring(ctx: Id, c: Rgb, a: f64, x: f64, y: f64, w: f64, h: f64, radius: f64) void {
+    const t = hair();
     const outer = objc.CGPathCreateWithRoundedRect(.{ .x = x, .y = y, .w = w, .h = h }, radius, radius, null);
     defer if (outer) |p| objc.CFRelease(p);
-    const inner = objc.CGPathCreateWithRoundedRect(.{ .x = x + 1, .y = y + 1, .w = w - 2, .h = h - 2 }, radius - 1, radius - 1, null);
+    const inner = objc.CGPathCreateWithRoundedRect(.{ .x = x + t, .y = y + t, .w = w - 2 * t, .h = h - 2 * t }, radius - t, radius - t, null);
     defer if (inner) |p| objc.CFRelease(p);
     objc.CGContextSetRGBFillColor(ctx, c[0], c[1], c[2], a);
     objc.CGContextAddPath(ctx, outer);
     objc.CGContextAddPath(ctx, inner);
     objc.CGContextEOFillPath(ctx);
+}
+
+/// The Mac's Increase Contrast setting: stronger outlines and muted text.
+var contrast = false;
+
+/// The ambient shadow under a card, as nine slices cut from one small image
+/// drawn once for light and once for dark: black at 0.06 or 0.35, blurred 6
+/// points, 1 point down. Stretching the slices costs no blur per frame.
+/// The image is `shadow_m` of shadow, `shadow_core` of card, `shadow_m` of
+/// shadow, in points, drawn at twice that many pixels.
+const shadow_m = 12.0;
+const shadow_core = 40.0;
+var shadow_cells: [2][9]?*anyopaque = @splat(@splat(null));
+
+/// The nine slices of the card shadow for light or dark, made on first use.
+fn shadowCells(dark: bool) *const [9]?*anyopaque {
+    const cells = &shadow_cells[@intFromBool(dark)];
+    if (cells[0] != null) return cells;
+    const side = 2 * (shadow_core + 2 * shadow_m);
+    const pixels: usize = @intFromFloat(side);
+    const space = objc.CGColorSpaceCreateDeviceRGB();
+    defer if (space) |s| objc.CFRelease(s);
+    const bm = objc.CGBitmapContextCreate(null, pixels, pixels, 8, 0, space, 1);
+    defer if (bm) |b| objc.CFRelease(b);
+    const m = 2 * shadow_m;
+    const core = 2 * shadow_core;
+    const path = objc.CGPathCreateWithRoundedRect(.{ .x = m, .y = m, .w = core, .h = core }, 2 * card_radius, 2 * card_radius, null);
+    defer if (path) |p| objc.CFRelease(p);
+    // Draw the card's shape with its shadow, then clear the shape again so
+    // only the shadow stays and the card's own edge isn't darkened.
+    objc.CGContextSaveGState(bm);
+    const col = objc.CGColorCreateGenericGray(0, if (dark) 0.35 else 0.06);
+    defer if (col) |cc| objc.CFRelease(cc);
+    objc.CGContextSetShadowWithColor(bm, .{ .w = 0, .h = -2 }, 12, col);
+    objc.CGContextSetRGBFillColor(bm, 0, 0, 0, 1);
+    objc.CGContextAddPath(bm, path);
+    objc.CGContextFillPath(bm);
+    objc.CGContextRestoreGState(bm);
+    objc.CGContextSetBlendMode(bm, 16);
+    objc.CGContextAddPath(bm, path);
+    objc.CGContextFillPath(bm);
+    const img = objc.CGBitmapContextCreateImage(bm);
+    defer if (img) |i| objc.CFRelease(i);
+    // Image rows run top down; the corners are `m + radius` pixels wide.
+    const edge = m + 2 * card_radius;
+    const cuts = [4]f64{ 0, edge, side - edge, side };
+    for (0..3) |r| for (0..3) |c| {
+        cells[r * 3 + c] = objc.CGImageCreateWithImageInRect(img, .{ .x = cuts[c], .y = cuts[r], .w = cuts[c + 1] - cuts[c], .h = cuts[r + 1] - cuts[r] });
+    };
+    return cells;
+}
+
+/// Draws the card shadow around the card at `x`, `y`, `w` by `h` at
+/// `alpha`. The slices of the card's corners keep their size and the middle
+/// ones stretch.
+fn cardShadow(ctx: Id, dark: bool, alpha: f64, x: f64, y: f64, w: f64, h: f64) void {
+    const edge = shadow_m + card_radius;
+    if (w < 2 * card_radius or h < 2 * card_radius) return;
+    const cells = shadowCells(dark);
+    const xs = [4]f64{ x - shadow_m, x - shadow_m + edge, x + w + shadow_m - edge, x + w + shadow_m };
+    const ys = [4]f64{ y - shadow_m, y - shadow_m + edge, y + h + shadow_m - edge, y + h + shadow_m };
+    objc.CGContextSaveGState(ctx);
+    objc.CGContextSetAlpha(ctx, alpha);
+    for (0..3) |r| for (0..3) |c| {
+        const dw = xs[c + 1] - xs[c];
+        const dh = ys[r + 1] - ys[r];
+        objc.CGContextSaveGState(ctx);
+        // The view is flipped and images draw upside down in a flipped
+        // context, so flip the slice back.
+        objc.CGContextTranslateCTM(ctx, xs[c], ys[r + 1]);
+        objc.CGContextScaleCTM(ctx, 1, -1);
+        objc.CGContextDrawImage(ctx, .{ .w = dw, .h = dh }, cells[r * 3 + c]);
+        objc.CGContextRestoreGState(ctx);
+    };
+    objc.CGContextRestoreGState(ctx);
 }
 
 /// Limits drawing to a rounded rectangle until the state is restored.
@@ -963,6 +1040,12 @@ const Win = struct {
     pv: [4]Spring = @splat(.{ .k = 420, .c = 30, .eps = 0.05 }),
     pv_a: Tween = .{ .dur = fade_time },
     ghost_a: Tween = .{ .dur = fade_time },
+    /// The dragged tab's copy grows to 1.04 as it's picked up and settles
+    /// back to 1 as it lands.
+    lift: Spring = .{ .x = 1, .to = 1, .k = 500, .c = 28 },
+    /// How strongly the cards' shadows show: fading to half while the
+    /// window isn't key.
+    key_a: Tween = .{ .dur = 0.2, .from = 1, .to = 1 },
     /// The sidebar row (of tree `menu_gen`) or the card's tab that a
     /// right-click menu is open on, and its outline fading in or out.
     menu_row: ?usize = null,
@@ -2251,6 +2334,32 @@ fn askReload(d: *Doc) bool {
 
 // ---- settings ----
 
+/// Sets the colors that draw from the settings' themes: grey in zen, and
+/// with Increase Contrast on, muted text lifted to the text color at 0.8.
+fn buildThemes() void {
+    themes = .{ conf.light, conf.dark };
+    if (conf.zen) for (&themes) |*th| {
+        inline for (@typeInfo(Theme).@"struct".field_names) |name| {
+            const c = &@field(th, name);
+            if (@TypeOf(c.*) == Rgb) desaturate(c) else for (c) |*k| desaturate(k);
+        }
+    };
+    if (contrast) for (&themes) |*th| {
+        for (&th.muted, th.bg, th.fg) |*m, back, text| m.* = back + 0.8 * (text - back);
+    };
+}
+
+/// Crossfades the window to what draws next, for a theme or appearance
+/// change: one fade over the view's layer and each caret layer.
+fn fadeTheme(w: *Win) void {
+    const t = msg(Id, objc.class("CATransition"), "animation", .{});
+    msg(void, t, "setType:", .{objc.str("fade")});
+    msg(void, t, "setDuration:", .{@as(f64, 0.25)});
+    msg(void, t, "setTimingFunction:", .{msg(Id, objc.class("CAMediaTimingFunction"), "functionWithName:", .{objc.str("easeInEaseOut")})});
+    msg(void, msg(Id, w.view, "layer", .{}), "addAnimation:forKey:", .{ t, objc.str("theme") });
+    for (docs.items) |d| if (d.win == w) msg(void, d.caret, "addAnimation:forKey:", .{ t, objc.str("theme") });
+}
+
 /// Reads the settings file and applies it to every window.
 pub fn loadSettings() void {
     if (conf_path == null) conf_path = settings.path(gpa) catch null;
@@ -2263,14 +2372,13 @@ pub fn loadSettings() void {
     }
     const p = conf_path orelse return;
     const old_lh = lh;
+    const old_themes = themes;
+    const old_look = conf.look;
+    const old_zen = conf.zen;
     conf = settings.load(gpa, p);
-    themes = .{ conf.light, conf.dark };
-    if (conf.zen) for (&themes) |*th| {
-        inline for (@typeInfo(Theme).@"struct".field_names) |name| {
-            const c = &@field(th, name);
-            if (@TypeOf(c.*) == Rgb) desaturate(c) else for (c) |*k| desaturate(k);
-        }
-    };
+    buildThemes();
+    // A theme or appearance pick crossfades; zen's own change doesn't.
+    const faded = conf.look != old_look or (conf.zen == old_zen and !std.meta.eql(old_themes, themes));
     side_w = conf.sidebar_width;
     conf_stamp = files.stamp(p);
     setFont();
@@ -2297,6 +2405,7 @@ pub fn loadSettings() void {
     };
     msg(void, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "setAppearance:", .{look});
     for (wins.items) |w| {
+        if (faded) fadeTheme(w);
         w.dark = null;
         hideLights(w);
         w.side_find = true;
@@ -3145,8 +3254,8 @@ fn finishFold() void {
 /// fainter when the window isn't key.
 fn selPill(ctx: Id, th: *const Theme, key: bool, y: f64) void {
     const hw = side_w - 2 * side_inset - 2;
-    pill(ctx, th.fg, if (key) 0.07 else 0.04, side_inset, y, hw, side_h, side_radius);
-    ring(ctx, th.fg, if (key) 0.09 else 0.05, side_inset, y, hw, side_h, side_radius);
+    pill(ctx, th.fg, if (contrast) 0.16 else if (key) 0.07 else 0.04, side_inset, y, hw, side_h, side_radius);
+    ring(ctx, th.fg, if (contrast) 0.4 else if (key) 0.09 else 0.05, side_inset, y, hw, side_h, side_radius);
 }
 
 /// One row of the tree with its top at `y`: chevron, icon, name and dot.
@@ -3478,10 +3587,11 @@ fn draw(w: *Win, ctx: Id) void {
     const key = msg(bool, w.window, "isKeyWindow", .{});
     const many = w.cards.pane == null;
     for (&w.hot_t, 1..) |*t, i| t.aim(if (w.hot == i) 1 else 0, now);
+    w.key_a.aim(if (key) 1 else 0, now);
     var busy = w.side_t.moving(now) or w.side_a.moving(now) or fold.t.moving(now) or fold.closing or cardsMoving(w.cards) or
         !w.sel.settled() or w.sel_a.moving(now) or w.hot_t[0].moving(now) or w.hot_t[1].moving(now) or
         w.pv_a.moving(now) or w.ghost_a.moving(now) or w.menu_a.moving(now) or w.fly != null or
-        !w.hov.settled() or w.hov_a.moving(now);
+        !w.hov.settled() or w.hov_a.moving(now) or !w.lift.settled() or w.key_a.moving(now);
     for (w.pv) |s| busy = busy or !s.settled();
     var gliding = false;
     for (docs.items) |d| if (d.win == w) {
@@ -3569,6 +3679,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // inside its rounded corners.
     const lx = gap;
     const card: Rect = .{ .x = lx, .y = gap, .w = rightEdge(d) - lx, .h = r.h - 2 * gap };
+    if (!conf.zen) cardShadow(ctx, dark, 0.5 + 0.5 * d.win.key_a.at(now), card.x, card.y, card.w, card.h);
     pill(ctx, th.bg, 1, card.x, card.y, card.w, card.h, card_radius);
     objc.CGContextSaveGState(ctx);
     clipRound(ctx, card.x, card.y, card.w, card.h, card_radius);
@@ -3806,8 +3917,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // Zen keeps its room as a plain margin.
     if (conf.zen) fill(ctx, th.bg, card.x, card.y, card.w, top_h - gap) else {
         fill(ctx, th.header, card.x, card.y, card.w, head_h);
-        fill(ctx, th.rule, card.x, card.y + head_h, card.w, 1);
-        fill(ctx, th.bg, card.x, card.y + head_h + 1, card.w, top_h - gap - head_h - 1);
+        fill(ctx, th.rule, card.x, card.y + head_h, card.w, hair());
+        fill(ctx, th.bg, card.x, card.y + head_h + hair(), card.w, top_h - gap - head_h - hair());
         const hy = gap + head_h / 2;
         const mono_y = @round(hy - lh / 2 + baseline);
         const right = card.x + card.w - 10;
@@ -3822,7 +3933,14 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // takes typing also gets a ring in the caret's color, which fades
     // from card to card. Zen draws neither.
     if (!conf.zen) {
-        ring(ctx, th.fg, if (dark) 0.1 else 0.08, card.x, card.y, card.w, card.h, card_radius);
+        ring(ctx, th.fg, if (contrast) 0.35 else if (dark) 0.16 else 0.14, card.x, card.y, card.w, card.h, card_radius);
+        // Dark cards catch a faint light along their top edge, just inside the ring.
+        if (dark) {
+            objc.CGContextSaveGState(ctx);
+            clipRound(ctx, card.x, card.y, card.w, card.h, card_radius);
+            fillA(ctx, .{ 1, 1, 1 }, 0.05, card.x, card.y + hair(), card.w, hair());
+            objc.CGContextRestoreGState(ctx);
+        }
         const lit = d.lit.at(now);
         if (lit > 0.01) ring(ctx, th.caret, 0.55 * lit, card.x, card.y, card.w, card.h, card_radius);
     }
@@ -4361,6 +4479,10 @@ fn placeFile(w: *Win, path: [:0]const u8, dr: Drop) void {
 /// finishing its trip after the mouse let go.
 fn drawDrag(w: *Win, ctx: Id, th: *const Theme, now: f64) void {
     var r: [4]f64 = undefined;
+    // Picked up, the copy lifts to 1.04; once it lets go it settles to 1.
+    const held = if (w.tdrag) |td| td.live and td.out else false;
+    w.lift.aim(if (held) 1.04 else 1, now);
+    const lift = w.lift.step(now);
     for (&w.pv, &r) |*s, *v| v.* = s.step(now);
     const pa = w.pv_a.at(now);
     if (pa > 0.01) {
@@ -4375,26 +4497,33 @@ fn drawDrag(w: *Win, ctx: Id, th: *const Theme, now: f64) void {
         // Back on its tab it just settles; into a gap or back to the
         // sidebar it fades as it arrives; on a card it fades where it is.
         const alpha = if (fl.fade) 1 - e else if (fl.card != null) 1 else std.math.clamp((1 - p) / 0.4, 0, 1);
-        ghost(ctx, th, fl.icon, fl.line, fl.w, fl.from.x + (fl.to.x - fl.from.x) * e, fl.from.y + (fl.to.y - fl.from.y) * e, alpha);
+        ghost(ctx, th, fl.icon, fl.line, fl.w, fl.from.x + (fl.to.x - fl.from.x) * e, fl.from.y + (fl.to.y - fl.from.y) * e, alpha, lift);
     }
     const t = w.tdrag orelse return;
     const ga = w.ghost_a.at(now);
     if (ga < 0.01) return;
     const g = ghostOf(&t) orelse return;
     const gw = ghostW(&t);
-    ghost(ctx, th, g.icon, g.line, gw, t.at.x - std.math.clamp(t.grab, 10, gw - 10), t.at.y - 11, ga);
+    ghost(ctx, th, g.icon, g.line, gw, t.at.x - std.math.clamp(t.grab, 10, gw - 10), t.at.y - 11, ga, lift);
 }
 
-/// A tab's copy lifted off the page, `gw` wide with its top left at `x`, `y`.
-fn ghost(ctx: Id, th: *const Theme, img: Id, line: Id, gw: f64, x: f64, y: f64, alpha: f64) void {
+/// A tab's copy lifted off the page, `gw` wide with its top left at `x`, `y`,
+/// grown by `lift` about its middle.
+fn ghost(ctx: Id, th: *const Theme, img: Id, line: Id, gw: f64, x: f64, y: f64, alpha: f64, lift: f64) void {
     const ts = tileSize();
     objc.CGContextSaveGState(ctx);
     objc.CGContextSetAlpha(ctx, alpha);
-    // A soft shadow under it, so it reads as lifted off the page.
-    pill(ctx, th.fg, 0.06, x - 1, y + 2, gw + 2, 24, 8);
-    pill(ctx, th.fg, 0.06, x, y + 1, gw, 22, 7);
+    objc.CGContextTranslateCTM(ctx, x + gw / 2, y + 11);
+    objc.CGContextScaleCTM(ctx, lift, lift);
+    objc.CGContextTranslateCTM(ctx, -(x + gw / 2), -(y + 11));
+    // A real shadow under it, so it reads as lifted off the page.
+    objc.CGContextSaveGState(ctx);
+    const shade = objc.CGColorCreateGenericGray(0, 0.22);
+    defer if (shade) |s| objc.CFRelease(s);
+    objc.CGContextSetShadowWithColor(ctx, .{ .w = 0, .h = -4 }, 12, shade);
     pill(ctx, th.header, 1, x, y, gw, 22, 7);
-    ring(ctx, th.fg, 0.2, x, y, gw, 22, 7);
+    objc.CGContextRestoreGState(ctx);
+    ring(ctx, th.fg, 0.3, x, y, gw, 22, 7);
     tile(img, x + tab_pad, @round(y + 11 - ts / 2));
     _ = drawLine(ctx, line, th.fg, x + tab_pad + ts + 7, @round(y + 11 + name_off));
     objc.CGContextRestoreGState(ctx);
@@ -4893,6 +5022,22 @@ fn appearanceChanged(self: Id, _: Sel) callconv(.c) void {
     msg(void, self, "setNeedsDisplay:", .{true});
 }
 
+/// The system's light or dark look changed: crossfade to the new colors.
+/// A window that hasn't drawn yet has nothing to fade from.
+fn lookChanged(self: Id, _: Sel) callconv(.c) void {
+    if (winOf(self)) |w| if (w.dark != null) fadeTheme(w);
+    msg(void, self, "setNeedsDisplay:", .{true});
+}
+
+extern const NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification: Id;
+
+/// The Mac's Increase Contrast setting changed: read it again and redraw.
+fn contrastChanged(_: Id, _: Sel, _: Id) callconv(.c) void {
+    contrast = msg(bool, msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{}), "accessibilityDisplayShouldIncreaseContrast", .{});
+    buildThemes();
+    for (wins.items) |w| msg(void, w.view, "setNeedsDisplay:", .{true});
+}
+
 extern const NSPasteboardTypeFileURL: Id;
 extern const NSPasteboardURLReadingFileURLsOnlyKey: Id;
 
@@ -5332,6 +5477,7 @@ fn changeFont(_: Id, _: Sel, sender: Id) callconv(.c) void {
 
 /// Registers the view class and loads the font. Call once at launch.
 pub fn setup() void {
+    contrast = msg(bool, msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{}), "accessibilityDisplayShouldIncreaseContrast", .{});
     loadSettings();
     const c = objc.ClassBuilder.begin("NSView", "ZeView");
     c.ivar("win");
@@ -5349,7 +5495,7 @@ pub fn setup() void {
     c.method("mouseExited:", @ptrCast(&mouseExited), "v@:@");
     c.method("scrollWheel:", @ptrCast(&scrollWheel), "v@:@");
     c.method("resetCursorRects", @ptrCast(&resetCursorRects), "v@:");
-    c.method("viewDidChangeEffectiveAppearance", @ptrCast(&appearanceChanged), "v@:");
+    c.method("viewDidChangeEffectiveAppearance", @ptrCast(&lookChanged), "v@:");
     c.method("windowDidBecomeKey:", @ptrCast(&appearanceChanged), "v@:@");
     c.method("windowDidResignKey:", @ptrCast(&appearanceChanged), "v@:@");
     c.method("draggingEntered:", @ptrCast(&draggingEntered), "Q@:@");
@@ -5387,4 +5533,11 @@ pub fn setup() void {
     inline for (actions) |a| c.method(a[0], action(a[1]), "v@:@");
     view_class = c.finish();
     win_ivar = objc.ivarOffset(view_class, "win");
+    // Increase Contrast turning on or off redraws every window.
+    const watcher = objc.ClassBuilder.begin("NSObject", "ZeContrast");
+    watcher.method("contrastChanged:", @ptrCast(&contrastChanged), "v@:@");
+    const watch_class = watcher.finish();
+    const watch = msg(Id, msg(Id, watch_class, "alloc", .{}), "init", .{});
+    const notes = msg(Id, msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{}), "notificationCenter", .{});
+    msg(void, notes, "addObserver:selector:name:object:", .{ watch, objc.sel_registerName("contrastChanged:"), NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification, @as(Id, null) });
 }
