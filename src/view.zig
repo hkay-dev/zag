@@ -477,9 +477,14 @@ const Slot = struct {
     cut_w: f64 = -1,
     which: Icon = .text,
     gone: bool = false,
-    /// Where it last drew.
+    /// Where it last laid out, before `shift`.
     x: f64 = 0,
     w: f64 = 0,
+    /// How far it's drawn from where it lays out: it slides into a new
+    /// place after the tabs reorder, and follows the mouse while dragged.
+    shift: Spring = .{ .k = 420, .c = 30, .eps = 0.05 },
+    /// Where it was drawn when the tabs reordered, to slide from.
+    flip: ?f64 = null,
 
     fn drop(s: *Slot) void {
         for ([_]*Id{ &s.line, &s.cut }) |p| if (p.*) |l| {
@@ -688,6 +693,12 @@ const Doc = struct {
     /// The tab under the mouse, and whether it's over its close button.
     hover: u32 = 0,
     hover_x: bool = false,
+    /// A gap opening among the tabs for a tab dragged over them: before
+    /// which tab, how wide, how far open, and how wide it drew last.
+    open_at: usize = 0,
+    open_w: f64 = 0,
+    opening: Spring = .{ .k = 420, .c = 30, .eps = 0.01 },
+    open_px: f64 = 0,
     /// Where the + after the tabs last drew.
     plus_x: f64 = -100,
     /// The mouse is on that +, and its hover highlight.
@@ -884,6 +895,34 @@ const Win = struct {
     /// mouse, and each one's hover highlight.
     hot: u8 = 0,
     hot_t: [2]Tween = @splat(.{ .dur = fade_time }),
+    /// The tab the mouse is dragging, if any.
+    tdrag: ?TabDrag = null,
+    /// The drop preview, in the view: where it springs to (x, y, width,
+    /// height) and how far it's faded in. The dragged tab's copy under the
+    /// mouse fades in with `ghost_a` once it leaves its row.
+    pv: [4]Spring = @splat(.{ .k = 420, .c = 30, .eps = 0.05 }),
+    pv_a: Tween = .{ .dur = fade_time },
+    ghost_a: Tween = .{ .dur = fade_time },
+};
+
+/// Where a dragged tab lands: among a card's tabs, on the card itself, or
+/// in a new card split off one of its edges.
+const Zone = enum { tabs, whole, left, right, top, bottom };
+const Drop = struct { card: *Doc, zone: Zone, k: usize = 0 };
+
+const TabDrag = struct {
+    from: *Doc,
+    id: u32,
+    /// Where the mouse went down and where it is, in the view, and how far
+    /// right of the tab's left edge it went down.
+    down: Point,
+    at: Point,
+    grab: f64,
+    /// It moved far enough to be a drag rather than a click.
+    live: bool = false,
+    /// It left its card's tab row, so it drops by `drop`.
+    out: bool = false,
+    drop: ?Drop = null,
 };
 
 var wins: std.ArrayList(*Win) = .empty;
@@ -1209,10 +1248,18 @@ fn named(d: *Doc) void {
     msg(void, d.window, "setRepresentedURL:", .{url});
 }
 
-/// The key window's focused card.
+/// The key window's focused card. A Dev build never has a key window, so
+/// there it's the front one of ze's windows.
 pub fn keyDoc() ?*Doc {
-    const kw = msg(Id, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "keyWindow", .{});
+    const app = msg(Id, objc.class("NSApplication"), "sharedApplication", .{});
+    const kw = msg(Id, app, "keyWindow", .{});
     for (wins.items) |w| if (w.window == kw) return w.focus;
+    if (!background) return null;
+    const order = msg(Id, app, "orderedWindows", .{});
+    for (0..msg(usize, order, "count", .{})) |i| {
+        const o = msg(Id, order, "objectAtIndex:", .{i});
+        for (wins.items) |w| if (w.window == o) return w.focus;
+    }
     return null;
 }
 
@@ -1222,40 +1269,108 @@ pub fn keyDoc() ?*Doc {
 /// while this one makes room. It takes the tab on show when there are
 /// others to leave behind, else it starts with quick open.
 fn split(d: *Doc, down: bool) void {
-    const w = d.win;
-    const leaf = nodeOf(w.cards, d) orelse return;
+    const e = splitOff(d, down, false) orelse return msg(void, objc.class("NSSound"), "beep", .{});
+    if (tabCount(d) > 1) {
+        if (takeTab(d, d.at)) |pg| putTab(e, pg, 0);
+    } else startPrompt(e, .open);
+    focus(e);
+}
+
+/// Whether card `d` has room to split in two along its width or (`down`) height.
+fn roomFor(d: *const Doc, down: bool) bool {
     const room = if (down) d.fin.y - 3 * gap else d.fin.x - 3 * gap;
-    if (room < 2 * (if (down) min_card_h else min_card_w)) return msg(void, objc.class("NSSound"), "beep", .{});
-    const e = newPane(w) orelse return;
-    const a = gpa.create(Node) catch return;
-    const b = gpa.create(Node) catch return gpa.destroy(a);
+    return room >= 2 * (if (down) min_card_h else min_card_w);
+}
+
+/// Splits card `d` and returns the new card, with a blank untitled file,
+/// right of or under it, or left of or above it when `before`. It springs
+/// in from a sliver at that edge while `d` makes room. Null without room.
+fn splitOff(d: *Doc, down: bool, before: bool) ?*Doc {
+    const w = d.win;
+    const leaf = nodeOf(w.cards, d) orelse return null;
+    if (!roomFor(d, down)) return null;
+    const room = if (down) d.fin.y - 3 * gap else d.fin.x - 3 * gap;
+    const e = newPane(w) orelse return null;
+    const a = gpa.create(Node) catch return null;
+    const b = gpa.create(Node) catch {
+        gpa.destroy(a);
+        return null;
+    };
     a.* = .{ .pane = d, .up = leaf };
     b.* = .{ .pane = e, .up = leaf };
     leaf.pane = null;
     leaf.down = down;
-    leaf.kids = .{ a, b };
-    leaf.share.snap(1);
+    leaf.kids = if (before) .{ b, a } else .{ a, b };
+    leaf.share.snap(if (before) 0 else 1);
     leaf.share.aim(0.5, CACurrentMediaTime());
-    // It starts as a sliver at the far edge, already the width it'll wrap at.
-    e.org = if (down) .{ .x = d.org.x, .y = d.org.y + d.size.y - 2 * gap } else .{ .x = d.org.x + d.size.x - 2 * gap, .y = d.org.y };
+    // It starts as a sliver at its edge, already the size it'll wrap at.
+    const far: Point = if (before) .{} else if (down) .{ .y = d.size.y - 2 * gap } else .{ .x = d.size.x - 2 * gap };
+    e.org = .{ .x = d.org.x + far.x, .y = d.org.y + far.y };
     e.size = if (down) .{ .x = d.size.x, .y = 2 * gap } else .{ .x = 2 * gap, .y = d.size.y };
     e.fin = if (down) .{ .x = d.fin.x, .y = room / 2 + 2 * gap } else .{ .x = room / 2 + 2 * gap, .y = d.fin.y };
-    if (tabCount(d) > 1) moveTab(d, e) else startPrompt(e, .open);
-    focus(e);
     msg(void, d.window, "invalidateCursorRectsForView:", .{d.view});
+    return e;
 }
 
-/// Moves `d`'s tab on show into `e`, a card with a blank untitled file.
-/// The tab to its right takes its place in `d`.
-fn moveTab(d: *Doc, e: *Doc) void {
+/// Takes tab `j` out of card `d`, edits and all. When it's the tab on show,
+/// the tab to its right takes its place; a card's last tab leaves it with
+/// a blank untitled file, for the caller to fold away.
+fn takeTab(d: *Doc, j: usize) ?Page {
+    if (j != d.at) {
+        const pg = d.pages.orderedRemove(pageOf(d, j));
+        if (j < d.at) d.at -= 1;
+        refreshAll();
+        return pg;
+    }
+    var blank: ?Editor = null;
+    if (tabCount(d) == 1) blank = Editor.init(gpa, "") catch return null;
     const pg: Page = .{ .ed = d.ed, .path = d.path, .lang = d.lang, .stamp = d.stamp, .sx = d.sx, .sy = d.sy, .id = d.id };
     d.path = null;
-    const next = if (d.at < d.pages.items.len) d.at else d.at - 1;
-    const other = d.pages.orderedRemove(next);
-    d.at = next;
-    install(d, other);
-    _ = park(e, true);
+    if (blank) |ed| {
+        install(d, .{ .ed = ed, .path = null, .lang = &syntax.plain, .stamp = null, .sx = 0, .sy = 0, .id = newId() });
+    } else {
+        const next = if (d.at < d.pages.items.len) d.at else d.at - 1;
+        const other = d.pages.orderedRemove(next);
+        d.at = next;
+        install(d, other);
+    }
+    return pg;
+}
+
+/// Puts `pg` in card `e` as its tab `k` (or last) and shows it. A blank
+/// untitled file on show in `e` makes way for it.
+fn putTab(e: *Doc, pg: Page, k: usize) void {
+    if (!park(e, false)) {
+        var p = pg;
+        return p.deinit();
+    }
+    e.at = @min(k, e.pages.items.len);
     install(e, pg);
+    checkOutside(e);
+}
+
+/// Moves card `d`'s tab `j` to place `k` among its tabs. The other tabs
+/// slide over to make room.
+fn reorderTab(d: *Doc, j: usize, k: usize) void {
+    if (j == k) return;
+    const id = tabId(d, j);
+    if (j == d.at) {
+        d.at = k;
+    } else {
+        const pg = d.pages.orderedRemove(pageOf(d, j));
+        if (j < d.at) d.at -= 1;
+        if (k <= d.at) {
+            d.pages.insert(gpa, k, pg) catch return;
+            d.at += 1;
+        } else d.pages.insert(gpa, k - 1, pg) catch return;
+    }
+    // Each tab slides from where it's drawn now to its new place.
+    for (d.slots.items) |*s| s.flip = s.x + s.shift.x;
+    const i = slotOf(d, id) orelse return;
+    const s = d.slots.orderedRemove(i);
+    const at = if (k + 1 < tabCount(d)) slotOf(d, tabId(d, k + 1)) orelse 0 else d.slots.items.len;
+    d.slots.insert(gpa, at, s) catch {};
+    refresh(d);
 }
 
 /// A closing card's split springs it shut (without a bounce) while its
@@ -1689,21 +1804,27 @@ fn placeOf(p: []const u8) ?Place {
     return null;
 }
 
-/// On quit: every window's focused file and frame, back to front, for next launch.
+/// On quit: every window's frame and cards, back to front, for next launch.
+/// A window is its frame, then its layout, tab-separated: a split is
+/// `|r` or `|d` (side by side or one above the other) and the first
+/// card's share, followed by its two halves; a card is `#n,a,f` (n tabs,
+/// the tab on show, 1 when it has the focus) followed by its n files.
+/// Untitled tabs aren't kept.
 pub fn saveSession() void {
     for (docs.items) |d| rememberPlace(d);
     const out = msg(Id, objc.class("NSMutableArray"), "array", .{});
     const order = msg(Id, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "orderedWindows", .{});
+    var line: std.ArrayList(u8) = .empty;
+    defer line.deinit(gpa);
     var i = msg(usize, order, "count", .{});
     while (i > 0) {
         i -= 1;
         const w = msg(Id, order, "objectAtIndex:", .{i});
-        for (wins.items) |wn| if (wn.window == w and wn.focus.path != null) {
-            const d = wn.focus;
-            const frame = objc.utf8(msg(Id, w, "stringWithSavedFrame", .{}));
-            const entry = std.mem.concat(gpa, u8, &.{ frame, "\t", d.path.? }) catch continue;
-            defer gpa.free(entry);
-            msg(void, out, "addObject:", .{objc.str(entry)});
+        for (wins.items) |wn| if (wn.window == w) {
+            line.clearRetainingCapacity();
+            line.appendSlice(gpa, objc.utf8(msg(Id, w, "stringWithSavedFrame", .{}))) catch continue;
+            const kept = saveLayout(wn, wn.cards, &line) catch continue;
+            if (kept > 0) msg(void, out, "addObject:", .{objc.str(line.items)});
         };
     }
     msg(void, defaults(), "setObject:forKey:", .{ out, objc.str("session") });
@@ -1712,8 +1833,31 @@ pub fn saveSession() void {
     } else msg(void, defaults(), "removeObjectForKey:", .{objc.str("root")});
 }
 
-/// Reopens last session's windows where they were, and its folder when ze
-/// started without one. False when no window opened.
+/// Writes `n`'s part of the session line. Returns how many files it kept.
+fn saveLayout(w: *const Win, n: *const Node, out: *std.ArrayList(u8)) !usize {
+    if (n.pane) |d| {
+        var kept: usize = 0;
+        var on: usize = 0;
+        for (0..tabCount(d)) |j| if (tabPath(d, j) != null) {
+            if (j == d.at) on = kept;
+            kept += 1;
+        };
+        try out.print(gpa, "\t#{d},{d},{d}", .{ kept, on, @intFromBool(w.focus == d) });
+        for (0..tabCount(d)) |j| if (tabPath(d, j)) |p| {
+            try out.append(gpa, '\t');
+            try out.appendSlice(gpa, p);
+        };
+        return kept;
+    }
+    // A card folding away is already gone.
+    if (n.going) |g| return saveLayout(w, n.kids[1 - g], out);
+    try out.print(gpa, "\t|{c}{d:.3}", .{ @as(u8, if (n.down) 'd' else 'r'), n.share.to });
+    return try saveLayout(w, n.kids[0], out) + try saveLayout(w, n.kids[1], out);
+}
+
+/// Reopens last session's windows where they were, with their cards and
+/// tabs, and its folder when ze started without one. False when no window
+/// opened.
 pub fn restoreSession() bool {
     if (root == null) {
         const saved = msg(Id, defaults(), "stringForKey:", .{objc.str("root")});
@@ -1725,16 +1869,80 @@ pub fn restoreSession() bool {
     const list = msg(Id, defaults(), "stringArrayForKey:", .{objc.str("session")});
     if (list == null) return false;
     for (0..msg(usize, list, "count", .{})) |i| {
-        const fs = fields(objc.utf8(msg(Id, list, "objectAtIndex:", .{i})), 1) orelse continue;
-        const p = gpa.dupeSentinel(u8, fs[1], 0) catch continue;
-        defer gpa.free(p);
-        if (!files.exists(p)) continue;
-        open(p, blankDoc());
-        for (docs.items) |d| if (d.path != null and std.mem.eql(u8, d.path.?, p)) {
-            msg(void, d.window, "setFrameFromString:", .{objc.str(fs[0])});
-        };
+        const entry = objc.utf8(msg(Id, list, "objectAtIndex:", .{i}));
+        const tab = std.mem.indexOfScalar(u8, entry, '\t') orelse continue;
+        var it = std.mem.splitScalar(u8, entry[tab + 1 ..], '\t');
+        restoreWindow(entry[0..tab], &it);
     }
     return docs.items.len > 0;
+}
+
+/// A window from one session line, or none when none of its files are left.
+fn restoreWindow(frame: []const u8, it: *std.mem.SplitIterator(u8, .scalar)) void {
+    const blank = newDoc() orelse return;
+    const w = blank.win;
+    var lit: ?*Doc = null;
+    const n = restoreNode(w, it, &lit) orelse return msg(void, w.window, "close", .{});
+    // The restored cards take the place of the blank one the window came with.
+    closePane(blank);
+    freeNodes(w.cards);
+    w.cards = n;
+    w.focus = lit orelse firstPane(n);
+    named(w.focus);
+    msg(void, w.window, "setFrameFromString:", .{objc.str(frame)});
+    refreshAll();
+}
+
+/// The cards that `it` describes next, leaving out files that are gone and
+/// cards left with none. A line from before cards is just a file.
+fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*Node {
+    const tok = it.next() orelse return null;
+    if (tok.len > 1 and tok[0] == '|') {
+        const a = restoreNode(w, it, lit);
+        const b = restoreNode(w, it, lit);
+        if (a == null or b == null) return a orelse b;
+        const n = gpa.create(Node) catch return a;
+        n.* = .{ .down = tok[1] == 'd', .kids = .{ a.?, b.? } };
+        n.share.snap(std.math.clamp(std.fmt.parseFloat(f64, tok[2..]) catch 0.5, 0.05, 0.95));
+        a.?.up = n;
+        b.?.up = n;
+        return n;
+    }
+    var head: [3]usize = .{ 1, 0, 0 };
+    var first: ?[]const u8 = tok;
+    if (tok.len > 0 and tok[0] == '#') {
+        first = null;
+        var nums = std.mem.splitScalar(u8, tok[1..], ',');
+        for (&head) |*v| v.* = std.fmt.parseInt(usize, nums.next() orelse "0", 10) catch 0;
+    }
+    const d = newPane(w) orelse return null;
+    var on: ?usize = null;
+    for (0..head[0]) |i| {
+        const p = (if (i == 0) first else null) orelse it.next() orelse break;
+        const z = gpa.dupeSentinel(u8, p, 0) catch continue;
+        defer gpa.free(z);
+        if (!files.exists(z)) continue;
+        const pg = loadPage(z) orelse continue;
+        if (!park(d, true)) {
+            var x = pg;
+            x.deinit();
+            continue;
+        }
+        install(d, pg);
+        if (i == head[1] or on == null) on = d.at;
+    }
+    if (on == null) {
+        closePane(d);
+        return null;
+    }
+    showTab(d, on.?);
+    if (head[2] == 1) lit.* = d;
+    const n = gpa.create(Node) catch {
+        closePane(d);
+        return null;
+    };
+    n.* = .{ .pane = d };
+    return n;
 }
 
 // ---- changes from outside ----
@@ -2924,7 +3132,9 @@ fn draw(w: *Win, ctx: Id) void {
     const many = w.cards.pane == null;
     for (&w.hot_t, 1..) |*t, i| t.aim(if (w.hot == i) 1 else 0, now);
     var busy = w.side_t.moving(now) or w.side_a.moving(now) or fold.t.moving(now) or fold.closing or cardsMoving(w.cards) or
-        !w.sel.settled() or w.sel_a.moving(now) or w.hot_t[0].moving(now) or w.hot_t[1].moving(now);
+        !w.sel.settled() or w.sel_a.moving(now) or w.hot_t[0].moving(now) or w.hot_t[1].moving(now) or
+        w.pv_a.moving(now) or w.ghost_a.moving(now);
+    for (w.pv) |s| busy = busy or !s.settled();
     var gliding = false;
     for (docs.items) |d| if (d.win == w) {
         // A card springing in or folding away fades with its size.
@@ -2960,6 +3170,7 @@ fn draw(w: *Win, ctx: Id) void {
         hoverPill(ctx, th, w.hot_t[0].at(now), toggle_x, hy);
         drawIcon(icon(.sidebar, dark, th), toggle_x - 10, hy - 10, 20);
     }
+    drawDrag(w, ctx, th, dark, now);
     w.busy = busy;
     if (busy or gliding) msg(void, w.link, "setPaused:", .{false});
 }
@@ -3324,7 +3535,8 @@ fn slotOf(d: *const Doc, id: u32) ?usize {
 /// True while a tab pops, folds, fades or the highlight springs.
 fn tabsMoving(d: *const Doc, now: f64) bool {
     if (d.tabbed.moving(now) or d.tab_x.moving(now) or !d.hl[0].settled() or !d.hl[1].settled()) return true;
-    for (d.slots.items) |s| if (s.gone or !s.grow.settled() or s.hov.moving(now)) return true;
+    if (!d.opening.settled()) return true;
+    for (d.slots.items) |s| if (s.gone or !s.grow.settled() or !s.shift.settled() or s.hov.moving(now)) return true;
     return false;
 }
 
@@ -3353,7 +3565,6 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
     if (d.slots_seen) d.tabbed.aim(want, now) else d.tabbed.snap(want);
     syncSlots(d, now);
     const a = std.math.clamp(d.tabbed.at(now), 0, 1);
-    const ink = if (key) th.fg else th.muted;
     const ts = tileSize();
     const hy = gap + head_h / 2;
     const pad = tab_pad * a;
@@ -3382,23 +3593,54 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
         cap = lo;
     }
 
-    // Where each tab sits, popping ones at their bounce.
+    // Where each tab sits, popping ones at their bounce, with a gap opening
+    // for a tab dragged over the row.
     const off = d.tab_x.at(now);
     var x = x0 - pad - off;
     var act: [2]f64 = .{ x, 0 };
+    d.open_px = d.open_w * @max(d.opening.step(now), 0);
+    var live: usize = 0;
     for (d.slots.items) |*s| {
+        if (!s.gone) {
+            if (live == d.open_at) x += d.open_px;
+            live += 1;
+        }
         const g = @max(s.grow.step(now), 0);
         s.x = x;
         s.w = @min(tabWidth(d, s, a), cap) * g;
-        if (!s.gone and s.id == d.id) act = .{ s.x, s.w };
         x += s.w + tab_space * a * @min(g, 1);
     }
+    if (live <= d.open_at) x += d.open_px;
     const end = x;
+    // Reordered tabs slide from where they were drawn; the dragged one
+    // follows the mouse along the row, then springs into its place.
+    const dragged = draggedTab(d);
+    var held_id: u32 = 0;
+    for (d.slots.items) |*s| {
+        if (s.flip) |was| {
+            s.shift.snap(was - s.x);
+            s.flip = null;
+        }
+        if (dragged) |t| if (!t.out and s.id == t.id) {
+            held_id = s.id;
+            const left = std.math.clamp(t.at.x - d.org.x - t.grab, x0 - pad, @max(end - tab_space * a - s.w, x0 - pad));
+            s.shift.snap(left - s.x);
+        };
+        if (s.id != held_id) s.shift.aim(0, now);
+        _ = s.shift.step(now);
+        if (!s.gone and s.id == d.id) act = .{ s.x, s.w };
+    }
     const span = end + off - (x0 - pad);
     d.tab_x.aim(std.math.clamp(act[0] + off - (x0 - pad) + act[1] / 2 - room / 2, 0, @max(span - room, 0)), now);
+    if (slotOf(d, d.id)) |i| act[0] += d.slots.items[i].shift.x;
+
+    // The tab being dragged, or springing back into place, draws last on
+    // its own backing, over the ones it slides past, and the highlight
+    // stays under it. Off its row it's faint.
+    const top_id = if (held_id != 0) held_id else if (slotOf(d, d.id)) |i| (if (d.slots.items[i].shift.settled()) 0 else d.id) else 0;
 
     // The active tab's highlight, with one tab sitting on it unseen.
-    for (&d.hl, act) |*h, v| if (a < 0.01) h.snap(v) else h.aim(v, now);
+    for (&d.hl, act) |*h, v| if (a < 0.01 or top_id == d.id) h.snap(v) else h.aim(v, now);
     const hx = d.hl[0].step(now);
     const hw = d.hl[1].step(now);
     if (a > 0.01) {
@@ -3406,52 +3648,11 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
         ring(ctx, th.fg, (if (key) @as(f64, 0.1) else 0.06) * a, hx, hy - 11, hw, 22, 7);
     }
 
-    for (d.slots.items) |*s| {
-        if (s.w < 0.5 or s.x > x1 or s.x + s.w < x0 - pad) continue;
-        const j = if (s.gone) null else tabIndex(d, s.id);
-        const on = j != null and j.? == d.at;
-        const hovered = j != null and s.id == d.hover;
-        s.hov.aim(if (hovered) 1 else 0, now);
-        const hv = s.hov.at(now) * a;
-        const g = std.math.clamp(s.grow.x, 0, 1);
-        objc.CGContextSaveGState(ctx);
-        objc.CGContextClipToRect(ctx, .{ .x = s.x, .y = hy - 12, .w = s.w, .h = 24 });
-        if (g < 1) objc.CGContextSetAlpha(ctx, g);
-        if (hv > 0.01 and !on) pill(ctx, th.fg, 0.05 * hv, s.x, hy - 11, s.w, 22, 7);
-        tile(ctx, s.which, dark, th, s.x + pad, @round(hy - ts / 2));
-        const nx = s.x + pad + ts + 7;
-        const nw = if (s.line != null) objc.CTLineGetTypographicBounds(s.line, null, null, null) else 0;
-        // The name stops short of the close button.
-        const shut_x = s.x + s.w - pad - tab_shut * a;
-        objc.CGContextSaveGState(ctx);
-        const fit = shut_x - nx;
-        objc.CGContextClipToRect(ctx, .{ .x = nx, .y = hy - 12, .w = @max(fit + 1, 0), .h = 24 });
-        // A squeezed tab's name ends in an ellipsis; one popping in or
-        // folding away is just cut off.
-        const room_w = @floor(cap - 2 * pad - ts - 7 - tab_shut * a);
-        const squeezed = j != null and room_w + 1 < nw;
-        if (squeezed and room_w != s.cut_w) {
-            if (s.cut) |l| objc.CFRelease(l);
-            s.cut = uiLine(if (tabPath(d, j.?)) |p| std.fs.path.basename(p) else "untitled", name_font, room_w);
-            s.cut_w = room_w;
+    for (0..2) |pass| {
+        for (d.slots.items) |*s| {
+            if ((s.id == top_id) != (pass == 1)) continue;
+            drawTab(d, s, ctx, th, dark, key, a, cap, x0, x1, now, dragged != null and dragged.?.out and s.id == dragged.?.id, pass == 1);
         }
-        _ = drawLine(ctx, if (squeezed and s.cut != null) s.cut else s.line, if (on or hovered or a < 0.5) ink else th.muted, nx, @round(hy + name_off));
-        objc.CGContextRestoreGState(ctx);
-        // The unsaved dot sits after the name with one tab and slides into
-        // the close button's place with more; hovering trades it for the ×.
-        const cx = shut_x + tab_shut * a / 2;
-        const dirty = j != null and tabDirty(d, j.?);
-        const cross = a * if (on and !dirty) 1 else hv;
-        if (dirty and cross < 0.5) {
-            const dx = nx + nw + 9 + (cx - nx - nw - 9) * a;
-            pill(ctx, th.caret, 1 - 2 * cross, dx - 3, hy - 3, 6, 6, 3);
-        }
-        if (cross > 0.01) {
-            if (hovered and d.hover_x) pill(ctx, th.fg, 0.1 * a, cx - 8, hy - 8, 16, 16, 5);
-            objc.CGContextSetAlpha(ctx, g * cross);
-            drawIcon(icon(.close, dark, th), cx - 6, hy - 6, 12);
-        }
-        objc.CGContextRestoreGState(ctx);
     }
 
     // With one tab, the folder after the name; with more, the + after the
@@ -3493,6 +3694,73 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
     k.flush();
 }
 
+/// One tab of `d`'s header, where it lays out plus its slide; `a` is how
+/// far the header has turned into tabs and `cap` the squeezed tabs' width.
+fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, key: bool, a: f64, cap: f64, x0: f64, x1: f64, now: f64, faint: bool, lifted: bool) void {
+    const hy = gap + head_h / 2;
+    const ts = tileSize();
+    const pad = tab_pad * a;
+    const ink = if (key) th.fg else th.muted;
+    const sx = s.x + s.shift.x;
+    if (s.w < 0.5 or sx > x1 or sx + s.w < x0 - pad) return;
+    const j = if (s.gone) null else tabIndex(d, s.id);
+    const on = j != null and j.? == d.at;
+    const hovered = j != null and s.id == d.hover;
+    s.hov.aim(if (hovered) 1 else 0, now);
+    const hv = s.hov.at(now) * a;
+    const g = std.math.clamp(s.grow.x, 0, 1);
+    objc.CGContextSaveGState(ctx);
+    objc.CGContextClipToRect(ctx, .{ .x = sx, .y = hy - 12, .w = s.w, .h = 24 });
+    const alpha = g * @as(f64, if (faint) 0.35 else 1);
+    if (alpha < 1) objc.CGContextSetAlpha(ctx, alpha);
+    if (lifted) {
+        pill(ctx, th.header, 1, sx, hy - 11, s.w, 22, 7);
+        pill(ctx, th.fg, (if (key) @as(f64, 0.08) else 0.05) * a, sx, hy - 11, s.w, 22, 7);
+        ring(ctx, th.fg, (if (key) @as(f64, 0.1) else 0.06) * a, sx, hy - 11, s.w, 22, 7);
+    }
+    if (hv > 0.01 and !on) pill(ctx, th.fg, 0.05 * hv, sx, hy - 11, s.w, 22, 7);
+    tile(ctx, s.which, dark, th, sx + pad, @round(hy - ts / 2));
+    const nx = sx + pad + ts + 7;
+    const nw = if (s.line != null) objc.CTLineGetTypographicBounds(s.line, null, null, null) else 0;
+    // The name stops short of the close button.
+    const shut_x = sx + s.w - pad - tab_shut * a;
+    objc.CGContextSaveGState(ctx);
+    const fit = shut_x - nx;
+    objc.CGContextClipToRect(ctx, .{ .x = nx, .y = hy - 12, .w = @max(fit + 1, 0), .h = 24 });
+    // A squeezed tab's name ends in an ellipsis; one popping in or
+    // folding away is just cut off.
+    const room_w = @floor(cap - 2 * pad - ts - 7 - tab_shut * a);
+    const squeezed = j != null and room_w + 1 < nw;
+    if (squeezed and room_w != s.cut_w) {
+        if (s.cut) |l| objc.CFRelease(l);
+        s.cut = uiLine(if (tabPath(d, j.?)) |p| std.fs.path.basename(p) else "untitled", name_font, room_w);
+        s.cut_w = room_w;
+    }
+    _ = drawLine(ctx, if (squeezed and s.cut != null) s.cut else s.line, if (on or hovered or a < 0.5) ink else th.muted, nx, @round(hy + name_off));
+    objc.CGContextRestoreGState(ctx);
+    // The unsaved dot sits after the name with one tab and slides into
+    // the close button's place with more; hovering trades it for the ×.
+    const cx = shut_x + tab_shut * a / 2;
+    const dirty = j != null and tabDirty(d, j.?);
+    const cross = a * if (on and !dirty) 1 else hv;
+    if (dirty and cross < 0.5) {
+        const dx = nx + nw + 9 + (cx - nx - nw - 9) * a;
+        pill(ctx, th.caret, 1 - 2 * cross, dx - 3, hy - 3, 6, 6, 3);
+    }
+    if (cross > 0.01) {
+        if (hovered and d.hover_x) pill(ctx, th.fg, 0.1 * a, cx - 8, hy - 8, 16, 16, 5);
+        objc.CGContextSetAlpha(ctx, alpha * cross);
+        drawIcon(icon(.close, dark, th), cx - 6, hy - 6, 12);
+    }
+    objc.CGContextRestoreGState(ctx);
+}
+
+/// The drag of one of `d`'s tabs, once the mouse has moved far enough.
+fn draggedTab(d: *const Doc) ?*TabDrag {
+    if (d.win.tdrag) |*t| if (t.from == d and t.live) return t;
+    return null;
+}
+
 const TabHit = struct { j: usize, id: u32, close: bool };
 
 /// The tab under `p`, and whether it's over the tab's close button. Only
@@ -3505,6 +3773,198 @@ fn tabAt(d: *const Doc, p: Point) ?TabHit {
         return .{ .j = j, .id = s.id, .close = p.x >= s.x + s.w - tab_pad - tab_shut };
     }
     return null;
+}
+
+/// With more than one card, a card's lone file name drags like a tab.
+fn loneTab(d: *const Doc, p: Point) ?TabHit {
+    if (conf.zen or d.tabbed.to != 0 or d.win.cards.pane != null or @abs(p.y - (gap + head_h / 2)) > 12) return null;
+    const s = d.slots.items[slotOf(d, d.id) orelse return null];
+    if (p.x < s.x or p.x >= s.x + s.w) return null;
+    return .{ .j = 0, .id = d.id, .close = false };
+}
+
+// ---- dragging tabs ----
+
+/// Follows a tab drag to `p` in the view. Along its own row the tab
+/// trades places with the tabs it passes; anywhere else it shows where it
+/// would drop.
+fn dragTab(w: *Win, p: Point) void {
+    const t = &w.tdrag.?;
+    const d = t.from;
+    if (d.closing) {
+        w.tdrag = null;
+        return;
+    }
+    t.at = p;
+    if (!t.live) {
+        if (@abs(p.x - t.down.x) < 4 and @abs(p.y - t.down.y) < 4) return;
+        t.live = true;
+    }
+    const lp = inPane(d, p);
+    t.out = tabCount(d) == 1 or lp.x < 0 or lp.x >= d.size.x or lp.y < 0 or lp.y >= top_h + 8;
+    t.drop = null;
+    if (t.out) {
+        t.drop = dropAt(w, t, p);
+    } else if (tabIndex(d, t.id)) |j| {
+        // It trades places with a tab once its middle passes that tab's.
+        const s = d.slots.items[slotOf(d, t.id).?];
+        const mid = lp.x - t.grab + s.w / 2;
+        var k: usize = 0;
+        for (d.slots.items) |o| if (!o.gone and o.id != t.id and o.x + o.w / 2 < mid) {
+            k += 1;
+        };
+        reorderTab(d, j, k);
+    }
+    aimPreview(w, CACurrentMediaTime());
+    msg(void, w.view, "setNeedsDisplay:", .{true});
+}
+
+/// Where a tab dragged off its row to `p` would land: among another
+/// card's tabs, in a new card off the nearest edge of the card under it
+/// when `p` is within a quarter of that edge and there's room, or else
+/// on that card. Null over the sidebar, the gaps, or its own card's
+/// middle, and its own card's edges when it's that card's only tab.
+fn dropAt(w: *Win, t: *const TabDrag, p: Point) ?Drop {
+    const c = paneAt(w, p) orelse return null;
+    const lp = inPane(c, p);
+    if (lp.y < top_h) {
+        if (c == t.from) return null;
+        var k: usize = 0;
+        for (c.slots.items) |o| if (!o.gone and o.x + o.w / 2 < lp.x) {
+            k += 1;
+        };
+        return .{ .card = c, .zone = .tabs, .k = k };
+    }
+    const u = (lp.x - gap) / @max(c.size.x - 2 * gap, 1);
+    const v = (lp.y - gap) / @max(c.size.y - 2 * gap, 1);
+    const near = [4]f64{ u, 1 - u, v, 1 - v };
+    const edges = [4]Zone{ .left, .right, .top, .bottom };
+    var best: ?usize = null;
+    for (near, 0..) |x, i| if (x < 0.25 and (best == null or x < near[best.?])) {
+        best = i;
+    };
+    if (best) |i| if ((c != t.from or tabCount(c) > 1) and roomFor(c, i >= 2)) return .{ .card = c, .zone = edges[i] };
+    if (c == t.from) return null;
+    return .{ .card = c, .zone = .whole, .k = c.at + 1 };
+}
+
+/// The drop preview for `dr`, in the view: the gap that opens among the
+/// tabs, `gw` wide, or the card or the half of it that the new card takes.
+fn dropRect(dr: Drop, gw: f64) Rect {
+    const c = dr.card;
+    const r: Rect = .{ .x = c.org.x + gap, .y = c.org.y + gap, .w = c.size.x - 2 * gap, .h = c.size.y - 2 * gap };
+    return switch (dr.zone) {
+        .tabs => {
+            // Where tab `k` starts with no gap open, from where it drew.
+            var x: f64 = r.x + 14;
+            var i: usize = 0;
+            for (c.slots.items) |o| if (!o.gone) {
+                const was = if (i >= c.open_at) c.open_px else 0;
+                if (i == dr.k) {
+                    x = o.x - was;
+                    break;
+                }
+                x = o.x + o.w + tab_space - was;
+                i += 1;
+            };
+            return .{ .x = c.org.x + x, .y = c.org.y + gap + head_h / 2 - 11, .w = gw, .h = 22 };
+        },
+        .whole => .{ .x = r.x + 6, .y = r.y + 6, .w = r.w - 12, .h = r.h - 12 },
+        .left => .{ .x = r.x, .y = r.y, .w = r.w / 2, .h = r.h },
+        .right => .{ .x = r.x + r.w / 2, .y = r.y, .w = r.w / 2, .h = r.h },
+        .top => .{ .x = r.x, .y = r.y, .w = r.w, .h = r.h / 2 },
+        .bottom => .{ .x = r.x, .y = r.y + r.h / 2, .w = r.w, .h = r.h / 2 },
+    };
+}
+
+/// The width of the dragged tab's copy under the mouse.
+fn ghostW(t: *const TabDrag) f64 {
+    const s = t.from.slots.items[slotOf(t.from, t.id) orelse return 80];
+    const nw = if (s.line != null) objc.CTLineGetTypographicBounds(s.line, null, null, null) else 0;
+    return 2 * tab_pad + tileSize() + 7 + nw;
+}
+
+/// Springs the drop preview to where the drag would land, opens a gap in
+/// the tab row it's over (the tabs there slide aside), and fades the
+/// dragged tab's copy in off its row. A preview that was out grows into
+/// place from a little smaller.
+fn aimPreview(w: *Win, now: f64) void {
+    const t = if (w.tdrag) |*p| p else null;
+    const dr: ?Drop = if (t) |x| x.drop else null;
+    const gw = if (t) |x| ghostW(x) else 0;
+    w.ghost_a.aim(if (t != null and t.?.live and t.?.out) 1 else 0, now);
+    if (dr) |x| {
+        const r = dropRect(x, gw);
+        const to = [4]f64{ r.x, r.y, r.w, r.h };
+        if (w.pv_a.to == 0 and w.pv_a.at(now) < 0.05) {
+            const from = [4]f64{ r.x + r.w * 0.06, r.y + r.h * 0.06, r.w * 0.88, r.h * 0.88 };
+            for (&w.pv, from) |*s, v| s.snap(v);
+        }
+        for (&w.pv, to) |*s, v| s.aim(v, now);
+        w.pv_a.aim(1, now);
+    } else w.pv_a.aim(0, now);
+    for (docs.items) |d| if (d.win == w) {
+        const over = dr != null and dr.?.zone == .tabs and dr.?.card == d;
+        if (over and d.open_at != dr.?.k) {
+            // The gap moves: the tabs between slide from where they are.
+            if (d.opening.x > 0.01) for (d.slots.items) |*s| {
+                s.flip = s.x + s.shift.x;
+            };
+            d.open_at = dr.?.k;
+        }
+        if (over) d.open_w = gw + tab_space;
+        d.opening.aim(if (over) 1 else 0, now);
+        if (!d.opening.settled()) refresh(d);
+    };
+}
+
+/// Ends a tab drag: a tab dragged along its row springs into its place,
+/// and one dropped elsewhere moves there and takes typing. A card left
+/// with no tabs folds away.
+fn dropTab(t: TabDrag) void {
+    const from = t.from;
+    if (!t.live or from.closing) return;
+    const dr = t.drop orelse return refresh(from);
+    const j = tabIndex(from, t.id) orelse return;
+    const last = tabCount(from) == 1;
+    const to = switch (dr.zone) {
+        .tabs, .whole => dr.card,
+        .left, .right, .top, .bottom => splitOff(dr.card, dr.zone == .top or dr.zone == .bottom, dr.zone == .left or dr.zone == .top) orelse return,
+    };
+    const pg = takeTab(from, j) orelse return;
+    putTab(to, pg, dr.k);
+    if (last) foldCard(from);
+    focus(to);
+}
+
+/// The drop preview, and the dragged tab's copy under the mouse.
+fn drawDrag(w: *Win, ctx: Id, th: *const Theme, dark: bool, now: f64) void {
+    var r: [4]f64 = undefined;
+    for (&w.pv, &r) |*s, *v| v.* = s.step(now);
+    const pa = w.pv_a.at(now);
+    if (pa > 0.01) {
+        const rad: f64 = if (r[3] < 30) 7 else card_radius;
+        pill(ctx, th.caret, 0.12 * pa, r[0], r[1], r[2], r[3], rad);
+        ring(ctx, th.caret, 0.6 * pa, r[0], r[1], r[2], r[3], rad);
+    }
+    const ga = w.ghost_a.at(now);
+    const t = w.tdrag orelse return;
+    if (ga < 0.01) return;
+    const s = &t.from.slots.items[slotOf(t.from, t.id) orelse return];
+    const ts = tileSize();
+    const gw = ghostW(&t);
+    const x = t.at.x - std.math.clamp(t.grab, 10, gw - 10);
+    const y = t.at.y - 11;
+    objc.CGContextSaveGState(ctx);
+    objc.CGContextSetAlpha(ctx, ga);
+    // A soft shadow under it, so it reads as lifted off the page.
+    pill(ctx, th.fg, 0.06, x - 1, y + 2, gw + 2, 24, 8);
+    pill(ctx, th.fg, 0.06, x, y + 1, gw, 22, 7);
+    pill(ctx, th.header, 1, x, y, gw, 22, 7);
+    ring(ctx, th.fg, 0.2, x, y, gw, 22, 7);
+    tile(ctx, s.which, dark, th, x + tab_pad, @round(y + 11 - ts / 2));
+    _ = drawLine(ctx, s.line, th.fg, x + tab_pad + ts + 7, @round(y + 11 + name_off));
+    objc.CGContextRestoreGState(ctx);
 }
 
 /// Zen hides the traffic lights; the window still closes, zooms and drags.
@@ -3707,6 +4167,7 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const p = local(self, ev);
     w.side_down = true;
     w.grab = null;
+    w.tdrag = null;
     if (toolAt(w, p)) |t| {
         if (t == .sidebar) toggleSidebar() else newTab(w.focus);
         return;
@@ -3736,8 +4197,13 @@ fn cardDown(d: *Doc, p: Point, ev: Id) void {
     d.note = "";
     if (p.y < top_h) {
         if (onTabPlus(d, p)) return newTab(d);
-        const hit = tabAt(d, p) orelse return titleStrip(d.win, ev);
-        if (hit.close) closeTab(d, hit.j) else showTab(d, hit.j);
+        const hit = tabAt(d, p) orelse loneTab(d, p) orelse return titleStrip(d.win, ev);
+        if (hit.close) return closeTab(d, hit.j);
+        showTab(d, hit.j);
+        // Held, the tab can be dragged along its row or to another card.
+        const s = d.slots.items[slotOf(d, hit.id) orelse return];
+        const at: Point = .{ .x = p.x + d.org.x, .y = p.y + d.org.y };
+        d.win.tdrag = .{ .from = d, .id = hit.id, .down = at, .at = at, .grab = p.x - (s.x + s.shift.x) };
         return;
     }
     d.win.side_down = false;
@@ -3822,6 +4288,12 @@ fn mouseExited(self: Id, _: Sel, _: Id) callconv(.c) void {
 /// and the next launch use it, or of a gap between cards.
 fn mouseUp(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
+    if (w.tdrag) |t| {
+        w.tdrag = null;
+        dropTab(t);
+        aimPreview(w, CACurrentMediaTime());
+        return msg(void, w.view, "setNeedsDisplay:", .{true});
+    }
     if (w.grab != null) {
         w.grab = null;
         return msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
@@ -3837,6 +4309,7 @@ fn mouseUp(self: Id, _: Sel, _: Id) callconv(.c) void {
 fn mouseDragged(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
     if (w.side_drag) return resizeSide(w, local(self, ev).x);
+    if (w.tdrag != null) return dragTab(w, local(self, ev));
     if (w.grab) |n| return dragGap(w, n, local(self, ev));
     if (w.side_down) return;
     const d = w.focus;

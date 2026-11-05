@@ -3,6 +3,8 @@
 # app, signed with Vesper Self-Signed, and prints the app's path.
 #   dev     "ze Dev", dev.hkay.ze.dev, at zig-out/ze Dev.app. It runs in the
 #           background (LSUIElement); start it with scripts/dev.sh.
+#           ZE_DEBUG=1 builds it in debug mode, which stops on bad memory
+#           use with a message instead of drawing garbage or crashing later.
 #   stable  "ze", dev.hkay.ze, at zig-out/ze.app. Only scripts/ship.sh makes
 #           it, and installs it at ~/Applications/ze.app.
 set -eu
@@ -14,7 +16,7 @@ case $flavor in
   *) echo "bundle.sh: dev or stable, not $flavor" >&2; exit 1 ;;
 esac
 app=${2:-"zig-out/$name.app"}
-zig build --release
+if [ "$flavor" = dev ] && [ "${ZE_DEBUG:-}" = 1 ]; then zig build; else zig build --release; fi
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp zig-out/bin/ze "$app/Contents/MacOS/ze"

@@ -1,8 +1,10 @@
 #!/bin/sh
 # dev.sh [build] [files...]: builds "ze Dev" and starts a new copy of it in
 # the background, behind every window, without taking the keys. Prints its
-# pid. `dev.sh build` only builds. Settings and the session live under
-# ZE_DEV_HOME (default /tmp/ze-dev-home), never Harsha's.
+# pid. `dev.sh build` only builds. Its settings file lives under ZE_DEV_HOME
+# (default /tmp/ze-dev-home) and its session in its own defaults
+# (dev.hkay.ze.dev), never Harsha's. What it prints, panics included, goes
+# to ZE_DEV_LOG (default /tmp/ze-dev.log). ZE_DEBUG=1 makes a debug build.
 # Harsha's own ze is the stable one at ~/Applications/ze.app; only Ship it
 # changes that (scripts/ship.sh).
 set -eu
@@ -19,6 +21,6 @@ for a; do
   set -- "$@" "$a"
   shift
 done
-open -g -j -n "$app" --env HOME="$home" --args "$@"
+open -g -j -n "$app" --env HOME="$home" --stdout "${ZE_DEV_LOG:-/tmp/ze-dev.log}" --stderr "${ZE_DEV_LOG:-/tmp/ze-dev.log}" --args "$@"
 sleep 1
-pgrep -n -f "$app/Contents/MacOS/ze"
+pgrep -n -f "^$app/Contents/MacOS/ze( |\$)"

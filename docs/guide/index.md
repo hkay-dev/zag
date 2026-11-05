@@ -102,6 +102,8 @@ in beside it with a little bounce, and a **+** shows after the last one.
 - **File > Close Window** (⇧⌘W) closes the window and all its tabs.
 - **View > Show Next Tab** (⌃Tab) and **Show Previous Tab** (⌃⇧Tab) step through the tabs and go
   around at the ends.
+- Drag a tab along the row to move it. The tabs it passes slide out of its way, and it springs
+  into its place when you let go.
 
 When the tabs don't fit, they all get narrower and their names end in "…". Past that, the row
 scrolls to keep the active tab in view. Drag the header between and around the tabs to move the
@@ -122,6 +124,12 @@ others hide their caret and dim their header.
 - Drag the gap between two cards to resize them. Neither gets narrower than 220 points or shorter
   than 140. ⌘D beeps when the focused card has no room to split.
 - Closing a card's last tab folds the card away, and its neighbor springs over to fill the room.
+- Drag a tab to another card to move it there. Over the other card's tabs, they slide apart to
+  show where it goes; over the card itself, it joins that card's tabs. Near a card's left, right,
+  top or bottom edge, a preview of half the card shows, and dropping there splits the card and
+  puts the tab in the new half. That works on the tab's own card too, when it has other tabs.
+  With more than one card, a card's lone file name drags the same way, and its card folds away
+  once the file leaves.
 
 ## Sidebar
 
@@ -158,8 +166,9 @@ The sidebar reads the disk again when you come back to ze, so new and deleted fi
 
 When you quit ze with files open and later start it without naming a file (from the Dock, say),
 it reopens those files in the same windows, at the same sizes and places, and brings back the
-folder you had open. Each window comes back with the file its focused card was showing, as one
-card, not the other cards or tabs it held.
+folder you had open. Each window comes back with its cards in the same places and sizes, each
+with its tabs in order and the same tab on show. Untitled tabs aren't kept, and a file that's gone
+drops out of its card.
 Starting it with a file, like `ze notes.txt`, opens just that file. Close every window before
 quitting and the next start gives you one empty window.
 

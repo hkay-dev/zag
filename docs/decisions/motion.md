@@ -23,6 +23,13 @@ showing and hiding, and later tabs and split panes. A jump is a bug.
   folding away) get a critically damped spring and don't bounce.
 - A highlight that rides a spring and whose row moves for another reason (a folder above it
   opening) shifts the spring by the same amount, so it only bounces when it changes rows.
+- Tabs that change places slide rather than jump: before the order changes, each tab notes
+  where it's drawn (`Slot.flip`), and on the next draw a spring (`Slot.shift`) carries it from
+  there to its new place. A dragged tab rides the same spring, snapped to the mouse, and springs
+  home when it's let go; it draws last on its own backing so it passes over the others.
+- A tab dragged over another card's tabs opens a gap there (`Doc.opening`) that the tabs slide
+  aside for. The drop preview springs between places and grows in from a little smaller; the
+  tab's copy under the mouse fades in once it leaves its row.
 - `scenery()` says whether a window still has frames to draw. Each new animation adds its clause
   there; leaving it out shows as an animation that freezes until the next event.
 - Layout uses where things end up, and only drawing and hit tests use where they are now. The
