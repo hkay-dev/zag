@@ -1,7 +1,7 @@
 ---
 type: guide
-summary: Opening, editing and reading files in ze.
-title: Using ze
+summary: Opening, editing and reading files in Zag.
+title: Using Zag
 feature: editor
 covers:
   - src/
@@ -9,7 +9,7 @@ covers:
 since: 2026-11-04
 ---
 
-ze is a small text editor. A window shows files on cards with rounded corners that sit a little
+Zag is a small text editor. A window shows files on cards with rounded corners that sit a little
 in from the window's edges. A window starts with one card and can split into more, side by side
 or stacked (see Cards), and each card keeps the files you open in it as tabs.
 When you've opened a folder, a sidebar on the left lists its files. With one file, the card's
@@ -19,7 +19,7 @@ shows none; outside it the path starts at ~).
 With more, it shows tabs instead (see Tabs). When you find, replace, jump to a line or open a
 file, a prompt line opens at the bottom of the card.
 
-ze follows the Mac's light or dark setting unless you pick one, with a theme for each (see Themes). Things move
+Zag follows the Mac's light or dark setting unless you pick one, with a theme for each (see Themes). Things move
 a little instead of jumping: the caret glides to each new spot, faster for a step along a line,
 and holds solid for a moment before it fades out and back in, the band behind the caret's line
 slides after it, a new selection fades in, the quick open list rises out of the prompt line, and
@@ -43,7 +43,7 @@ A thin scroll bar shows on the right edge of the text while the page scrolls, wi
 sized and placed by how much of the file is in view. It fades in quickly and fades out a second
 after it stops. A file that fits in the window never shows one.
 
-ze doesn't follow the Mac's Reduce Motion setting: things move the same way with it on.
+Zag doesn't follow the Mac's Reduce Motion setting: things move the same way with it on.
 
 Right-click (or control-click) in the text for **Cut**, **Copy**, **Paste**, **Select All** and
 **Toggle Comment**, the same commands as the Edit menu.
@@ -58,7 +58,7 @@ Desktop & Dock's "Double-click a window's title bar" setting says).
 
 ## Command palette
 
-**View > Command Palette…** (⌘K) lists every command in ze's menus above the prompt line, the View
+**View > Command Palette…** (⌘K) lists every command in Zag's menus above the prompt line, the View
 menu's first. The list is an inset rounded panel with a soft shadow above it, set in the Mac's
 system font like a menu. Each command has its shortcut on the right, lined up like the Mac's
 menus, and a checkmark in a column on the left when it's on. The picked row has the same soft
@@ -83,13 +83,13 @@ the same Markdown rules.
 
 ## Open files
 
-- From a terminal, `ze notes.txt` opens a file, and `ze .` opens a folder. A file that doesn't
+- From a terminal, `zag notes.txt` opens a file, and `zag .` opens a folder. A file that doesn't
   exist yet opens empty and is created when you save.
 - **File > Open…** (⌘O) opens files or a folder.
-- Drop files or a folder from Finder onto a window, or onto ze's Dock icon, to open them. A blank
+- Drop files or a folder from Finder onto a window, or onto Zag's Dock icon, to open them. A blank
   window takes the first file; the rest, and any file after that, open in new windows.
 - **File > Open Recent** lists the last 15 files you opened or saved. **Clear Menu** empties it.
-- **File > Quick Open…** (⌘P) lists every file in ze's folder (see Sidebar). Type a few letters
+- **File > Quick Open…** (⌘P) lists every file in Zag's folder (see Sidebar). Type a few letters
   of the name, use ↑ and ↓ to pick, and press Return.
 - Opening a file that's already open in another window or card brings it forward. Quick open
   and the sidebar show the new file in a new tab of the focused card, right of the one on show
@@ -160,7 +160,7 @@ others hide their caret and dim their header.
 
 ## Sidebar
 
-The left side of each window lists the files of ze's folder, folders first. That's the folder ze
+The left side of each window lists the files of Zag's folder, folders first. That's the folder Zag
 started in from a terminal, or the one you opened last. Started from the Dock or Finder with no
 folder from last time, it's your home folder. The sidebar sits on the Mac's own translucent
 sidebar material, and the cards' chrome lets a little of it show through. At the top, the
@@ -203,22 +203,22 @@ folder's row pushes it away. Click a pinned folder to scroll back to it.
   stops, and springs back when you let go. Drag it in below 100 points and the sidebar slides
   shut; show it again and it has the width it had.
 
-The sidebar reads the disk again when you come back to ze, so new and deleted files show up.
+The sidebar reads the disk again when you come back to Zag, so new and deleted files show up.
 
 ## Pick up where you left off
 
-When you quit ze with files open and later start it without naming a file (from the Dock, say),
+When you quit Zag with files open and later start it without naming a file (from the Dock, say),
 it reopens those files in the same windows, at the same sizes and places, and brings back the
 folder you had open. Each window comes back with its cards in the same places and sizes, each
 with its tabs in order and the same tab on show. A file that's gone drops out of its card.
-Starting it with a file, like `ze notes.txt`, opens just that file. Close every window before
+Starting it with a file, like `zag notes.txt`, opens just that file. Close every window before
 quitting and the next start gives you one empty window.
 
 ### Drafts
 
 An untitled file saves itself as a draft a second after you stop typing, so there's no need to
 save a scratchpad. It shows no unsaved dot, quitting doesn't ask about it, and it comes back in
-its tab next time. If ze ever stops without quitting, its drafts come back as tabs in the front
+its tab next time. If Zag ever stops without quitting, its drafts come back as tabs in the front
 window at the next start, even when that start opens other files. Saving it to a file with ⌘S,
 or closing its tab and choosing **Don't Save**, deletes the draft. Drafts live in
 `~/Library/Application Support/ze/Drafts`.
@@ -289,7 +289,7 @@ every window and is remembered; your sidebar, wrap and theme settings don't chan
 ## Find and replace
 
 1. Press ⌘F. The prompt starts with the selected text or your last search.
-2. Type: ze jumps to the first match and shows how many there are. Searching ignores case unless
+2. Type: Zag jumps to the first match and shows how many there are. Searching ignores case unless
    you type a capital letter. If nothing matches, the words shake.
 3. Press Return for the next match, ⇧Return for the previous one, and Escape to close the prompt.
 
@@ -309,17 +309,17 @@ The replacement goes in exactly as typed.
 
 ## Changes from other apps
 
-When another app changes a file that's open in ze, ze notices the next time you come back to it:
+When another app changes a file that's open in Zag, Zag notices the next time you come back to it:
 
-- If you haven't changed the file in ze, it reloads it and says "reloaded" in the header.
+- If you haven't changed the file in Zag, it reloads it and says "reloaded" in the header.
   The caret stays put, and ⌘Z brings back the text from before the reload.
-- If you have unsaved changes, ze asks whether to keep yours or reload the file.
-- If the file was deleted, ze says "deleted on disk" and keeps the text as unsaved changes, so
+- If you have unsaved changes, Zag asks whether to keep yours or reload the file.
+- If the file was deleted, Zag says "deleted on disk" and keeps the text as unsaved changes, so
   ⌘S writes it back.
 
 ## Save and close
 
-⌘S saves and ⇧⌘S saves under a new name. ze writes the file next to the old one and then swaps
+⌘S saves and ⇧⌘S saves under a new name. Zag writes the file next to the old one and then swaps
 it in, so a crash halfway through a save never leaves a half-written file. The file keeps its
 permissions.
 
@@ -343,7 +343,7 @@ open.
 
 ## Syntax colors
 
-ze colors code by the file's extension, for Zig, C and its family (C++, Objective-C, Java,
+Zag colors code by the file's extension, for Zig, C and its family (C++, Objective-C, Java,
 Kotlin, C#), JavaScript and TypeScript, Python, Rust, Go, Swift, shell, Ruby, Lua, JSON, TOML,
 YAML, INI, CSS and Markdown. Keywords are bold, and strings, comments and numbers each get a
 color. In code, a word right before `(` takes the function color, a Capitalized word the type
@@ -354,15 +354,15 @@ function color with their address dimmed. Other files are plain text.
 
 ## Themes
 
-ze has a theme for light mode and one for dark mode. **View > Theme** picks the mode under
+Zag has a theme for light mode and one for dark mode. **View > Theme** picks the mode under
 Appearance: Auto (the default) switches every window when the Mac switches, and Light or Dark keeps
-ze in that mode whatever the Mac does. Below that it picks the themes: Paper (the default), Ayu Light
+Zag in that mode whatever the Mac does. Below that it picks the themes: Paper (the default), Ayu Light
 or One Light for light mode, and Ink (the default), Ayu Dark or One Dark for dark mode. Checkmarks
-show the mode and the two themes in use. ze remembers them in the settings file.
+show the mode and the two themes in use. Zag remembers them in the settings file.
 Zen Mode turns every theme color grey while it's on, without changing the saved colors.
 Switching themes, or the Mac's light and dark setting, fades over a quarter of a second. Gray
 text in every theme is dark enough to read comfortably. With **Increase contrast** on in System
-Settings > Accessibility > Display, ze strengthens the card outlines, the sidebar's selection and
+Settings > Accessibility > Display, Zag strengthens the card outlines, the sidebar's selection and
 the gray text, and follows the setting the moment you change it.
 
 ## Font and text size
@@ -371,13 +371,13 @@ the gray text, and follows the setting the moment you change it.
 - **View > Bigger** (⌘=) and **Smaller** (⌘-) change the text size in every window, and
   **Actual Size** (⌘0) puts it back to 14.
 
-ze remembers the font and size for next time.
+Zag remembers the font and size for next time.
 
 ## Settings
 
-**ze > Settings…** (⌘,) opens ze's settings file in a ze window. It lists every setting with a
+**Zag > Settings…** (⌘,) opens Zag's settings file in a Zag window. It lists every setting with a
 short note. Change a value and save, and every window picks it up at once. The file is
-`~/.config/ze/settings`, so you can also edit it in another app; ze picks up the change when you
+`~/.config/ze/settings`, so you can also edit it in another app; Zag picks up the change when you
 come back to it.
 
 ```text
@@ -404,7 +404,7 @@ header's fainter words), `keyword`, `string`, `comment`, `number`, `function`, `
 open list), `rule` (the line under the header and above the prompt line and the quick open list)
 and `header` (the card's header, a step lighter than the text on dark themes and a few steps
 darker on light ones, so it stands apart from the text).
-Either mode can also use any theme from the file, so `light-theme = one-dark` keeps ze dark all
-the time. A line ze doesn't understand is skipped, and a missing line keeps its default. The menus,
+Either mode can also use any theme from the file, so `light-theme = one-dark` keeps Zag dark all
+the time. A line Zag doesn't understand is skipped, and a missing line keeps its default. The menus,
 the size shortcuts and the Font panel rewrite their own line in the file and leave the rest of it
 alone.

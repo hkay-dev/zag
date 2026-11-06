@@ -1,10 +1,10 @@
-//! The Objective-C runtime, plus the CoreGraphics and CoreText calls ze
+//! The Objective-C runtime, plus the CoreGraphics and CoreText calls Zag
 //! draws with. Apple Silicon only: one objc_msgSend serves every return type.
 const std = @import("std");
 const builtin = @import("builtin");
 
 comptime {
-    if (builtin.cpu.arch != .aarch64) @compileError("ze runs on Apple Silicon only");
+    if (builtin.cpu.arch != .aarch64) @compileError("Zag runs on Apple Silicon only");
 }
 
 pub const Id = ?*anyopaque;

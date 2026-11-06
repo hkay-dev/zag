@@ -1,5 +1,5 @@
 //! Bench mode, built only with `zig build -Dbench=true` (scripts/bench.sh).
-//! With ZE_BENCH=<dir> set, ze opens ZE_BENCH_FILES (colon-separated) in one
+//! With ZE_BENCH=<dir> set, Zag opens ZE_BENCH_FILES (colon-separated) in one
 //! window with ZE_BENCH_ROOT in the sidebar, drives itself through a fixed
 //! script, times each step's work plus the synchronous draw that follows it,
 //! appends one number per step to `<dir>/<metric>.txt` and quits. It never
@@ -123,7 +123,7 @@ fn run(_: Id, _: Sel, _: Id) callconv(.c) void {
         settle();
     }
 
-    // ze coming forward: the recheck of settings, files and folders, and the frame after.
+    // Zag coming forward: the recheck of settings, files and folders, and the frame after.
     for (0..40) |_| {
         step("activate_ms", false, view.recheckAll, .{});
         settle();

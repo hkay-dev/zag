@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
         .os_tag = .macos,
         .os_version_min = .{ .semver = .{ .major = 15, .minor = 0, .patch = 0 } },
     } });
-    // `zig build --release` makes it small: the point of ze is a tiny binary.
+    // `zig build --release` makes it small: the point of Zag is a tiny binary.
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .small });
 
     const mod = b.createModule(.{
@@ -30,15 +30,15 @@ pub fn build(b: *std.Build) void {
     mod.linkFramework("AppKit", .{});
     mod.linkFramework("QuartzCore", .{});
 
-    const exe = b.addExecutable(.{ .name = "ze", .root_module = mod });
-    // No spare room after the load commands: ze never gets its install names
+    const exe = b.addExecutable(.{ .name = "zag", .root_module = mod });
+    // No spare room after the load commands: Zag never gets its install names
     // rewritten, and the padding alone can push __TEXT onto another 16 KB page.
     exe.headerpad_size = 0;
     b.installArtifact(exe);
 
     const run = b.addRunArtifact(exe);
     run.addPassthruArgs();
-    b.step("run", "Run ze").dependOn(&run.step);
+    b.step("run", "Run Zag").dependOn(&run.step);
 
     const tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),

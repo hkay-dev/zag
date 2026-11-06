@@ -149,7 +149,7 @@ fn chrome(th: *const Theme, dark: bool) Rgb {
 
 /// How much of the chrome color paints over the sidebar material: the rest
 /// shows through. Zen covers the material completely. (The material can't
-/// be hidden: ze's view lives inside it.)
+/// be hidden: Zag's view lives inside it.)
 fn chromeAlpha(dark: bool) f64 {
     return if (conf.zen) 1 else if (dark) 0.7 else 0.6;
 }
@@ -1115,7 +1115,7 @@ const Doc = struct {
     /// end, for rows `cols` cells wide.
     vfirst: std.ArrayList(u32) = .empty,
     cols: usize = 0,
-    /// The file's change time and size when ze last read or wrote it.
+    /// The file's change time and size when Zag last read or wrote it.
     stamp: ?files.Stamp = null,
     mode: Mode = .edit,
     prompt: std.ArrayList(u8) = .empty,
@@ -1474,7 +1474,7 @@ fn front(d: *Doc) void {
     showWin(d.window);
 }
 
-/// Set for a Dev build (`ze Dev`, bundle id ending in `.dev`), which runs
+/// Set for a Dev build (`Zag Dev`, bundle id ending in `.dev`), which runs
 /// behind Harsha's windows and never takes the keys.
 pub var background = false;
 
@@ -1743,7 +1743,7 @@ fn named(d: *Doc) void {
 }
 
 /// The key window's focused card. A Dev build never has a key window, so
-/// there it's the front one of ze's windows.
+/// there it's the front one of Zag's windows.
 pub fn keyDoc() ?*Doc {
     const app = msg(Id, objc.class("NSApplication"), "sharedApplication", .{});
     const kw = msg(Id, app, "keyWindow", .{});
@@ -2126,7 +2126,7 @@ pub fn newDoc() ?*Doc {
     msg(void, view, "setWantsLayer:", .{true});
     msg(void, view, "registerForDraggedTypes:", .{msg(Id, objc.class("NSArray"), "arrayWithObject:", .{NSPasteboardTypeFileURL})});
     // Hovering a tab lights it and shows its close button: mouse moves and
-    // exits while ze is in front, over the whole view at any size.
+    // exits while Zag is in front, over the whole view at any size.
     const area = msg(Id, msg(Id, objc.class("NSTrackingArea"), "alloc", .{}), "initWithRect:options:owner:userInfo:", .{ Rect{}, @as(usize, 0x01 | 0x02 | 0x40 | 0x200), view, @as(Id, null) });
     msg(void, view, "addTrackingArea:", .{area});
     msg(void, area, "release", .{});
@@ -2462,7 +2462,7 @@ fn saveLayout(w: *const Win, n: *const Node, out: *std.ArrayList(u8)) !usize {
 }
 
 /// Reopens last session's windows where they were, with their cards and
-/// tabs, and its folder when ze started without one. False when no window
+/// tabs, and its folder when Zag started without one. False when no window
 /// opened.
 pub fn restoreSession() bool {
     if (root == null) {
@@ -2677,7 +2677,7 @@ fn sameStamp(a: ?files.Stamp, b: ?files.Stamp) bool {
     return std.meta.eql(a.?, b.?);
 }
 
-/// When ze comes forward: picks up settings and files that other apps changed.
+/// When Zag comes forward: picks up settings and files that other apps changed.
 pub fn recheckAll() void {
     if (conf_path) |p| if (!sameStamp(files.stamp(p), conf_stamp)) loadSettings();
     for (docs.items) |d| checkOutside(d);
@@ -3718,7 +3718,7 @@ fn tabName(d: *const Doc, j: usize, buf: *[48]u8) []const u8 {
 // ---- sidebar ----
 
 const Icon = enum { closed, opened, sidebar, plus, close, folder, parents, crumb };
-/// SF Symbols, which come with macOS, so they cost ze no size.
+/// SF Symbols, which come with macOS, so they cost Zag no size.
 const icon_names = [_][:0]const u8{ "chevron.right", "chevron.down", "sidebar.left", "plus", "xmark", "folder.fill", "chevron.down", "chevron.forward" };
 /// Symbol images for the light and dark themes, tinted and made on first use.
 var icons: [2][icon_names.len]Id = @splat(@splat(null));

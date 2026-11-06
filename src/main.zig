@@ -1,4 +1,4 @@
-//! ze: a tiny native text editor. `ze [file or folder]...`
+//! Zag: a tiny native text editor. `zag [file or folder]...`
 const std = @import("std");
 const objc = @import("objc.zig");
 const view = @import("view.zig");
@@ -14,7 +14,7 @@ const ctrl: usize = 1 << 18;
 const opt: usize = 1 << 19;
 
 /// In release builds the default panic handler and debug Io pull in a DWARF
-/// reader and all of std.Io.Threaded, about half the binary. ze does its own
+/// reader and all of std.Io.Threaded, about half the binary. Zag does its own
 /// file I/O on libc. Debug builds keep both for stack traces.
 const release = @import("builtin").mode != .debug;
 pub const panic = if (release) std.debug.no_panic else std.debug.FullPanic(std.debug.defaultPanic);
@@ -181,16 +181,16 @@ fn submenu(bar: Id, title: []const u8) Id {
 
 fn buildMenu(delegate: Id) void {
     const bar = objc.new("NSMenu");
-    const a = submenu(bar, "ze");
-    _ = item(a, "About ze", "orderFrontStandardAboutPanel:", "", 0);
+    const a = submenu(bar, "Zag");
+    _ = item(a, "About Zag", "orderFrontStandardAboutPanel:", "", 0);
     separator(a);
     _ = item(a, "Settings…", "openSettings:", ",", cmd);
     separator(a);
-    _ = item(a, "Hide ze", "hide:", "h", cmd);
+    _ = item(a, "Hide Zag", "hide:", "h", cmd);
     _ = item(a, "Hide Others", "hideOtherApplications:", "h", cmd | opt);
     _ = item(a, "Show All", "unhideAllApplications:", "", 0);
     separator(a);
-    _ = item(a, "Quit ze", "terminate:", "q", cmd);
+    _ = item(a, "Quit Zag", "terminate:", "q", cmd);
 
     const file = submenu(bar, "File");
     _ = item(file, "New", "newDocument:", "n", cmd);
@@ -291,10 +291,10 @@ pub fn main(init: std.process.Init.Minimal) void {
     const id = msg(Id, msg(Id, objc.class("NSBundle"), "mainBundle", .{}), "bundleIdentifier", .{});
     if (id != null) view.background = std.mem.endsWith(u8, std.mem.span(msg([*:0]const u8, id, "UTF8String", .{})), ".dev");
     _ = msg(bool, nsapp, "setActivationPolicy:", .{@as(isize, if (view.background) 1 else 0)});
-    // No window tabs, so ⌃Tab reaches ze's own tabs.
+    // No window tabs, so ⌃Tab reaches Zag's own tabs.
     msg(void, objc.class("NSWindow"), "setAllowsAutomaticWindowTabbing:", .{false});
 
-    // From a terminal, quick open and the sidebar use the folder ze started
+    // From a terminal, quick open and the sidebar use the folder Zag started
     // in. Finder starts apps in /, so there the last folder or home is used.
     if (files.cwd(view.gpa)) |dir| {
         if (dir.len > 1) view.setRoot(dir) else view.gpa.free(dir);

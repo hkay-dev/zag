@@ -1,6 +1,6 @@
 //! The settings file, `~/.config/ze/settings`: font, size, line height, soft
 //! wrap, auto-closing pairs, zen mode, the sidebar, light or dark, and the colors of both themes, as `key = value`
-//! lines. ze writes every key into it the first time it's opened, and menu
+//! lines. Zag writes every key into it the first time it's opened, and menu
 //! toggles rewrite just their own line.
 const std = @import("std");
 const files = @import("files.zig");
@@ -224,7 +224,7 @@ fn flag(s: []const u8) ?bool {
 }
 
 /// A plain decimal like 14 or 1.75. std's float parser and printer would
-/// add about 16 KB to ze, and settings only need these.
+/// add about 16 KB to Zag, and settings only need these.
 fn number(s: []const u8) ?f64 {
     var v: f64 = 0;
     var scale: f64 = 0;
@@ -324,7 +324,7 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
     var b: [24]u8 = undefined;
     var wbuf: [24]u8 = undefined;
     try out.print(gpa,
-        \\# ze settings. Save this file and every window picks up the change.
+        \\# Zag settings. Save this file and every window picks up the change.
         \\
         \\# A font's PostScript name, like Menlo-Regular, or system for SF Mono.
         \\font = {s}
@@ -346,7 +346,7 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         \\# How wide the sidebar is, in points: drag its edge to change it.
         \\sidebar-width = {s}
         \\
-        \\# Light or dark: auto follows the Mac, light or dark keeps ze in that mode.
+        \\# Light or dark: auto follows the Mac, light or dark keeps Zag in that mode.
         \\appearance = {s}
         \\# The theme for each mode: paper, ayu-light, one-light,
         \\# ink, ayu-dark or one-dark.

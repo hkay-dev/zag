@@ -1,16 +1,16 @@
 #!/bin/sh
-# bench.sh: ze's perf harness (the zig-editor-perf skill has the loop).
-#   bench.sh build [out.app]       builds "ze Perf" (release plus src/bench.zig)
+# bench.sh: Zag's perf harness (the zag-perf skill has the loop).
+#   bench.sh build [out.app]       builds "Zag Perf" (release plus src/bench.zig)
 #                                  from this checkout; prints the app's path.
 #   bench.sh run APP OUT [N]       launches APP N times (default 1) in the
 #                                  background; each launch appends one number
 #                                  per step to OUT/<metric>.txt and quits.
 #   bench.sh session APP OUT [N]   launches APP N times on a copy of Harsha's
-#                                  own ze session and drafts, records launch
+#                                  own Zag session and drafts, records launch
 #                                  time and memory only, and quits without
 #                                  touching a file.
 # Each run launch gets a fresh HOME and session, and opens the same frozen copy
-# of ze's sources (ZE_BENCH_DATA, made once from commit 7132176), so two
+# of Zag's sources (ZE_BENCH_DATA, made once from commit 7132176), so two
 # builds see the same files. The last step, quickopen_ms (open quick open, type
 # three letters, close), points quick open at a home-shaped folder of about
 # 60k files (ZE_BENCH_HOME_DATA, made once by this script, never in Git) and
@@ -65,8 +65,8 @@ PY
 }
 case ${1:-} in
   build)
-    app=${2:-"$PWD/zig-out/ze Perf.app"}
-    qm with build zig-editor -- nice mise exec zig@0.17.0 -- scripts/bundle.sh perf "$app" >/dev/null
+    app=${2:-"$PWD/zig-out/Zag Perf.app"}
+    qm with build zag -- nice mise exec zig@0.17.0 -- scripts/bundle.sh perf "$app" >/dev/null
     echo "$app" ;;
   run|session)
     mode=$1 app=$2 out=$3 n=${4:-1}

@@ -1,5 +1,5 @@
 //! The sidebar's folder tree: the rows on show, rebuilt from disk when a
-//! folder opens or closes or ze comes forward. Only open folders are read.
+//! folder opens or closes or Zag comes forward. Only open folders are read.
 const std = @import("std");
 const c = std.c;
 const Allocator = std.mem.Allocator;
