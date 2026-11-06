@@ -129,11 +129,6 @@ fn refreshWin(w: *Win) void {
     for (docs.items) |d| if (d.win == w) refresh(d);
 }
 
-const shift_key: usize = 1 << 17;
-const cmd_key: usize = 1 << 20;
-const ctrl_key: usize = 1 << 18;
-const opt_key: usize = 1 << 19;
-
 // ---- look ----
 
 const Rgb = settings.Rgb;
@@ -955,7 +950,7 @@ fn flashStart(d: *Doc) void {
 /// Adds the bytes `lo..hi` of the text to the flash, up to `max_flash` spans.
 fn flashAdd(d: *Doc, lo: usize, hi: usize) void {
     if (lo >= hi or d.flash_n == max_flash) return;
-    if (d.flash_n == 0) msg(void, d.win.view, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("barHold:"), @as(Id, null), @max(d.flash_t0 + flash_hold - CACurrentMediaTime(), 0) });
+    if (d.flash_n == 0) msg(void, d.win.view, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("holdRedraw:"), @as(Id, null), @max(d.flash_t0 + flash_hold - CACurrentMediaTime(), 0) });
     d.flash[d.flash_n] = .{ lo, hi };
     d.flash_n += 1;
 }
@@ -1096,7 +1091,7 @@ fn tick(self: Id, _: Sel, _: Id) callconv(.c) void {
 }
 
 /// A hold is over: one redraw, and any fade out takes it from there.
-fn barHold(self: Id, _: Sel, key: Id) callconv(.c) void {
+fn holdRedraw(self: Id, _: Sel, key: Id) callconv(.c) void {
     for (docs.items) |d| if (d.win.view == self and d.caret == key) {
         d.bar_due = false;
     };
@@ -3389,10 +3384,10 @@ fn keysOf(a: std.mem.Allocator, it: Id) ![]const u8 {
     if (key.len == 0) return "";
     const mods = msg(usize, it, "keyEquivalentModifierMask", .{});
     var out: std.ArrayList(u8) = .empty;
-    if (mods & ctrl_key != 0) try out.appendSlice(a, "⌃");
-    if (mods & opt_key != 0) try out.appendSlice(a, "⌥");
-    if (mods & shift_key != 0) try out.appendSlice(a, "⇧");
-    if (mods & cmd_key != 0) try out.appendSlice(a, "⌘");
+    if (mods & objc.ctrl_key != 0) try out.appendSlice(a, "⌃");
+    if (mods & objc.opt_key != 0) try out.appendSlice(a, "⌥");
+    if (mods & objc.shift_key != 0) try out.appendSlice(a, "⇧");
+    if (mods & objc.cmd_key != 0) try out.appendSlice(a, "⌘");
     if (std.mem.eql(u8, key, "\t") or std.mem.eql(u8, key, "\x19")) {
         try out.appendSlice(a, "⇥");
     } else for (key) |ch| try out.append(a, std.ascii.toUpper(ch));
@@ -3538,7 +3533,7 @@ fn findAgain(d: *Doc, back: bool) void {
 
 fn shiftHeld() bool {
     const ev = msg(Id, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "currentEvent", .{});
-    return msg(usize, ev, "modifierFlags", .{}) & shift_key != 0;
+    return msg(usize, ev, "modifierFlags", .{}) & objc.shift_key != 0;
 }
 
 /// Key commands while the prompt is open.
@@ -5239,7 +5234,7 @@ fn sideClick(w: *Win, p: Point, flags: usize) void {
     // A file opens when the mouse comes up, unless it's dragged to a card.
     const path = std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ root.?, row.rel }, 0) catch return;
     const ix = 16 + f(row.depth) * 16 + 10;
-    w.tdrag = .{ .from = null, .file = path, .cmd = flags & cmd_key != 0, .down = p, .at = p, .grab = p.x - ix + tab_pad, .row = i };
+    w.tdrag = .{ .from = null, .file = path, .cmd = flags & objc.cmd_key != 0, .down = p, .at = p, .grab = p.x - ix + tab_pad, .row = i };
 }
 
 /// Whether the window's look is dark, asked of AppKit again only after
@@ -5963,7 +5958,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     if (blank) {
         if (d.blank_t0 < 0) {
             d.blank_t0 = now;
-            msg(void, d.win.view, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("barHold:"), @as(Id, null), @as(f64, hint_delay) });
+            msg(void, d.win.view, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("holdRedraw:"), @as(Id, null), @as(f64, hint_delay) });
         }
         if (now >= d.blank_t0 + hint_delay) {
             if (d.hint.to != 1) d.hint.dur = hint_in;
@@ -6034,13 +6029,13 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // when it's over, and the fade out takes it from there.
     if (d.bar.to == 1 and !d.busy and !d.bar_due) {
         d.bar_due = true;
-        holdRedraw(d.win.view, d.caret, @max(d.bar_t0 + bar_hold - now, 0) + 0.02);
+        delayRedraw(d.win.view, d.caret, @max(d.bar_t0 + bar_hold - now, 0) + 0.02);
     }
 }
 
 /// A one-shot redraw of `view` after `delay`, replacing `key`'s earlier one.
-fn holdRedraw(view: Id, key: Id, delay: f64) void {
-    const sel = objc.sel_registerName("barHold:");
+fn delayRedraw(view: Id, key: Id, delay: f64) void {
+    const sel = objc.sel_registerName("holdRedraw:");
     msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:selector:object:", .{ view, sel, key });
     msg(void, view, "performSelector:withObject:afterDelay:", .{ sel, key, delay });
 }
@@ -6627,12 +6622,16 @@ fn splitZone(z: Zone) bool {
     };
 }
 
+fn landing(dr: Drop) ?*Doc {
+    return if (splitZone(dr.zone)) splitOff(dr.card, dr.zone == .top or dr.zone == .bottom, dr.zone == .left or dr.zone == .top, true) else dr.card;
+}
+
 /// Moves card `from`'s tab `j` to where `dr` says, taking typing there.
 /// A card left with no tabs folds away.
 fn moveTab(from: *Doc, j: usize, dr: Drop) void {
     const last = tabCount(from) == 1;
     if (last and dr.card == from) return;
-    const to = if (splitZone(dr.zone)) splitOff(dr.card, dr.zone == .top or dr.zone == .bottom, dr.zone == .left or dr.zone == .top, true) orelse return else dr.card;
+    const to = landing(dr) orelse return;
     const pg = takeTab(from, j) orelse return;
     putTab(to, pg, dr.k);
     if (last) foldCard(from);
@@ -6657,7 +6656,7 @@ fn placeFile(w: *Win, path: [:0]const u8, dr: Drop) void {
         return moveTab(o, j, dr);
     }
     var pg = loadPage(path) orelse return;
-    const to = if (splitZone(dr.zone)) splitOff(dr.card, dr.zone == .top or dr.zone == .bottom, dr.zone == .left or dr.zone == .top, true) orelse return pg.deinit() else dr.card;
+    const to = landing(dr) orelse return pg.deinit();
     putTab(to, pg, dr.k);
     noteRecent(path);
     focus(to);
@@ -6691,8 +6690,12 @@ fn drawDrag(w: *Win, ctx: Id, th: *const Theme, now: f64) void {
     if (!t.live) return;
     const ga = w.ghost_a.at(now);
     if (ga < 0.01) return;
-    const gw = t.w;
-    ghost(ctx, th, t.icon, t.name, gw, t.at.x - std.math.clamp(t.grab, 10, gw - 10), t.at.y - 11, ga, lift);
+    const at = ghostAt(t);
+    ghost(ctx, th, t.icon, t.name, t.w, at.x, at.y, ga, lift);
+}
+
+fn ghostAt(t: TabDrag) Point {
+    return .{ .x = t.at.x - std.math.clamp(t.grab, 10, t.w - 10), .y = t.at.y - 11 };
 }
 
 /// A tab's copy lifted off the page, `gw` wide with its top left at `x`, `y`,
@@ -6729,8 +6732,7 @@ fn startFly(w: *Win, t: TabDrag) void {
     if (!t.live or !t.out) return;
     const line = t.name orelse return;
     const gw = t.w;
-    const left = std.math.clamp(t.grab, 10, gw - 10);
-    const at: Point = .{ .x = t.at.x - left, .y = t.at.y - 11 };
+    const at = ghostAt(t);
     var fl: Fly = .{ .line = objc.CFRetain(line), .icon = t.icon, .w = gw, .from = at, .to = at, .t0 = CACurrentMediaTime(), .row = t.row };
     if (t.drop) |dr| {
         if (dr.zone == .tabs) {
@@ -6746,7 +6748,7 @@ fn startFly(w: *Win, t: TabDrag) void {
             fl.card = d;
             fl.id = t.id;
         } else fl.fade = true;
-    } else fl.to = .{ .x = t.down.x - left, .y = t.down.y - 11 };
+    } else fl.to = .{ .x = t.down.x - std.math.clamp(t.grab, 10, gw - 10), .y = t.down.y - 11 };
     w.fly = fl;
 }
 
@@ -6834,14 +6836,6 @@ fn drawRect(self: Id, _: Sel, dirty: Rect) callconv(.c) void {
     draw(w, msg(Id, gc, "CGContext", .{}), dirty);
 }
 
-fn yes(_: Id, _: Sel) callconv(.c) bool {
-    return true;
-}
-
-fn no(_: Id, _: Sel) callconv(.c) bool {
-    return false;
-}
-
 fn keyDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const d = docOf(self) orelse return;
     d.note = "";
@@ -6849,11 +6843,11 @@ fn keyDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const flags = msg(usize, ev, "modifierFlags", .{});
     const code = msg(u16, ev, "keyCode", .{});
     // ⌥Z for Soft Wrap: menus only see option keys after the text has typed them.
-    if (flags & (cmd_key | opt_key | ctrl_key) == opt_key and code == 6) return toggleWrap();
+    if (flags & (objc.cmd_key | objc.opt_key | objc.ctrl_key) == objc.opt_key and code == 6) return toggleWrap();
     // ⌃⌘Z reaches here while Late-Night greys the Zen item: it leaves Late-Night.
-    if (flags & (cmd_key | opt_key | ctrl_key) == cmd_key | ctrl_key and code == 6 and conf.late_night) return toggleLateNight();
+    if (flags & (objc.cmd_key | objc.opt_key | objc.ctrl_key) == objc.cmd_key | objc.ctrl_key and code == 6 and conf.late_night) return toggleLateNight();
     // Command keys that the menu didn't take: only arrows and delete mean something.
-    if (flags & cmd_key != 0) {
+    if (flags & objc.cmd_key != 0) {
         if (std.mem.indexOfScalar(u16, &.{ 51, 117, 115, 119, 123, 124, 125, 126 }, code) == null) return;
     }
     // Like NSTextView: the pointer hides while typing and returns when the mouse moves.
@@ -6995,7 +6989,6 @@ fn unitAt(d: *Doc, pos: usize) [2]usize {
 /// bar: they drag the window, and a double-click does what the Mac's
 /// Desktop & Dock setting says, like any title bar.
 fn titleStrip(w: *Win, ev: Id) void {
-    w.side_down = true;
     if (msg(isize, ev, "clickCount", .{}) == 2) {
         const act = objc.utf8(msg(Id, defaults(), "stringForKey:", .{objc.str("AppleActionOnDoubleClick")}));
         if (is(act, "Minimize")) return msg(void, w.window, "performMiniaturize:", .{@as(Id, null)});
@@ -7085,7 +7078,7 @@ fn cardDown(d: *Doc, p: Point, ev: Id) void {
         3 => d.drag = .line,
         else => {
             d.drag = .char;
-            d.file.ed.moveTo(pos, msg(usize, ev, "modifierFlags", .{}) & shift_key != 0);
+            d.file.ed.moveTo(pos, msg(usize, ev, "modifierFlags", .{}) & objc.shift_key != 0);
         },
     }
     if (d.drag != .char) {
@@ -7224,7 +7217,7 @@ fn mouseExited(self: Id, _: Sel, _: Id) callconv(.c) void {
 fn peekTo(w: *Win, in: bool, hold: f64) void {
     w.peek_in = in;
     w.peek_out = CACurrentMediaTime() + hold;
-    if (hold > 0) holdRedraw(w.view, w.window, hold);
+    if (hold > 0) delayRedraw(w.view, w.window, hold);
 }
 
 /// The mouse lets go of a button it pressed: the button's fill fades.
@@ -7350,9 +7343,8 @@ fn toolTip(self: Id, _: Sel, _: Id, _: isize, p: Point, _: ?*anyopaque) callconv
     return if (t == .sidebar) msg(Id, sidebar_item, "title", .{}) else objc.str("New Tab");
 }
 
-/// Also the window delegate's key and resign key calls, so the caret shows
-/// only in the key window.
-fn appearanceChanged(self: Id, _: Sel) callconv(.c) void {
+/// Window key and full-screen changes invalidate the titlebar layout.
+fn keyChanged(self: Id, _: Sel) callconv(.c) void {
     if (winOf(self)) |w| w.tb.ok = false;
     msg(void, self, "setNeedsDisplay:", .{true});
 }
@@ -7367,11 +7359,13 @@ fn lookChanged(self: Id, _: Sel) callconv(.c) void {
     msg(void, self, "setNeedsDisplay:", .{true});
 }
 
-extern const NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification: Id;
+fn readContrast() void {
+    contrast = msg(bool, msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{}), "accessibilityDisplayShouldIncreaseContrast", .{});
+}
 
 /// The Mac's Increase Contrast setting changed: read it again and redraw.
-fn contrastChanged(_: Id, _: Sel, _: Id) callconv(.c) void {
-    contrast = msg(bool, msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{}), "accessibilityDisplayShouldIncreaseContrast", .{});
+pub fn contrastChanged(_: Id, _: Sel, _: Id) callconv(.c) void {
+    readContrast();
     buildThemes();
     dropIcons();
     for (wins.items) |w| msg(void, w.view, "setNeedsDisplay:", .{true});
@@ -7407,34 +7401,27 @@ var side_menu: Id = null;
 var side_items: [3]Id = @splat(null);
 var tab_menu: Id = null;
 var tab_items: [6]Id = @splat(null);
-/// The file of the sidebar row or tab the menu was opened on, its window,
-/// and for a tab, its card and id.
+/// The file of the sidebar row or tab the menu was opened on and its window.
 var menu_path: [std.fs.max_path_bytes:0]u8 = undefined;
 var menu_len: usize = 0;
 var menu_win: ?*Win = null;
-var menu_doc: ?*Doc = null;
-var menu_id: u32 = 0;
 
-fn menuItem(menu: Id, title: []const u8, sel: [:0]const u8, key: []const u8) Id {
+pub fn menuItem(menu: Id, title: []const u8, sel: [:0]const u8, key: []const u8, mods: usize) Id {
     const it = msg(Id, msg(Id, objc.class("NSMenuItem"), "alloc", .{}), "initWithTitle:action:keyEquivalent:", .{ objc.str(title), objc.sel_registerName(sel), objc.str(key) });
-    if (key.len > 0) msg(void, it, "setKeyEquivalentModifierMask:", .{cmd_key});
+    if (key.len > 0) msg(void, it, "setKeyEquivalentModifierMask:", .{mods});
     msg(void, menu, "addItem:", .{it});
     msg(void, it, "release", .{});
     return it;
 }
 
-fn newMenu() Id {
-    return objc.new("NSMenu");
-}
-
-fn separator(m: Id) void {
+pub fn separator(m: Id) void {
     msg(void, m, "addItem:", .{msg(Id, objc.class("NSMenuItem"), "separatorItem", .{})});
 }
 
 /// A click on the folder's name: a menu of the folder and the folders above
 /// it, each with its icon. Picking one shows it in Finder.
 fn parentsMenu(w: *Win) void {
-    const m = newMenu();
+    const m = objc.new("NSMenu");
     defer msg(void, m, "release", .{});
     const ws = msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{});
     const fm = msg(Id, objc.class("NSFileManager"), "defaultManager", .{});
@@ -7442,7 +7429,7 @@ fn parentsMenu(w: *Win) void {
     var n: isize = 0;
     while (true) : (n += 1) {
         const at = objc.str(path);
-        const it = menuItem(m, objc.utf8(msg(Id, fm, "displayNameAtPath:", .{at})), "sideParent:", "");
+        const it = menuItem(m, objc.utf8(msg(Id, fm, "displayNameAtPath:", .{at})), "sideParent:", "", 0);
         msg(void, it, "setTag:", .{n});
         const img = msg(Id, msg(Id, ws, "iconForFile:", .{at}), "copy", .{});
         msg(void, img, "setSize:", .{Point{ .x = 16, .y = 16 }});
@@ -7483,7 +7470,7 @@ fn markMenu(self: Id, w: *Win, m: Id, same: bool) Id {
     if (!same) w.menu_a.snap(0);
     w.menu_a.aim(1, CACurrentMediaTime());
     msg(void, m, "setDelegate:", .{self});
-    if (w.menu_card == null) redrawSide(w) else msg(void, self, "setNeedsDisplay:", .{true});
+    redrawMenuMark(w);
     return m;
 }
 
@@ -7491,6 +7478,10 @@ fn menuDidClose(_: Id, _: Sel, m: Id) callconv(.c) void {
     msg(void, m, "setDelegate:", .{@as(Id, null)});
     const w = menu_win orelse return;
     w.menu_a.aim(0, CACurrentMediaTime());
+    redrawMenuMark(w);
+}
+
+fn redrawMenuMark(w: *Win) void {
     if (w.menu_card == null) redrawSide(w) else msg(void, w.view, "setNeedsDisplay:", .{true});
 }
 
@@ -7515,13 +7506,13 @@ fn menuForEvent(self: Id, _: Sel, ev: Id) callconv(.c) Id {
         if (lp.y >= bottom(d)) return null;
         focus(d);
         if (text_menu == null) {
-            const m = newMenu();
-            _ = menuItem(m, "Cut", "cut:", "x");
-            _ = menuItem(m, "Copy", "copy:", "c");
-            _ = menuItem(m, "Paste", "paste:", "v");
-            _ = menuItem(m, "Select All", "selectAll:", "a");
+            const m = objc.new("NSMenu");
+            _ = menuItem(m, "Cut", "cut:", "x", objc.cmd_key);
+            _ = menuItem(m, "Copy", "copy:", "c", objc.cmd_key);
+            _ = menuItem(m, "Paste", "paste:", "v", objc.cmd_key);
+            _ = menuItem(m, "Select All", "selectAll:", "a", objc.cmd_key);
             separator(m);
-            _ = menuItem(m, "Toggle Comment", "toggleComment:", "/");
+            _ = menuItem(m, "Toggle Comment", "toggleComment:", "/", objc.cmd_key);
             text_menu = m;
         }
         return text_menu;
@@ -7532,16 +7523,16 @@ fn menuForEvent(self: Id, _: Sel, ev: Id) callconv(.c) Id {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     if (!setMenuPath(std.fmt.bufPrint(&buf, "{s}/{s}", .{ root.?, row.rel }) catch return null)) return null;
     if (side_menu == null) {
-        const m = newMenu();
+        const m = objc.new("NSMenu");
         msg(void, m, "setAutoenablesItems:", .{false});
         side_items = .{
-            menuItem(m, "Open in New Tab", "openInNewTab:", ""),
-            menuItem(m, "Open in New Split", "openInNewSplit:", ""),
-            menuItem(m, "Open in New Window", "openInNewWindow:", ""),
+            menuItem(m, "Open in New Tab", "openInNewTab:", "", 0),
+            menuItem(m, "Open in New Split", "openInNewSplit:", "", 0),
+            menuItem(m, "Open in New Window", "openInNewWindow:", "", 0),
         };
         separator(m);
-        _ = menuItem(m, "Reveal in Finder", "revealInFinder:", "");
-        _ = menuItem(m, "Copy Path", "copyPath:", "");
+        _ = menuItem(m, "Reveal in Finder", "revealInFinder:", "", 0);
+        _ = menuItem(m, "Copy Path", "copyPath:", "", 0);
         side_menu = m;
     }
     for (side_items) |it| msg(void, it, "setEnabled:", .{!row.dir});
@@ -7559,23 +7550,21 @@ fn tabMenu(self: Id, w: *Win, d: *Doc, lp: Point) Id {
     const path = tabPage(d, hit.j).path;
     const has_path = if (path) |x| setMenuPath(x) else false;
     if (tab_menu == null) {
-        const m = newMenu();
+        const m = objc.new("NSMenu");
         msg(void, m, "setAutoenablesItems:", .{false});
-        _ = menuItem(m, "Close Tab", "tabClose:", "");
-        tab_items[0] = menuItem(m, "Close Other Tabs", "tabCloseOthers:", "");
-        tab_items[1] = menuItem(m, "Close Tabs to the Right", "tabCloseRight:", "");
+        _ = menuItem(m, "Close Tab", "tabClose:", "", 0);
+        tab_items[0] = menuItem(m, "Close Other Tabs", "tabCloseOthers:", "", 0);
+        tab_items[1] = menuItem(m, "Close Tabs to the Right", "tabCloseRight:", "", 0);
         separator(m);
-        tab_items[2] = menuItem(m, "Split Right", "tabSplitRight:", "");
-        tab_items[3] = menuItem(m, "Split Down", "tabSplitDown:", "");
+        tab_items[2] = menuItem(m, "Split Right", "tabSplitRight:", "", 0);
+        tab_items[3] = menuItem(m, "Split Down", "tabSplitDown:", "", 0);
         separator(m);
-        tab_items[4] = menuItem(m, "Reveal in Finder", "revealInFinder:", "");
-        tab_items[5] = menuItem(m, "Copy Path", "copyPath:", "");
+        tab_items[4] = menuItem(m, "Reveal in Finder", "revealInFinder:", "", 0);
+        tab_items[5] = menuItem(m, "Copy Path", "copyPath:", "", 0);
         tab_menu = m;
     }
     const on = [6]bool{ n > 1, hit.j + 1 < n, n > 1 and roomFor(d, false), n > 1 and roomFor(d, true), has_path, has_path };
     for (tab_items, on) |it, x| msg(void, it, "setEnabled:", .{x});
-    menu_doc = d;
-    menu_id = hit.id;
     const same = w.menu_card == d and w.menu_tab == hit.id;
     w.menu_row = null;
     w.menu_card = d;
@@ -7585,40 +7574,30 @@ fn tabMenu(self: Id, w: *Win, d: *Doc, lp: Point) Id {
 
 /// The card and tab index the tab menu was opened on, while both are there.
 fn menuTab() ?struct { d: *Doc, j: usize } {
-    const d = menu_doc orelse return null;
+    const w = menu_win orelse return null;
+    const d = w.menu_card orelse return null;
     if (std.mem.indexOfScalar(*Doc, docs.items, d) == null or d.closing) return null;
-    return .{ .d = d, .j = tabIndex(d, menu_id) orelse return null };
+    return .{ .d = d, .j = tabIndex(d, w.menu_tab) orelse return null };
 }
 
-fn tabClose(_: Id, _: Sel, _: Id) callconv(.c) void {
-    const t = menuTab() orelse return;
-    closeTab(t.d, t.j);
+fn tabAction(comptime run: anytype, comptime args: anytype) *const anyopaque {
+    return @ptrCast(&struct {
+        fn imp(_: Id, _: Sel, _: Id) callconv(.c) void {
+            const t = menuTab() orelse return;
+            _ = @call(.auto, run, .{ t.d, t.j } ++ args);
+        }
+    }.imp);
 }
 
-fn tabCloseOthers(_: Id, _: Sel, _: Id) callconv(.c) void {
-    const t = menuTab() orelse return;
-    closeAround(t.d, menu_id, true);
+fn splitTab(d: *Doc, j: usize, zone: Zone) void {
+    moveTab(d, j, .{ .card = d, .zone = zone });
 }
 
-fn tabCloseRight(_: Id, _: Sel, _: Id) callconv(.c) void {
-    const t = menuTab() orelse return;
-    closeAround(t.d, menu_id, false);
-}
-
-fn tabSplitRight(_: Id, _: Sel, _: Id) callconv(.c) void {
-    const t = menuTab() orelse return;
-    moveTab(t.d, t.j, .{ .card = t.d, .zone = .right });
-}
-
-fn tabSplitDown(_: Id, _: Sel, _: Id) callconv(.c) void {
-    const t = menuTab() orelse return;
-    moveTab(t.d, t.j, .{ .card = t.d, .zone = .bottom });
-}
-
-/// Closes card `d`'s tabs right of tab `id`, and with `left` the ones left
+/// Closes card `d`'s tabs right of tab `at`, and with `left` the ones left
 /// of it too, then shows it. Each one with something to lose asks first,
 /// and Cancel stops there.
-fn closeAround(d: *Doc, id: u32, left: bool) void {
+fn closeAround(d: *Doc, at: usize, left: bool) void {
+    const id = tabPage(d, at).id;
     while (tabIndex(d, id)) |j| {
         if (j + 1 >= tabCount(d)) break;
         const n = tabCount(d);
@@ -7654,17 +7633,13 @@ fn openInNewWindow(_: Id, _: Sel, _: Id) callconv(.c) void {
 }
 
 fn revealInFinder(_: Id, _: Sel, _: Id) callconv(.c) void {
-    const url = msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(menu_path[0..menu_len])});
+    const url = msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(menuFile())});
     const urls = msg(Id, objc.class("NSArray"), "arrayWithObject:", .{url});
     msg(void, msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{}), "activateFileViewerSelectingURLs:", .{urls});
 }
 
 fn copyPath(_: Id, _: Sel, _: Id) callconv(.c) void {
-    const text = menu_path[0..menu_len];
-    const string = if (std.unicode.utf8ValidateSlice(text)) objc.str(text) else access.nsText(text);
-    const pb = pasteboard();
-    _ = msg(isize, pb, "clearContents", .{});
-    _ = msg(bool, pb, "setString:forType:", .{ string, NSPasteboardTypeString });
+    putClipboard(menuFile());
 }
 
 /// Each card with unsaved changes asks first.
@@ -7701,12 +7676,12 @@ fn windowWillClose(self: Id, _: Sel, _: Id) callconv(.c) void {
 
 // ---- menu actions ----
 
-fn action(comptime run: fn (*Doc) void) *const anyopaque {
+fn action(comptime run: anytype, comptime args: anytype) *const anyopaque {
     return @ptrCast(&struct {
         fn imp(self: Id, _: Sel, _: Id) callconv(.c) void {
             const d = docOf(self) orelse return;
             d.note = "";
-            run(d);
+            _ = @call(.auto, run, .{d} ++ args);
             // Closing the last tab closes the window, and the card with it.
             if (std.mem.indexOfScalar(*Doc, docs.items, d) != null) refresh(d);
         }
@@ -7722,7 +7697,10 @@ extern const NSPasteboardTypeString: Id;
 fn copy(d: *Doc) void {
     const s = d.file.ed.sel();
     if (d.mode != .edit or s[0] == s[1]) return;
-    const text = d.file.ed.text()[s[0]..s[1]];
+    putClipboard(d.file.ed.text()[s[0]..s[1]]);
+}
+
+fn putClipboard(text: []const u8) void {
     const string = if (std.unicode.utf8ValidateSlice(text)) objc.str(text) else access.nsText(text);
     const pb = pasteboard();
     _ = msg(isize, pb, "clearContents", .{});
@@ -7774,60 +7752,8 @@ fn redo(d: *Doc) void {
     reveal(d);
 }
 
-fn saveDoc(d: *Doc) void {
-    _ = save(d, false);
-}
-
-fn saveAs(d: *Doc) void {
-    _ = save(d, true);
-}
-
-fn find(d: *Doc) void {
-    startPrompt(d, .find);
-}
-
-fn findReplace(d: *Doc) void {
-    startPrompt(d, .replace);
-}
-
-fn findNext(d: *Doc) void {
-    findAgain(d, false);
-}
-
-fn findPrev(d: *Doc) void {
-    findAgain(d, true);
-}
-
-fn gotoLine(d: *Doc) void {
-    startPrompt(d, .line);
-}
-
-fn quickOpen(d: *Doc) void {
-    startPrompt(d, .open);
-}
-
-fn palette(d: *Doc) void {
-    startPrompt(d, .command);
-}
-
 fn closeActive(d: *Doc) void {
     closeTab(d, d.at);
-}
-
-fn splitRight(d: *Doc) void {
-    split(d, false);
-}
-
-fn splitDown(d: *Doc) void {
-    split(d, true);
-}
-
-fn nextCard(d: *Doc) void {
-    stepCard(d, 1);
-}
-
-fn previousCard(d: *Doc) void {
-    stepCard(d, -1);
 }
 
 fn previewText(id: u32) ?[]const u8 {
@@ -7849,7 +7775,7 @@ fn comment(d: *Doc) void {
 }
 
 fn zoom(by: f64) void {
-    const size = if (by == 0) settings.default_size else std.math.clamp(conf.size + by, 8, 40);
+    const size = if (by == 0) settings.default_size else std.math.clamp(conf.size + by, settings.size_min, settings.size_max);
     var buf: [24]u8 = undefined;
     store("size", settings.decimal(&buf, size));
 }
@@ -7879,7 +7805,7 @@ fn changeFont(_: Id, _: Sel, sender: Id) callconv(.c) void {
 
 /// Registers the view class and loads the font. Call once at launch.
 pub fn setup() void {
-    contrast = msg(bool, msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{}), "accessibilityDisplayShouldIncreaseContrast", .{});
+    readContrast();
     conf_path = settings.path(gpa) catch null;
     if (conf_path) |p| settings.prepare(gpa, p);
     loadSettings();
@@ -7887,12 +7813,12 @@ pub fn setup() void {
     const c = objc.ClassBuilder.begin("NSView", "ZeView");
     c.ivar("win");
     c.method("drawRect:", @ptrCast(&drawRect), "v@:{CGRect=dddd}");
-    c.method("isFlipped", @ptrCast(&yes), "c@:");
-    c.method("isOpaque", @ptrCast(&no), "c@:");
+    c.method("isFlipped", @ptrCast(&objc.yes), "c@:");
+    c.method("isOpaque", @ptrCast(&objc.no), "c@:");
     // A see-through view lets AppKit move the window from anywhere under the
     // toolbar, tabs included; `titleStrip` moves it from the empty parts.
-    c.method("mouseDownCanMoveWindow", @ptrCast(&no), "c@:");
-    c.method("acceptsFirstResponder", @ptrCast(&yes), "c@:");
+    c.method("mouseDownCanMoveWindow", @ptrCast(&objc.no), "c@:");
+    c.method("acceptsFirstResponder", @ptrCast(&objc.yes), "c@:");
     c.method("keyDown:", @ptrCast(&keyDown), "v@:@");
     c.method("insertText:", @ptrCast(&insertText), "v@:@");
     c.method("doCommandBySelector:", @ptrCast(&doCommand), "v@::");
@@ -7905,9 +7831,9 @@ pub fn setup() void {
     c.method("resetCursorRects", @ptrCast(&resetCursorRects), "v@:");
     c.method("view:stringForToolTip:point:userData:", @ptrCast(&toolTip), "@@:@q{CGPoint=dd}^v");
     c.method("viewDidChangeEffectiveAppearance", @ptrCast(&lookChanged), "v@:");
-    c.method("windowDidBecomeKey:", @ptrCast(&appearanceChanged), "v@:@");
-    c.method("windowDidResignKey:", @ptrCast(&appearanceChanged), "v@:@");
-    c.method("windowDidExitFullScreen:", @ptrCast(&appearanceChanged), "v@:@");
+    c.method("windowDidBecomeKey:", @ptrCast(&keyChanged), "v@:@");
+    c.method("windowDidResignKey:", @ptrCast(&keyChanged), "v@:@");
+    c.method("windowDidExitFullScreen:", @ptrCast(&keyChanged), "v@:@");
     c.method("draggingEntered:", @ptrCast(&draggingEntered), "Q@:@");
     c.method("performDragOperation:", @ptrCast(&performDrag), "c@:@");
     c.method("windowShouldClose:", @ptrCast(&windowShouldClose), "c@:@");
@@ -7915,18 +7841,18 @@ pub fn setup() void {
     c.method("window:willUseFullScreenPresentationOptions:", @ptrCast(&fullScreenOptions), "Q@:@Q");
     c.method("retitle:", @ptrCast(&retitleNow), "v@:@");
     c.method("tick:", @ptrCast(&tick), "v@:@");
-    c.method("barHold:", @ptrCast(&barHold), "v@:@");
+    c.method("holdRedraw:", @ptrCast(&holdRedraw), "v@:@");
     c.method("saveDrafts:", @ptrCast(&saveDraftsNow), "v@:@");
     c.method("changeFont:", @ptrCast(&changeFont), "v@:@");
     c.method("menuForEvent:", @ptrCast(&menuForEvent), "@@:@");
     c.method("openInNewWindow:", @ptrCast(&openInNewWindow), "v@:@");
     c.method("openInNewTab:", @ptrCast(&openInNewTab), "v@:@");
     c.method("openInNewSplit:", @ptrCast(&openInNewSplit), "v@:@");
-    c.method("tabClose:", @ptrCast(&tabClose), "v@:@");
-    c.method("tabCloseOthers:", @ptrCast(&tabCloseOthers), "v@:@");
-    c.method("tabCloseRight:", @ptrCast(&tabCloseRight), "v@:@");
-    c.method("tabSplitRight:", @ptrCast(&tabSplitRight), "v@:@");
-    c.method("tabSplitDown:", @ptrCast(&tabSplitDown), "v@:@");
+    c.method("tabClose:", tabAction(closeTab, .{}), "v@:@");
+    c.method("tabCloseOthers:", tabAction(closeAround, .{true}), "v@:@");
+    c.method("tabCloseRight:", tabAction(closeAround, .{false}), "v@:@");
+    c.method("tabSplitRight:", tabAction(splitTab, .{Zone.right}), "v@:@");
+    c.method("tabSplitDown:", tabAction(splitTab, .{Zone.bottom}), "v@:@");
     c.method("menuDidClose:", @ptrCast(&menuDidClose), "v@:@");
     c.method("revealInFinder:", @ptrCast(&revealInFinder), "v@:@");
     c.method("sideParent:", @ptrCast(&sideParent), "v@:@");
@@ -7934,25 +7860,34 @@ pub fn setup() void {
     c.method("runCommand:", @ptrCast(&runCommand), "v@:@");
     access.addViewMethods(c);
     const actions = .{
-        .{ "copy:", copy },             .{ "cut:", cut },               .{ "paste:", paste },
-        .{ "selectAll:", selectAll },   .{ "undo:", undo },             .{ "redo:", redo },
-        .{ "saveDocument:", saveDoc },      .{ "saveDocumentAs:", saveAs }, .{ "findText:", find },
-        .{ "findNext:", findNext },         .{ "findPrevious:", findPrev }, .{ "gotoLine:", gotoLine },
-        .{ "quickOpen:", quickOpen },       .{ "toggleComment:", comment }, .{ "zoomIn:", zoomIn },
-        .{ "zoomOut:", zoomOut },           .{ "zoomReset:", zoomReset },   .{ "findAndReplace:", findReplace },
-        .{ "commandPalette:", palette },    .{ "newTab:", newTab },         .{ "closeTab:", closeActive },
-        .{ "splitRight:", splitRight },     .{ "splitDown:", splitDown },   .{ "nextCard:", nextCard },
-        .{ "previousCard:", previousCard },
-        .{ "markdownPreview:", markdownPreview },
+        .{ "copy:", copy, .{} },
+        .{ "cut:", cut, .{} },
+        .{ "paste:", paste, .{} },
+        .{ "selectAll:", selectAll, .{} },
+        .{ "undo:", undo, .{} },
+        .{ "redo:", redo, .{} },
+        .{ "saveDocument:", save, .{false} },
+        .{ "saveDocumentAs:", save, .{true} },
+        .{ "findText:", startPrompt, .{Mode.find} },
+        .{ "findNext:", findAgain, .{false} },
+        .{ "findPrevious:", findAgain, .{true} },
+        .{ "gotoLine:", startPrompt, .{Mode.line} },
+        .{ "quickOpen:", startPrompt, .{Mode.open} },
+        .{ "toggleComment:", comment, .{} },
+        .{ "zoomIn:", zoomIn, .{} },
+        .{ "zoomOut:", zoomOut, .{} },
+        .{ "zoomReset:", zoomReset, .{} },
+        .{ "findAndReplace:", startPrompt, .{Mode.replace} },
+        .{ "commandPalette:", startPrompt, .{Mode.command} },
+        .{ "newTab:", newTab, .{} },
+        .{ "closeTab:", closeActive, .{} },
+        .{ "splitRight:", split, .{false} },
+        .{ "splitDown:", split, .{true} },
+        .{ "nextCard:", stepCard, .{1} },
+        .{ "previousCard:", stepCard, .{-1} },
+        .{ "markdownPreview:", markdownPreview, .{} },
     };
-    inline for (actions) |a| c.method(a[0], action(a[1]), "v@:@");
+    inline for (actions) |a| c.method(a[0], action(a[1], a[2]), "v@:@");
     view_class = c.finish();
     win_ivar = objc.ivarOffset(view_class, "win");
-    // Increase Contrast turning on or off redraws every window.
-    const watcher = objc.ClassBuilder.begin("NSObject", "ZeContrast");
-    watcher.method("contrastChanged:", @ptrCast(&contrastChanged), "v@:@");
-    const watch_class = watcher.finish();
-    const watch = msg(Id, msg(Id, watch_class, "alloc", .{}), "init", .{});
-    const notes = msg(Id, msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{}), "notificationCenter", .{});
-    msg(void, notes, "addObserver:selector:name:object:", .{ watch, objc.sel_registerName("contrastChanged:"), NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification, @as(Id, null) });
 }

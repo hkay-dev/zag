@@ -192,6 +192,8 @@ fn schemeIndex(key: []const u8) ?u8 {
 }
 
 pub const default_size = 14.0;
+pub const size_min = 8.0;
+pub const size_max = 40.0;
 
 /// Light or dark: `auto` follows the Mac.
 pub const Look = enum { auto, light, dark };
@@ -355,7 +357,7 @@ pub fn parse(text: []const u8) Settings {
             continue;
         }) {
             .font => s.setFont(val),
-            .size => s.size = std.math.clamp(number(val) orelse s.size, 8, 40),
+            .size => s.size = std.math.clamp(number(val) orelse s.size, size_min, size_max),
             .@"line-height" => s.spacing = std.math.clamp(number(val) orelse s.spacing, 1, 3),
             .wrap => s.wrap = flag(val) orelse s.wrap,
             .pairs => s.pairs = flag(val) orelse s.pairs,

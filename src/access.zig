@@ -144,12 +144,8 @@ pub fn addViewMethods(c: objc.ClassBuilder) void {
 fn begin(name: [*:0]const u8) objc.ClassBuilder {
     const b = objc.ClassBuilder.begin("NSAccessibilityElement", name);
     inline for (field_names) |fl| b.ivar(fl);
-    b.method("isAccessibilityElement", @ptrCast(&yes), "c@:");
+    b.method("isAccessibilityElement", @ptrCast(&objc.yes), "c@:");
     return b;
-}
-
-fn yes(_: Id, _: Sel) callconv(.c) bool {
-    return true;
 }
 
 // ---- telling VoiceOver ----

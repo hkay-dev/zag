@@ -10,6 +10,19 @@ comptime {
 pub const Id = ?*anyopaque;
 pub const Sel = ?*anyopaque;
 
+pub const shift_key: usize = 1 << 17;
+pub const ctrl_key: usize = 1 << 18;
+pub const opt_key: usize = 1 << 19;
+pub const cmd_key: usize = 1 << 20;
+
+pub fn yes(_: Id, _: Sel) callconv(.c) bool {
+    return true;
+}
+
+pub fn no(_: Id, _: Sel) callconv(.c) bool {
+    return false;
+}
+
 pub const Point = extern struct { x: f64 = 0, y: f64 = 0 };
 pub const Rect = extern struct { x: f64 = 0, y: f64 = 0, w: f64 = 0, h: f64 = 0 };
 const Range = extern struct { loc: isize, len: isize };
