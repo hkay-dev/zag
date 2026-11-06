@@ -2,6 +2,7 @@
 //! type names, keys in data files, and Markdown. One table row per language
 //! family; anything else is plain text.
 const std = @import("std");
+const Buffer = @import("buffer.zig").Buffer;
 
 pub const Kind = enum(u8) { text, keyword, string, comment, number, function, type };
 
@@ -131,6 +132,41 @@ pub fn forPath(path: []const u8) *const Lang {
 
 fn isWord(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_' or c >= 0x80;
+}
+
+/// Repairs cached line-start states and returns the half-open range whose
+/// kinds must be forgotten. Same-line-count edits stop at state convergence.
+pub fn syncStates(gpa: std.mem.Allocator, lang: *const Lang, b: *Buffer, states: *std.ArrayList(State), upto: usize) ![2]usize {
+    const first = b.touched;
+    var invalid = [2]usize{ first, std.math.maxInt(usize) };
+    if (first < states.items.len) {
+        if (b.lines_shifted) {
+            states.shrinkRetainingCapacity(first + 1);
+        } else {
+            var i = first;
+            while (i + 1 < states.items.len and i < b.lines()) : (i += 1) {
+                const before = states.items[i + 1];
+                const after = lexLine(lang, b.line(i), states.items[i], null);
+                states.items[i + 1] = after;
+                if (i + 1 >= b.touched_end and before == after) {
+                    invalid[1] = i + 1;
+                    break;
+                }
+            }
+        }
+    }
+    // Leave pending invalidation intact if extending the cache fails.
+    if (lang != &plain) {
+        if (states.items.len == 0) try states.append(gpa, .normal);
+        while (states.items.len <= upto and states.items.len < b.lines()) {
+            const i = states.items.len - 1;
+            try states.append(gpa, lexLine(lang, b.line(i), states.items[i], null));
+        }
+    }
+    b.touched = std.math.maxInt(usize);
+    b.touched_end = 0;
+    b.lines_shifted = false;
+    return invalid;
 }
 
 /// Lexes one line that begins in `state`, writing a kind per byte into
@@ -384,4 +420,81 @@ test "markdown fences carry across lines and color nothing else inside" {
     try t.expectEqual(Kind.function, k[7]);
     try t.expectEqual(Kind.comment, k[10]);
     try t.expectEqual(Kind.string, k[18]);
+}
+
+fn expectIncremental(lang: *const Lang, b: *Buffer, states: *std.ArrayList(State), cached: *std.ArrayList([]Kind)) ![2]usize {
+    const invalid = try syncStates(t.allocator, lang, b, states, b.lines() - 1);
+    // A line-count change may move all later rows; discard those old slots.
+    if (cached.items.len != b.lines()) {
+        for (cached.items) |k| t.allocator.free(k);
+        cached.clearRetainingCapacity();
+        for (0..b.lines()) |_| try cached.append(t.allocator, try t.allocator.alloc(Kind, 0));
+    }
+    var state: State = .normal;
+    for (0..b.lines()) |i| {
+        const line = b.line(i);
+        if (i >= invalid[0] and i < invalid[1]) {
+            t.allocator.free(cached.items[i]);
+            cached.items[i] = try t.allocator.alloc(Kind, line.len);
+            _ = lexLine(lang, line, states.items[i], cached.items[i]);
+        }
+        const scratch = try t.allocator.alloc(Kind, line.len);
+        defer t.allocator.free(scratch);
+        try t.expectEqual(state, states.items[i]);
+        state = lexLine(lang, line, state, scratch);
+        try t.expectEqualSlices(Kind, scratch, cached.items[i]);
+    }
+    return invalid;
+}
+
+test "incremental kinds converge inside and outside multiline regions" {
+    const cases = .{
+        .{ &c_like, "int a;\n/* start\ninside\nend */\nint b;\nint c;" },
+        .{ &python, "a = 1\nx = \"\"\"start\ninside\nend\"\"\"\nb = 2\nc = 3" },
+        .{ &js, "let a;\nx = `start\ninside\nend`;\nlet b;\nlet c;" },
+        .{ &zig, "const a = 1;\nconst x =\n    \\\\start\n    \\\\inside\n;\nconst b = 2;" },
+        .{ &markdown, "before\n```\ninside\n```\nafter\nlast" },
+    };
+    inline for (cases) |case| {
+        var b = try Buffer.init(t.allocator, case[1]);
+        defer b.deinit(t.allocator);
+        var states: std.ArrayList(State) = .empty;
+        defer states.deinit(t.allocator);
+        var cached: std.ArrayList([]Kind) = .empty;
+        defer {
+            for (cached.items) |k| t.allocator.free(k);
+            cached.deinit(t.allocator);
+        }
+        _ = try expectIncremental(case[0], &b, &states, &cached);
+        for ([_]usize{ 0, 2, 4 }) |line| {
+            const pos = b.lineEnd(line);
+            try b.replace(t.allocator, pos, pos, "x", pos, false);
+            const invalid = try expectIncremental(case[0], &b, &states, &cached);
+            try t.expectEqual([2]usize{ line, line + 1 }, invalid);
+        }
+        // Changing a closer propagates into the suffix rather than retaining it.
+        const close_start = b.lineStart(3);
+        try b.replace(t.allocator, close_start, b.lineEnd(3), "unclosed", close_start, false);
+        _ = try expectIncremental(case[0], &b, &states, &cached);
+        _ = try b.undo(t.allocator);
+        _ = try expectIncremental(case[0], &b, &states, &cached);
+        // Remove an opener, then restore it through undo and redo.
+        const start = b.lineStart(1);
+        const end = b.lineEnd(1);
+        try b.replace(t.allocator, start, end, "changed", start, false);
+        _ = try expectIncremental(case[0], &b, &states, &cached);
+        _ = try b.undo(t.allocator);
+        _ = try expectIncremental(case[0], &b, &states, &cached);
+        _ = try b.redo(t.allocator);
+        _ = try expectIncremental(case[0], &b, &states, &cached);
+        // Two edits before a frame must not converge before the second edit.
+        try b.replace(t.allocator, 0, 0, "x", 0, false);
+        const pos = b.lineStart(4);
+        try b.replace(t.allocator, pos, pos, "y", pos, false);
+        _ = try expectIncremental(case[0], &b, &states, &cached);
+        try b.replace(t.allocator, 0, 0, "new\n", 0, false);
+        _ = try expectIncremental(case[0], &b, &states, &cached);
+        _ = try b.undo(t.allocator);
+        _ = try expectIncremental(case[0], &b, &states, &cached);
+    }
 }

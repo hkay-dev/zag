@@ -316,7 +316,7 @@ pub const Editor = struct {
     /// Replaces the selection with `with` when it's a match of `q`.
     pub fn replaceOne(e: *Editor, gpa: Allocator, q: []const u8, with: []const u8) !bool {
         const s = e.sel();
-        if (q.len == 0 or s[1] - s[0] != q.len or !matchAt(e.text(), s[0], q)) return false;
+        if (q.len == 0 or s[1] - s[0] != q.len or !matchAt(e.text(), s[0], q, caseSensitive(q))) return false;
         e.typing = false;
         try e.insert(gpa, with);
         return true;
@@ -331,8 +331,9 @@ pub const Editor = struct {
         var first: ?usize = null;
         var done: usize = 0;
         var i: usize = 0;
+        const sensitive = caseSensitive(q);
         while (q.len > 0 and i + q.len <= t.len) {
-            if (!matchAt(t, i, q)) {
+            if (!matchAt(t, i, q, sensitive)) {
                 i += 1;
                 continue;
             }
@@ -375,9 +376,14 @@ pub const Editor = struct {
 };
 
 /// Matching ignores case unless the query has an uppercase letter.
-pub fn matchAt(t: []const u8, i: usize, q: []const u8) bool {
+pub fn caseSensitive(q: []const u8) bool {
+    for (q) |c| if (std.ascii.isUpper(c)) return true;
+    return false;
+}
+
+pub fn matchAt(t: []const u8, i: usize, q: []const u8, sensitive: bool) bool {
     if (i + q.len > t.len) return false;
-    for (q) |c| if (std.ascii.isUpper(c)) return std.mem.eql(u8, t[i .. i + q.len], q);
+    if (sensitive) return std.mem.eql(u8, t[i .. i + q.len], q);
     return std.ascii.eqlIgnoreCase(t[i .. i + q.len], q);
 }
 
@@ -386,23 +392,27 @@ pub fn search(t: []const u8, q: []const u8, from: usize, back: bool) ?usize {
     const last = t.len - q.len;
     var n: usize = 0;
     var i = @min(from, last + 1);
+    const sensitive = caseSensitive(q);
     while (n <= last) : (n += 1) {
         if (back) {
             i = if (i == 0) last else i - 1;
         } else if (i > last) i = 0;
-        if (matchAt(t, i, q)) return i;
+        if (matchAt(t, i, q, sensitive)) return i;
         if (!back) i += 1;
     }
     return null;
 }
 
-pub fn countMatches(t: []const u8, q: []const u8) usize {
-    if (q.len == 0) return 0;
-    var n: usize = 0;
+/// Non-overlapping matches ending at or before `before`, and in all the text.
+pub fn countMatches(t: []const u8, q: []const u8, before: usize) [2]usize {
+    var n = [2]usize{ 0, 0 };
+    if (q.len == 0) return n;
+    const sensitive = caseSensitive(q);
     var i: usize = 0;
     while (i + q.len <= t.len) : (i += 1) {
-        if (matchAt(t, i, q)) {
-            n += 1;
+        if (matchAt(t, i, q, sensitive)) {
+            n[0] += @intFromBool(i + q.len <= before);
+            n[1] += 1;
             i += q.len - 1;
         }
     }
@@ -612,7 +622,12 @@ test "search wraps and backs up past the current match" {
     try t_.expectEqual(@as(?usize, 0), search(s, "foo", 9, false));
     try t_.expectEqual(@as(?usize, 8), search(s, "foo", 0, true));
     try t_.expectEqual(@as(?usize, 8), search(s, "Foo", 0, false));
-    try t_.expectEqual(@as(usize, 2), countMatches(s, "foo"));
+    try t_.expectEqual([2]usize{ 2, 2 }, countMatches(s, "foo", s.len));
+    try t_.expectEqual([2]usize{ 1, 2 }, countMatches(s, "foo", 8));
+    try t_.expectEqual([2]usize{ 0, 2 }, countMatches(s, "foo", 2));
+    try t_.expectEqual([2]usize{ 0, 1 }, countMatches(s, "Foo", 8));
+    try t_.expectEqual([2]usize{ 1, 2 }, countMatches("aaaaa", "aa", 3));
+    try t_.expectEqual([2]usize{ 0, 0 }, countMatches(s, "", 0));
 }
 
 test "word motion stops at punctuation and line ends" {

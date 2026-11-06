@@ -3338,7 +3338,8 @@ fn runCommand(_: Id, _: Sel, it: Id) callconv(.c) void {
 fn countFound(d: *Doc) void {
     const t = d.ed.text();
     const q = d.prompt.items;
-    d.found = .{ editor.countMatches(t[0..d.ed.sel()[0]], q) + 1, editor.countMatches(t, q) };
+    d.found = editor.countMatches(t, q, d.ed.sel()[0]);
+    d.found[0] += 1;
 }
 
 /// The prompt field that takes typing: the replacement, or the search.
@@ -3431,8 +3432,9 @@ fn replaceAll(d: *Doc) void {
     const q = d.prompt.items;
     const old = d.ed.text();
     var i: usize = 0;
+    const sensitive = editor.caseSensitive(q);
     while (q.len > 0 and ns < max_flash and i + q.len <= old.len) {
-        if (!editor.matchAt(old, i, q)) {
+        if (!editor.matchAt(old, i, q, sensitive)) {
             i += 1;
             continue;
         }
@@ -3928,16 +3930,12 @@ pub const ax = struct {
 // ---- drawing ----
 
 fn syncStates(d: *Doc, upto: usize) void {
-    const b = &d.ed.buf;
-    if (b.touched < d.states.items.len) d.states.shrinkRetainingCapacity(b.touched + 1);
-    if (b.touched != std.math.maxInt(usize)) d.lex[0].drop(b.touched);
-    b.touched = std.math.maxInt(usize);
-    if (d.lang == &syntax.plain) return;
-    if (d.states.items.len == 0) d.states.append(gpa, .normal) catch return;
-    while (d.states.items.len <= upto and d.states.items.len < b.lines()) {
-        const i = d.states.items.len - 1;
-        d.states.append(gpa, syntax.lexLine(d.lang, b.line(i), d.states.items[i], null)) catch return;
-    }
+    const invalid = syntax.syncStates(gpa, d.lang, &d.ed.buf, &d.states, upto) catch {
+        d.states.clearRetainingCapacity();
+        d.lex[0].clear();
+        return;
+    };
+    if (invalid[0] != invalid[1]) d.lex[0].drop(invalid[0], invalid[1]);
 }
 
 /// Syntax kinds for some lines, in line order.
@@ -3956,13 +3954,15 @@ const Kinds = struct {
         x.kinds.clearRetainingCapacity();
     }
 
-    /// Forgets line `from` and every line after it.
-    fn drop(x: *Kinds, from: usize) void {
-        for (x.lines.items, 0..) |e, i| if (e.line >= from) {
-            x.lines.shrinkRetainingCapacity(i);
-            x.kinds.shrinkRetainingCapacity(e.at);
-            return;
-        };
+    /// Forgets only changed lines, keeping the converged suffix's byte offsets.
+    fn drop(x: *Kinds, from: usize, end: usize) void {
+        var kept: usize = 0;
+        for (x.lines.items) |e| {
+            if (e.line >= from and e.line < end) continue;
+            x.lines.items[kept] = e;
+            kept += 1;
+        }
+        x.lines.shrinkRetainingCapacity(kept);
     }
 };
 
@@ -4967,18 +4967,6 @@ fn codepoints(s: []const u8) usize {
     return n;
 }
 
-/// Words in `s`: runs of bytes that aren't white space, in one pass.
-fn wordCount(s: []const u8) usize {
-    var n: usize = 0;
-    var inside = false;
-    for (s) |c| {
-        const space = std.ascii.isWhitespace(c);
-        n += @intFromBool(!space and !inside);
-        inside = !space;
-    }
-    return n;
-}
-
 /// `n` with a comma between its thousands.
 fn grouped(out: *[32]u8, n: usize) []const u8 {
     var tmp: [20]u8 = undefined;
@@ -5002,7 +4990,7 @@ fn put(buf: []u8, n: *usize, comptime fmt: []const u8, args: anytype) void {
 
 /// The status strip's line: the caret's line and column, the selection's
 /// size, and for text and Markdown the words. Made again only when the caret,
-/// the selection or the text changed; the words are counted once per change.
+/// the selection or the text changed; the buffer keeps the word count exact.
 fn statusLine(d: *Doc, room: f64) void {
     const b = &d.ed.buf;
     const t = d.ed.text();
@@ -5027,7 +5015,7 @@ fn statusLine(d: *Doc, room: f64) void {
         const key = [3]u64{ d.id, b.changes, t.len };
         if (!std.mem.eql(u64, &key, &d.words_at)) {
             d.words_at = key;
-            d.words_n = wordCount(t);
+            d.words_n = b.words;
         }
         put(&buf, &n, "  ·  {s} word{s}", .{ grouped(&g, d.words_n), if (d.words_n == 1) "" else "s" });
     }
@@ -5434,7 +5422,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     var cur_m: ?[2]usize = null;
     if (finding) {
         const want = d.prompt.items;
-        if (s[1] - s[0] == want.len and editor.matchAt(d.ed.text(), s[0], want)) cur_m = s;
+        if (s[1] - s[0] == want.len and editor.matchAt(d.ed.text(), s[0], want, editor.caseSensitive(want))) cur_m = s;
     } else if (d.mode == .edit and has_sel) {
         const kept = if (d.cur_m) |h| h[0] == s[0] and h[1] == s[1] else false;
         if (d.jumped or kept) cur_m = s;
@@ -5470,6 +5458,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // The other matches' pills stay while the find bar slides away, fading with it.
     const closing_find = d.mode == .edit and d.held_id == d.id and (d.held_mode == .find or d.held_mode == .replace) and d.pbar.at(now) > 0.002;
     const pills: []const u8 = if (finding) d.prompt.items else if (closing_find) d.held.items else "";
+    const pills_sensitive = editor.caseSensitive(pills);
     const pills_a: f64 = if (finding) 1 else d.pbar.at(now);
 
     // Backgrounds: selection, find matches.
@@ -5504,7 +5493,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             const dist = if (row > here.row) row - here.row else here.row - row;
             const m_a = std.math.clamp((now - d.stag_t0 - @min(stag_row * f(dist), stag_cap)) / fade_time, 0, 1) * pills_a;
             var j = sg.start -| (pills.len - 1);
-            while (j < sg.end and j + pills.len <= l.len) : (j += 1) if (editor.matchAt(l, j, pills)) {
+            while (j < sg.end and j + pills.len <= l.len) : (j += 1) if (editor.matchAt(l, j, pills, pills_sensitive)) {
                 const lo = @max(j, sg.start);
                 const hi = @min(j + pills.len, sg.end);
                 if (lo < hi and ls + j != s[0]) {
