@@ -7939,6 +7939,9 @@ pub fn setup() void {
     c.method("drawRect:", @ptrCast(&drawRect), "v@:{CGRect=dddd}");
     c.method("isFlipped", @ptrCast(&yes), "c@:");
     c.method("isOpaque", @ptrCast(&no), "c@:");
+    // A see-through view lets AppKit move the window from anywhere under the
+    // toolbar, tabs included; `titleStrip` moves it from the empty parts.
+    c.method("mouseDownCanMoveWindow", @ptrCast(&no), "c@:");
     c.method("acceptsFirstResponder", @ptrCast(&yes), "c@:");
     c.method("keyDown:", @ptrCast(&keyDown), "v@:@");
     c.method("insertText:", @ptrCast(&insertText), "v@:@");
