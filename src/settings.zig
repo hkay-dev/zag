@@ -1,7 +1,6 @@
-//! The settings file, `~/.config/zag/config.toml`: font, size, line height, soft
-//! wrap, auto-closing pairs, zen mode, the sidebar, light or dark, and the colors of both themes, as TOML
-//! `key = value` lines. Zag adds every missing key at launch, and menu toggles
-//! rewrite just their own line.
+//! The settings file, `~/.config/zag/config.toml`: every option in `options`,
+//! as TOML `key = value` lines. Zag adds every missing key at launch, and
+//! menu toggles rewrite just their own line.
 const std = @import("std");
 const files = @import("files.zig");
 const Allocator = std.mem.Allocator;
@@ -164,7 +163,6 @@ const black_c: Bytes = .{
 
 pub const paper = widen(paper_c);
 pub const ink = widen(ink_c);
-const black = widen(black_c);
 
 pub const Scheme = struct {
     /// How the settings file names it.
@@ -361,21 +359,21 @@ pub fn parse(text: []const u8) Settings {
             .@"line-height" => s.spacing = std.math.clamp(number(val) orelse s.spacing, 1, 3),
             .wrap => s.wrap = flag(val) orelse s.wrap,
             .pairs => s.pairs = flag(val) orelse s.pairs,
-            .focus => s.focus = std.meta.stringToEnum(Focus, val) orelse s.focus,
+            .focus => s.focus = enumOf(Focus, val) orelse s.focus,
             .typewriter => s.typewriter = flag(val) orelse s.typewriter,
             .@"line-numbers" => s.line_numbers = flag(val) orelse s.line_numbers,
             .zen => s.zen = flag(val) orelse s.zen,
             .@"late-night" => s.late_night = flag(val) orelse s.late_night,
             .sidebar => s.sidebar = flag(val) orelse s.sidebar,
             .@"sidebar-width" => s.sidebar_width = std.math.clamp(number(val) orelse s.sidebar_width, sidebar_min, sidebar_max),
-            .appearance => s.look = std.meta.stringToEnum(Look, val) orelse s.look,
+            .appearance => s.look = enumOf(Look, val) orelse s.look,
             .@"light-theme", .@"dark-theme" => {},
         }
     }
     return s;
 }
 
-const Opt = enum { font, size, @"line-height", wrap, pairs, focus, typewriter, @"line-numbers", zen, @"late-night", sidebar, @"sidebar-width", appearance, @"light-theme", @"dark-theme" };
+pub const Opt = enum { font, size, @"line-height", wrap, pairs, focus, typewriter, @"line-numbers", zen, @"late-night", sidebar, @"sidebar-width", appearance, @"light-theme", @"dark-theme" };
 const Kind = enum { string, flag, number };
 
 /// One line of the file: its comment above it, and a blank line before the
@@ -409,8 +407,12 @@ fn optOf(key: []const u8) ?Opt {
     return null;
 }
 
-fn kindOf(key: []const u8) Kind {
-    return options[@intFromEnum(optOf(key) orelse return .string)].kind;
+fn enumOf(comptime E: type, s: []const u8) ?E {
+    const info = @typeInfo(E).@"enum";
+    inline for (info.field_names, info.field_values) |name, value| {
+        if (std.mem.eql(u8, s, name)) return @enumFromInt(value);
+    }
+    return null;
 }
 
 fn flagText(v: bool) []const u8 {
@@ -477,12 +479,13 @@ fn byte(v: f64) u8 {
     return @intFromFloat(@round(std.math.clamp(v, 0, 1) * 255));
 }
 
-/// `text` with the `key` line set to `value`, added at the end when missing.
+/// `text` with the `opt` line set to `value`, added at the end when missing.
 /// Flags (`true`, `false`) and numbers are written bare, everything else quoted.
-fn setLine(gpa: Allocator, text: []const u8, key: []const u8, value: []const u8) ![]u8 {
+fn setLine(gpa: Allocator, text: []const u8, opt: Opt, value: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
-    const quote: []const u8 = if (kindOf(key) == .string) "\"" else "";
+    const key = @tagName(opt);
+    const quote: []const u8 = if (options[@intFromEnum(opt)].kind == .string) "\"" else "";
     var done = false;
     var it = std.mem.splitScalar(u8, text, '\n');
     var first = true;
@@ -560,11 +563,11 @@ pub fn prepare(gpa: Allocator, p: [:0]const u8) void {
 }
 
 /// Rewrites one line of the file, creating it as `ensure` does first if needed.
-pub fn store(gpa: Allocator, p: [:0]const u8, s: *const Settings, key: []const u8, value: []const u8) !void {
+pub fn store(gpa: Allocator, p: [:0]const u8, s: *const Settings, opt: Opt, value: []const u8) !void {
     try ensure(gpa, p, s);
     const text = try files.read(gpa, p);
     defer gpa.free(text);
-    const next = try setLine(gpa, text, key, value);
+    const next = try setLine(gpa, text, opt, value);
     defer gpa.free(next);
     try files.write(p, next);
 }
@@ -647,18 +650,18 @@ test "a written file reads back as the same settings" {
 }
 
 test "setting a key rewrites only its line, or adds it, in TOML" {
-    const a = try setLine(t.allocator, "# size = 1\nsize = 14\nwrap = false\n", "size", "16");
+    const a = try setLine(t.allocator, "# size = 1\nsize = 14\nwrap = false\n", .size, "16");
     defer t.allocator.free(a);
     try t.expectEqualStrings("# size = 1\nsize = 16\nwrap = false\n", a);
-    const b = try setLine(t.allocator, "wrap = false", "pairs", "true");
+    const b = try setLine(t.allocator, "wrap = false", .pairs, "true");
     defer t.allocator.free(b);
     try t.expectEqualStrings("wrap = false\npairs = true\n", b);
-    const c = try setLine(t.allocator, "focus = \"line\"\n", "focus", "paragraph");
+    const c = try setLine(t.allocator, "focus = \"line\"\n", .focus, "paragraph");
     defer t.allocator.free(c);
     try t.expectEqualStrings("focus = \"paragraph\"\n", c);
 }
 
-test "the reader takes quotes, trailing comments and the old forms" {
+test "the reader takes quotes, trailing comments and bare values" {
     const s = parse(
         \\font = "Menlo-Regular"  # my font
         \\size = 18 # big
@@ -732,7 +735,7 @@ test "late-night covers the saved look and is written back as a flag" {
     try t.expect(s.late_night and !s.zen and s.look == .light);
     s.lateNight();
     try t.expect(s.zen and s.typewriter and s.focus == .paragraph and s.look == .dark);
-    try t.expectEqual(black, s.dark);
+    try t.expectEqual(widen(schemes[comptime schemeIndex("black").?].colors), s.dark);
     const text = try render(t.allocator, &parse("late-night = on\n"));
     defer t.allocator.free(text);
     try t.expect(std.mem.indexOf(u8, text, "late-night = true\n") != null);

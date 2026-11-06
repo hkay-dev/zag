@@ -60,6 +60,13 @@ pub fn msg(comptime R: type, target: Id, comptime sel: [:0]const u8, args: anyty
     return @call(.auto, f, .{ target, sel_registerName(sel) } ++ args);
 }
 
+/// Runs `sel` on `target` after `delay`, replacing an earlier one with the same `key`.
+pub fn later(target: Id, comptime sel: [:0]const u8, key: Id, delay: f64) void {
+    const s = sel_registerName(sel);
+    msg(void, class("NSObject"), "cancelPreviousPerformRequestsWithTarget:selector:object:", .{ target, s, key });
+    msg(void, target, "performSelector:withObject:afterDelay:", .{ s, key, delay });
+}
+
 /// `[[cls alloc] init]`.
 pub fn new(cls: [*:0]const u8) Id {
     return msg(Id, msg(Id, class(cls), "alloc", .{}), "init", .{});

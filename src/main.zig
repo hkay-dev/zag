@@ -250,12 +250,12 @@ pub fn main(init: std.process.Init.Minimal) void {
     d.method("applicationDidBecomeActive:", @ptrCast(&becameActive), "v@:@");
     d.method("applicationWillTerminate:", act(view.saveSession, .{}), "v@:@");
     d.method("openSettings:", act(view.openSettings, .{}), "v@:@");
-    d.method("toggleWrap:", act(view.toggleWrap, .{}), "v@:@");
-    d.method("toggleLineNumbers:", act(view.toggleLineNumbers, .{}), "v@:@");
-    d.method("togglePairs:", act(view.togglePairs, .{}), "v@:@");
-    d.method("toggleSidebar:", act(view.toggleSidebar, .{}), "v@:@");
+    d.method("toggleWrap:", act(view.flip, .{.wrap}), "v@:@");
+    d.method("toggleLineNumbers:", act(view.flip, .{.@"line-numbers"}), "v@:@");
+    d.method("togglePairs:", act(view.flip, .{.pairs}), "v@:@");
+    d.method("toggleSidebar:", act(view.flip, .{.sidebar}), "v@:@");
     d.method("toggleTypewriter:", act(view.toggleTypewriter, .{}), "v@:@");
-    d.method("toggleLateNight:", act(view.toggleLateNight, .{}), "v@:@");
+    d.method("toggleLateNight:", act(view.flip, .{.@"late-night"}), "v@:@");
     d.method("validateMenuItem:", @ptrCast(&view.allowed), "c@:@");
     d.method("toggleZen:", act(view.toggleZen, .{}), "v@:@");
     d.method("nextTab:", act(view.stepTab, .{1}), "v@:@");

@@ -3,6 +3,7 @@ const std = @import("std");
 const objc = @import("objc.zig");
 const settings = @import("settings.zig");
 const syntax = @import("syntax.zig");
+const view = @import("view.zig");
 const Id = objc.Id;
 const msg = objc.msg;
 const Range = extern struct { loc: usize, len: usize };
@@ -90,8 +91,7 @@ pub fn update(d: anytype, themes: *const [2]settings.Theme, dark: bool) void {
     if (!edited) return;
     fade = fade or !same_theme;
     theme = th.*;
-    msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:", .{target});
-    msg(void, target, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("render:"), @as(Id, null), @as(f64, 0.15) });
+    objc.later(target, "render:", null, 0.15);
 }
 pub fn toggle(d: anytype, getter: *const fn (u32) ?[]const u8, th: *const settings.Theme) void {
     if (window != null) { msg(void, window, "close", .{}); return; }
@@ -255,12 +255,7 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
         }
     }
     if (fade) {
-        // The same crossfade as view.zig's fadeTheme, on the scroll view's layer.
-        const t = msg(Id, objc.class("CATransition"), "animation", .{});
-        msg(void, t, "setType:", .{objc.str("fade")});
-        msg(void, t, "setDuration:", .{@as(f64, 0.25)});
-        msg(void, t, "setTimingFunction:", .{msg(Id, objc.class("CAMediaTimingFunction"), "functionWithName:", .{objc.str("easeInEaseOut")})});
-        msg(void, msg(Id, msg(Id, window, "contentView", .{}), "layer", .{}), "addAnimation:forKey:", .{ t, objc.str("theme") });
+        msg(void, msg(Id, msg(Id, window, "contentView", .{}), "layer", .{}), "addAnimation:forKey:", .{ view.themeFade(), objc.str("theme") });
         fade = false;
     }
     msg(void, text, "setBackgroundColor:", .{color(theme.bg)});

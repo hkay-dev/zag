@@ -6,6 +6,7 @@
 const std = @import("std");
 const objc = @import("objc.zig");
 const editor = @import("editor.zig");
+const buffer = @import("buffer.zig");
 const syntax = @import("syntax.zig");
 const finder = @import("finder.zig");
 const files = @import("files.zig");
@@ -38,10 +39,8 @@ pub fn setRoot(dir: []const u8) void {
     adoptRoot(dir);
     // A quick open on show lists the new folder. Otherwise the old list stays
     // for a panel still sliding shut; the next ⌘P reads the folder again anyway.
-    if (quick) |*q| for (docs.items) |d| if (d.mode == .open) {
-        q.deinit();
-        quick = finder.scan(gpa, dir) catch null;
-        for (docs.items) |o| if (o.mode == .open) pickFiles(o);
+    if (quick != null) for (docs.items) |d| if (d.mode == .open) {
+        rescanQuick(dir, null);
         break;
     };
     // The header's folder is written relative to the open folder.
@@ -52,6 +51,13 @@ pub fn setRoot(dir: []const u8) void {
     rebuildTree();
     for (wins.items) |w| msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
     refreshAll();
+}
+
+/// Scans quick open again; `fresh` must not crossfade picks from the palette.
+fn rescanQuick(dir: []const u8, fresh: ?*Doc) void {
+    if (quick) |*q| q.deinit();
+    quick = finder.scan(gpa, dir) catch null;
+    for (docs.items) |o| if (o.mode == .open) pickFiles(o, o == fresh);
 }
 
 fn rebuildTree() void {
@@ -1090,10 +1096,7 @@ fn tick(self: Id, _: Sel, _: Id) callconv(.c) void {
 }
 
 /// A hold is over: one redraw, and any fade out takes it from there.
-fn holdRedraw(self: Id, _: Sel, key: Id) callconv(.c) void {
-    for (docs.items) |d| if (d.win.view == self and d.caret == key) {
-        d.bar_due = false;
-    };
+fn holdRedraw(self: Id, _: Sel, _: Id) callconv(.c) void {
     msg(void, self, "setNeedsDisplay:", .{true});
 }
 
@@ -1298,7 +1301,6 @@ const Doc = struct {
     bar: Tween = .{ .dur = bar_time },
     bar_t0: f64 = 0,
     bar_vy: f64 = 0,
-    bar_due: bool = false,
     cx: Tween = .{ .dur = caret_time },
     cy: Tween = .{ .dur = caret_time },
     /// The caret tween is in page coordinates (else window coordinates).
@@ -2810,13 +2812,6 @@ fn draftsDir(buf: []u8) ?[:0]const u8 {
     return std.fmt.bufPrintSentinel(buf, "{s}/Library/Application Support/ze/Drafts", .{home}, 0) catch null;
 }
 
-/// Saves the drafts a second after the typing stops.
-fn laterDrafts(view: Id) void {
-    const sel = objc.sel_registerName("saveDrafts:");
-    msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:selector:object:", .{ view, sel, @as(Id, null) });
-    msg(void, view, "performSelector:withObject:afterDelay:", .{ sel, @as(Id, null), @as(f64, 1) });
-}
-
 fn saveDraftsNow(_: Id, _: Sel, _: Id) callconv(.c) void {
     saveDrafts();
 }
@@ -2969,19 +2964,25 @@ fn buildThemes() void {
     };
 }
 
-/// Crossfades the window to what draws next, for a theme or appearance
-/// change: one fade over the view's layer and each caret layer.
-fn fadeTheme(w: *Win) void {
+/// The transition shared by the editor and preview when their theme changes.
+pub fn themeFade() Id {
     const t = msg(Id, objc.class("CATransition"), "animation", .{});
     msg(void, t, "setType:", .{objc.str("fade")});
     msg(void, t, "setDuration:", .{@as(f64, 0.25)});
     msg(void, t, "setTimingFunction:", .{msg(Id, objc.class("CAMediaTimingFunction"), "functionWithName:", .{objc.str("easeInEaseOut")})});
+    return t;
+}
+
+/// Crossfades the window to what draws next, for a theme or appearance
+/// change: one fade over the view's layer and each caret layer.
+fn fadeTheme(w: *Win) void {
+    const t = themeFade();
     msg(void, msg(Id, w.view, "layer", .{}), "addAnimation:forKey:", .{ t, objc.str("theme") });
     for (docs.items) |d| if (d.win == w) msg(void, d.caret, "addAnimation:forKey:", .{ t, objc.str("theme") });
 }
 
 /// Reads the settings file and applies it to every window.
-pub fn loadSettings() void {
+fn loadSettings() void {
     // Once the file exists, use the path open() gives it (/tmp is /private/tmp).
     if (conf_path != null and files.exists(conf_path.?)) {
         if (files.absolute(gpa, conf_path.?)) |abs| {
@@ -3039,9 +3040,8 @@ pub fn loadSettings() void {
     msg(void, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "setAppearance:", .{look});
     for (wins.items) |w| {
         if (crossfade) fadeTheme(w);
-        w.side_find = true;
+        if (fonts_changed) w.side_find = true;
         msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
-        msg(void, w.view, "setNeedsDisplay:", .{true});
     }
     for (docs.items) |d| {
         d.dark = null;
@@ -3064,9 +3064,9 @@ fn isConf(path: ?[]const u8) bool {
 }
 
 /// Rewrites one line of the settings file and applies it.
-fn store(key: []const u8, value: []const u8) void {
+fn store(opt: settings.Opt, value: []const u8) void {
     const p = conf_path orelse return;
-    settings.store(gpa, p, &conf_saved, key, value) catch return alert("Couldn't write the settings file.", p);
+    settings.store(gpa, p, &conf_saved, opt, value) catch return alert("Couldn't write the settings file.", p);
     loadSettings();
     for (docs.items) |d| if (isConf(d.file.path)) checkOutside(d);
 }
@@ -3132,8 +3132,8 @@ fn confChanged(_: ?*anyopaque) callconv(.c) void {
 /// settings until it comes back.
 fn recheckSettings() void {
     const p = conf_path orelse return;
-    const now = files.stamp(p) orelse return;
-    if (!std.meta.eql(@as(?files.Stamp, now), conf_stamp)) loadSettings();
+    const now = files.stamp(p);
+    if (now != null and !std.meta.eql(now, conf_stamp)) loadSettings();
 }
 
 pub fn openSettings() void {
@@ -3143,20 +3143,14 @@ pub fn openSettings() void {
     open(conf_path.?, blankDoc());
 }
 
-pub fn toggleWrap() void {
-    store("wrap", if (conf.wrap) "false" else "true");
-}
-
-pub fn toggleLineNumbers() void {
-    store("line-numbers", if (conf.line_numbers) "false" else "true");
-}
-
-pub fn togglePairs() void {
-    store("pairs", if (conf.pairs) "false" else "true");
-}
-
-pub fn toggleSidebar() void {
-    store("sidebar", if (conf.sidebar) "false" else "true");
+/// Writes the opposite of flag `opt` to the settings file.
+pub fn flip(comptime opt: settings.Opt) void {
+    const name = comptime blk: {
+        var chars = @tagName(opt).*;
+        std.mem.replaceScalar(u8, chars[0..], '-', '_');
+        break :blk chars;
+    };
+    store(opt, if (@field(conf, &name)) "false" else "true");
 }
 
 /// What the menu's validation says: Late-Night greys the items it has set.
@@ -3168,36 +3162,30 @@ pub fn allowed(_: Id, _: Sel, it: Id) callconv(.c) bool {
 }
 
 pub fn toggleTypewriter() void {
-    if (conf.late_night) return;
-    store("typewriter", if (conf.typewriter) "false" else "true");
+    if (!conf.late_night) flip(.typewriter);
 }
 
 pub fn pickFocus(i: usize) void {
     if (conf.late_night) return;
-    if (i < focus_items.len) store("focus", @tagName(@as(settings.Focus, @enumFromInt(i))));
+    if (i < focus_items.len) store(.focus, @tagName(@as(settings.Focus, @enumFromInt(i))));
 }
 
 /// Leaving zen the usual way while Late-Night is on ends Late-Night.
 pub fn toggleZen() void {
-    if (conf.late_night) return toggleLateNight();
-    store("zen", if (conf.zen) "false" else "true");
-}
-
-pub fn toggleLateNight() void {
-    store("late-night", if (conf.late_night) "false" else "true");
+    if (conf.late_night) flip(.@"late-night") else flip(.zen);
 }
 
 /// Makes built-in theme `i` the one for its own mode, light or dark.
 pub fn pickScheme(i: usize) void {
     if (i >= settings.schemes.len or conf.late_night) return;
     const sc = settings.schemes[i];
-    store(if (sc.dark) "dark-theme" else "light-theme", sc.key);
+    store(if (sc.dark) .@"dark-theme" else .@"light-theme", sc.key);
 }
 
 /// View > Theme > Appearance: 0 Auto, 1 Light, 2 Dark.
 pub fn pickLook(i: usize) void {
     if (i >= look_items.len or conf.late_night) return;
-    store("appearance", @tagName(@as(settings.Look, @enumFromInt(i))));
+    store(.appearance, @tagName(@as(settings.Look, @enumFromInt(i))));
 }
 
 // ---- prompt ----
@@ -3222,6 +3210,7 @@ fn startPrompt(d: *Doc, m: Mode) void {
             countFound(d);
         },
         .open => {
+            d.palette = false;
             if (quick) |*l| l.deinit();
             quick = null;
             // Without a folder, quick open lists the folder of the file on screen.
@@ -3234,23 +3223,14 @@ fn startPrompt(d: *Doc, m: Mode) void {
                 setRoot(gpa.dupe(u8, std.fs.path.dirname(p) orelse "/") catch return);
                 break :blk root.?;
             };
-            quick = finder.scan(gpa, r) catch null;
-            // Another card showing quick open picks from the new list.
-            for (docs.items) |o| if (o != d and o.mode == .open) pickFiles(o);
-            d.palette = false;
-            pickFiles(d);
+            rescanQuick(r, if (was_palette) d else null);
         },
         .command => {
             listCommands();
             d.palette = true;
-            pickFiles(d);
+            pickFiles(d, d.palette != was_palette);
         },
         else => {},
-    }
-    // The old picks index the other list, so the new one fades in fresh.
-    if (d.palette != was_palette) {
-        d.prev_n = 0;
-        d.prev_none = false;
     }
     refresh(d);
 }
@@ -3264,12 +3244,13 @@ fn listing(d: *const Doc) ?[]const []const u8 {
     };
 }
 
-fn pickFiles(d: *Doc) void {
+fn pickFiles(d: *Doc, fresh: bool) void {
     const names = listing(d) orelse return;
     // Rows that change under the typing crossfade from the last picks.
     d.prev_picks = d.picks;
-    d.prev_n = if (d.pick_live) d.npicks else 0;
-    d.prev_none = d.pick_live and d.npicks == 0;
+    const live = d.pick_live and !fresh;
+    d.prev_n = if (live) d.npicks else 0;
+    d.prev_none = live and d.npicks == 0;
     d.pick_t0 = CACurrentMediaTime();
     d.npicks = finder.best(names, d.prompt.items, &d.picks);
     d.pick = 0;
@@ -3389,7 +3370,7 @@ fn promptChanged(d: *Doc) void {
             countFound(d);
             center(d);
         },
-        .open, .command => pickFiles(d),
+        .open, .command => pickFiles(d, false),
         else => {},
     }
 }
@@ -3564,7 +3545,7 @@ fn rowOfLine(d: *const Doc, i: usize) usize {
 
 fn lineOfRow(d: *const Doc, r: usize) usize {
     if (!wrapping()) return @min(r, d.file.ed.buf.lines() - 1);
-    return @import("buffer.zig").lastAtMost(d.vfirst.items[0 .. d.vfirst.items.len - 1], r);
+    return buffer.lastAtMost(d.vfirst.items[0 .. d.vfirst.items.len - 1], r);
 }
 
 /// Fills in where a row that starts at `s.start` ends.
@@ -3738,7 +3719,7 @@ fn trackFocus(d: *Doc) void {
 fn untitledChanged(d: *Doc) void {
     if (d.file.ed.buf.changes != d.file.draft_armed) {
         d.file.draft_armed = d.file.ed.buf.changes;
-        laterDrafts(d.win.view);
+        objc.later(d.win.view, "saveDrafts:", null, 1);
     }
     // An untitled file is renamed after its first line once typing
     // pauses, or at once when the caret leaves that line, as Return
@@ -3746,9 +3727,7 @@ fn untitledChanged(d: *Doc) void {
     var nb: [48]u8 = undefined;
     if (!std.mem.eql(u8, untitledName(&d.file.ed, &nb), d.file.name())) {
         const row = nameRow(&d.file.ed);
-        const sel = objc.sel_registerName("retitle:");
-        msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:selector:object:", .{ d.win.view, sel, @as(Id, null) });
-        if (row != null and row.? != d.file.ed.buf.lineOf(d.file.ed.cur)) retitle(d) else msg(void, d.win.view, "performSelector:withObject:afterDelay:", .{ sel, @as(Id, null), @as(f64, 0.6) });
+        if (row != null and row.? != d.file.ed.buf.lineOf(d.file.ed.cur)) retitle(d) else objc.later(d.win.view, "retitle:", null, 0.6);
     }
 }
 
@@ -4672,18 +4651,9 @@ fn drawRow(w: *Win, ctx: Id, th: *const Theme, dark: bool, i: usize, y: f64, tur
     }
 }
 
-/// The folder's name pinned at the top, then a row per file and open
-/// folder down to the cards' bottom edge, fading out there when more rows
-/// sit below. The open folders holding the rows
-/// at the top pin under the name, and the next folder pushes them up.
-/// `fade` is the sidebar's alpha while it slides.
-fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, fade: f64, now: f64) void {
+/// Settles the sidebar's scroll position before its rows draw.
+fn sideScroll(w: *Win, cur: ?[]const u8, view_h: f64, shut: f64, now: f64) f64 {
     const rows = tree.rows.items;
-    const lt = listTop();
-    const full_h = msg(Rect, w.view, "bounds", .{}).h;
-    // The list stops where the cards do, a gap above the window's bottom.
-    const view_h = full_h - lt - gap;
-    const cur = if (w.focus.file.path) |p| relOf(p) else null;
     // The list glides to a focused file that's out of view, once it's
     // been drawn; on the first draw it's just there.
     const was = if (w.side_t.moving(now)) w.side_t.at(now) else w.side_y;
@@ -4700,6 +4670,26 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
         };
     }
     w.side_drawn = true;
+    w.side_y = std.math.clamp(w.side_y, 0, @max(0, f(rows.len + 1) * side_h - shut - view_h));
+    if (glide and was != w.side_y) {
+        w.side_t.snap(was);
+        w.side_t.aim(w.side_y, now);
+    } else if (w.side_t.to != w.side_y) w.side_t.snap(w.side_y);
+    return if (w.side_t.moving(now)) w.side_t.at(now) else w.side_y;
+}
+
+/// The folder's name pinned at the top, then a row per file and open
+/// folder down to the cards' bottom edge, fading out there when more rows
+/// sit below. The open folders holding the rows
+/// at the top pin under the name, and the next folder pushes them up.
+/// `fade` is the sidebar's alpha while it slides.
+fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, fade: f64, now: f64) void {
+    const rows = tree.rows.items;
+    const lt = listTop();
+    const full_h = msg(Rect, w.view, "bounds", .{}).h;
+    // The list stops where the cards do, a gap above the window's bottom.
+    const view_h = full_h - lt - gap;
+    const cur = if (w.focus.file.path) |p| relOf(p) else null;
     // A closing folder's rows are still in the tree while it folds: leave
     // out the part already shut, so the clamp eases down with the fold
     // instead of dropping in one frame when the rows go.
@@ -4711,12 +4701,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
         moved += v.off;
         if (v.closing) shut += v.off;
     }
-    w.side_y = std.math.clamp(w.side_y, 0, @max(0, f(rows.len + 1) * side_h - shut - view_h));
-    if (glide and was != w.side_y) {
-        w.side_t.snap(was);
-        w.side_t.aim(w.side_y, now);
-    } else if (w.side_t.to != w.side_y) w.side_t.snap(w.side_y);
-    const sy = if (w.side_t.moving(now)) w.side_t.at(now) else w.side_y;
+    const sy = sideScroll(w, cur, view_h, shut, now);
     if (side_lines.items.len < rows.len) side_lines.appendNTimes(gpa, .{}, rows.len - side_lines.items.len) catch return;
 
     objc.CGContextSaveGState(ctx);
@@ -4761,12 +4746,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
     } else w.sel.a.aim(0, now);
     w.sel.last = w.sel.row;
     const sel_a = w.sel.a.at(now) * if (w.sel.row) |sr| (if (insideOf(vs[0..vn], sr)) |v| v.p else 1.0) else 1.0;
-    if (sel_a > 0.01) {
-        objc.CGContextSaveGState(ctx);
-        objc.CGContextSetAlpha(ctx, sel_a * fade);
-        selFill(ctx, th, dark, key, 1, side_inset, lt + w.sel.s.step(now) - sy, side_w - 2 * side_inset - 2, side_h, side_radius);
-        objc.CGContextRestoreGState(ctx);
-    } else w.sel.park();
+    if (sel_a > 0.01) selFill(ctx, th, dark, key, sel_a * fade, side_inset, lt + w.sel.s.step(now) - sy, side_w - 2 * side_inset - 2, side_h, side_radius) else w.sel.park();
 
     // A folding folder's own rows stay put and show only as far as it's
     // open, fading in or out, and the rows after them slide to match.
@@ -4903,10 +4883,7 @@ fn dropSideLines() void {
         objc.CFRelease(l);
         side_head = null;
     }
-    for (side_lines.items) |*l| {
-        if (l.full) |p| objc.CFRelease(p);
-        if (l.cut) |p| objc.CFRelease(p);
-    }
+    for (side_lines.items) |*l| freeSideLine(l);
     side_lines.clearRetainingCapacity();
 }
 
@@ -5556,10 +5533,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     d.busy = scenery(d, now);
     // The scroll bar's hold has no frames to draw: a one-shot timer redraws
     // when it's over, and the fade out takes it from there.
-    if (d.bar.to == 1 and !d.busy and !d.bar_due) {
-        d.bar_due = true;
-        delayRedraw(d.win.view, d.caret, @max(d.bar_t0 + bar_hold - now, 0) + 0.02);
-    }
+    if (d.bar.to == 1 and !d.busy) objc.later(d.win.view, "holdRedraw:", d.caret, @max(d.bar_t0 + bar_hold - now, 0) + 0.02);
 }
 
 // Line numbers stay beside the text and dim with Focus. Wrapped rows carry none.
@@ -5618,6 +5592,7 @@ fn drawBar(d: *Doc, ctx: Id, th: *const Theme, card: Rect, now: f64) void {
             pill(ctx, th.fg, bar_alpha * alpha, card.x + card.w - bar_w - 3, top_h + 2 + at_y, bar_w, knob, bar_w * 0.5);
         }
     } else if (d.bar.to != 0) d.bar.snap(0);
+
 }
 
 fn drawPanel(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, card: Rect, now: f64) void {
@@ -5859,13 +5834,6 @@ fn drawRing(d: *Doc, ctx: Id, th: *const Theme, dark: bool, card: Rect, zt: f64,
         const lit = d.lit.at(now);
         if (lit > 0.01) ring(ctx, th.caret, 0.55 * lit * calm, card.x, card.y, card.w, card.h, card_radius);
     }
-}
-
-/// A one-shot redraw of `view` after `delay`, replacing `key`'s earlier one.
-fn delayRedraw(view: Id, key: Id, delay: f64) void {
-    const sel = objc.sel_registerName("holdRedraw:");
-    msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:selector:object:", .{ view, sel, key });
-    msg(void, view, "performSelector:withObject:afterDelay:", .{ sel, key, delay });
 }
 
 fn headY() f64 {
@@ -6670,9 +6638,9 @@ fn keyDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const flags = msg(usize, ev, "modifierFlags", .{});
     const code = msg(u16, ev, "keyCode", .{});
     // ⌥Z for Soft Wrap: menus only see option keys after the text has typed them.
-    if (flags & (objc.cmd_key | objc.opt_key | objc.ctrl_key) == objc.opt_key and code == 6) return toggleWrap();
+    if (flags & (objc.cmd_key | objc.opt_key | objc.ctrl_key) == objc.opt_key and code == 6) return flip(.wrap);
     // ⌃⌘Z reaches here while Late-Night greys the Zen item: it leaves Late-Night.
-    if (flags & (objc.cmd_key | objc.opt_key | objc.ctrl_key) == objc.cmd_key | objc.ctrl_key and code == 6 and conf.late_night) return toggleLateNight();
+    if (flags & (objc.cmd_key | objc.opt_key | objc.ctrl_key) == objc.cmd_key | objc.ctrl_key and code == 6 and conf.late_night) return flip(.@"late-night");
     // Command keys that the menu didn't take: only arrows and delete mean something.
     if (flags & objc.cmd_key != 0) {
         if (std.mem.indexOfScalar(u16, &.{ 51, 117, 115, 119, 123, 124, 125, 126 }, code) == null) return;
@@ -6823,7 +6791,7 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     if (toolAt(w, p)) |t| {
         w.press = if (t == .sidebar) 1 else 2;
         w.press_t.snap(1);
-        if (t == .sidebar) toggleSidebar() else newTab(w.focus);
+        if (t == .sidebar) flip(.sidebar) else newTab(w.focus);
         return;
     }
     const side = sideShown(w);
@@ -6909,7 +6877,7 @@ fn resizeSide(w: *Win, x: f64) void {
         w.side_drag = false;
         w.side_lim = 0;
         side_stretch.snap(0);
-        toggleSidebar();
+        flip(.sidebar);
         // It slides away at the width it had.
         side_w = was;
         for (wins.items) |o| msg(void, o.window, "invalidateCursorRectsForView:", .{o.view});
@@ -7028,7 +6996,7 @@ fn mouseExited(self: Id, _: Sel, _: Id) callconv(.c) void {
 fn peekTo(w: *Win, in: bool, hold: f64) void {
     w.peek_in = in;
     w.peek_out = CACurrentMediaTime() + hold;
-    if (hold > 0) delayRedraw(w.view, w.window, hold);
+    if (hold > 0) objc.later(w.view, "holdRedraw:", w.window, hold);
 }
 
 /// The mouse lets go of a button it pressed: the button's fill fades.
@@ -7068,7 +7036,7 @@ fn mouseUp(self: Id, _: Sel, _: Id) callconv(.c) void {
     for (wins.items) |o| msg(void, o.window, "invalidateCursorRectsForView:", .{o.view});
     if (side_rest != conf.sidebar_width) {
         var buf: [24]u8 = undefined;
-        store("sidebar-width", settings.decimal(&buf, side_rest));
+        store(.@"sidebar-width", settings.decimal(&buf, side_rest));
     }
     // Let go past a limit and the edge springs back.
     if (side_stretch.x != 0) {
@@ -7578,7 +7546,7 @@ fn comment(d: *Doc) void {
 fn zoom(_: *Doc, by: f64) void {
     const size = if (by == 0) settings.default_size else std.math.clamp(conf.size + by, settings.size_min, settings.size_max);
     var buf: [24]u8 = undefined;
-    store("size", settings.decimal(&buf, size));
+    store(.size, settings.decimal(&buf, size));
 }
 
 /// The Font panel's choice, saved to the settings file.
@@ -7587,9 +7555,9 @@ fn changeFont(_: Id, _: Sel, sender: Id) callconv(.c) void {
     if (picked == null) return;
     const name = objc.utf8(msg(Id, picked, "fontName", .{}));
     // The system font's private name can't be asked for by name.
-    store("font", if (name.len == 0 or name[0] == '.') "system" else name);
+    store(.font, if (name.len == 0 or name[0] == '.') "system" else name);
     var buf: [24]u8 = undefined;
-    store("size", settings.decimal(&buf, @round(msg(f64, picked, "pointSize", .{}))));
+    store(.size, settings.decimal(&buf, @round(msg(f64, picked, "pointSize", .{}))));
 }
 
 /// Registers the view class and loads the font. Call once at launch.
