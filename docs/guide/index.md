@@ -287,6 +287,16 @@ command palette still open their prompt line at the bottom. Drag the empty strip
 move the window. Turn Zen Mode off to bring the window back as it was. The choice applies to
 every window and is remembered; your sidebar, wrap and theme settings don't change.
 
+## Status bar
+
+A thin strip along the bottom of each card, at its right, shows where the caret is as "Ln 120,
+Col 14". Both count from 1, and the column counts characters, so an accented letter or an emoji
+is one. While text is selected it adds how much, like "48 characters, 3 lines". For plain text
+and Markdown files (and files that aren't saved yet) it also shows the words, like "1,204 words":
+runs of text between spaces, counted again only when the text changes. A card that isn't the
+focused one shows its own, a little dimmer. The prompt line covers the strip while it's open, and
+Zen Mode hides it. There's no setting for it.
+
 ## Find and replace
 
 1. Press ⌘F. The prompt starts with the selected text or your last search.

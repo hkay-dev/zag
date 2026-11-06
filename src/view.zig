@@ -136,7 +136,13 @@ fn wrapping() bool {
 
 /// Where the text ends: the card's bottom, or the prompt line above it.
 fn bottom(d: *const Doc) f64 {
-    return d.size.y - gap - if (d.mode == .edit) 0 else barH();
+    return d.size.y - gap - if (d.mode == .edit) stripH(d) else barH();
+}
+
+/// The status strip along the card's bottom, easing away with Zen.
+const strip_h = 22.0;
+fn stripH(d: *const Doc) f64 {
+    return strip_h * (1 - std.math.clamp(d.win.z.x, 0, 1));
 }
 
 /// The window's own color around the card: the theme's background, a
@@ -1119,6 +1125,14 @@ const Doc = struct {
     held_which: u1 = 0,
     held_tally: [64]u8 = undefined,
     held_n: usize = 0,
+    /// The status strip's line, made again when what it shows changes: what
+    /// it was made for (caret, anchor, changes, doc, length) and its width.
+    /// The words counted for (doc, changes, length) and the count.
+    stat: Id = null,
+    stat_at: [5]u64 = @splat(std.math.maxInt(u64)),
+    stat_w: f64 = 0,
+    words_at: [3]u64 = @splat(std.math.maxInt(u64)),
+    words_n: usize = 0,
     /// Find has no matches, and when its words last shook for it.
     nomatch: bool = false,
     shake_t0: f64 = -1,
@@ -4664,6 +4678,84 @@ fn dropHead(d: *Doc) void {
     d.head = null;
     d.head_w = -1;
     for (d.slots.items) |*s| if (!s.gone) s.drop();
+    if (d.stat) |l| objc.CFRelease(l);
+    d.stat = null;
+    d.stat_at[0] = std.math.maxInt(u64);
+}
+
+/// Code points in `s`: the bytes that don't continue a character.
+fn codepoints(s: []const u8) usize {
+    var n: usize = 0;
+    for (s) |c| n += @intFromBool(c & 0xC0 != 0x80);
+    return n;
+}
+
+/// Words in `s`: runs of bytes that aren't white space, in one pass.
+fn wordCount(s: []const u8) usize {
+    var n: usize = 0;
+    var inside = false;
+    for (s) |c| {
+        const space = std.ascii.isWhitespace(c);
+        n += @intFromBool(!space and !inside);
+        inside = !space;
+    }
+    return n;
+}
+
+/// `n` with a comma between its thousands.
+fn grouped(out: *[32]u8, n: usize) []const u8 {
+    var tmp: [20]u8 = undefined;
+    const s = std.fmt.bufPrint(&tmp, "{d}", .{n}) catch return "";
+    var o: usize = 0;
+    for (s, 0..) |c, i| {
+        if (i > 0 and (s.len - i) % 3 == 0) {
+            out[o] = ',';
+            o += 1;
+        }
+        out[o] = c;
+        o += 1;
+    }
+    return out[0..o];
+}
+
+fn put(buf: []u8, n: *usize, comptime fmt: []const u8, args: anytype) void {
+    const out: []const u8 = std.fmt.bufPrint(buf[n.*..], fmt, args) catch "";
+    n.* += out.len;
+}
+
+/// The status strip's line: the caret's line and column, the selection's
+/// size, and for text and Markdown the words. Made again only when the caret,
+/// the selection or the text changed; the words are counted once per change.
+fn statusLine(d: *Doc) void {
+    const b = &d.ed.buf;
+    const t = d.ed.text();
+    const at = [5]u64{ d.ed.cur, d.ed.anchor, b.changes, d.id, t.len };
+    if (d.stat != null and std.mem.eql(u64, &at, &d.stat_at)) return;
+    d.stat_at = at;
+    var buf: [160]u8 = undefined;
+    var n: usize = 0;
+    var g: [32]u8 = undefined;
+    const li = b.lineOf(d.ed.cur);
+    put(&buf, &n, "Ln {d}, Col {d}", .{ li + 1, codepoints(t[b.lineStart(li)..d.ed.cur]) + 1 });
+    const s = d.ed.sel();
+    if (s[0] != s[1]) {
+        const l1 = b.lineOf(s[1]);
+        var lines = l1 - b.lineOf(s[0]) + 1;
+        if (lines > 1 and s[1] == b.lineStart(l1)) lines -= 1;
+        const chars = codepoints(t[s[0]..s[1]]);
+        put(&buf, &n, "  ·  {s} character{s}, {d} line{s}", .{ grouped(&g, chars), if (chars == 1) "" else "s", lines, if (lines == 1) "" else "s" });
+    }
+    if (d.lang == &syntax.plain or d.lang.markdown) {
+        const key = [3]u64{ d.id, b.changes, t.len };
+        if (!std.mem.eql(u64, &key, &d.words_at)) {
+            d.words_at = key;
+            d.words_n = wordCount(t);
+        }
+        put(&buf, &n, "  ·  {s} word{s}", .{ grouped(&g, d.words_n), if (d.words_n == 1) "" else "s" });
+    }
+    if (d.stat) |l| objc.CFRelease(l);
+    d.stat = uiLine(buf[0..n], path_font, 1e9);
+    d.stat_w = if (d.stat != null) objc.CTLineGetTypographicBounds(d.stat, null, null, null) else 0;
 }
 
 /// `s` as a line in `fnt` that takes the context's fill color, cut with an
@@ -5308,6 +5400,16 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         }
         k.flush();
         objc.CGContextRestoreGState(ctx);
+    }
+
+    // The status strip along the card's bottom, in the header's small folder
+    // ink, dimmer in a card that isn't key. It fades out under the prompt band
+    // as it rises and back as it sinks, and away with Zen.
+    const strip_a = zen_k * (1 - d.pbar.at(now));
+    if (strip_a > 0.01) {
+        statusLine(d);
+        const sy = card.y + card.h - strip_h / 2 + path_off;
+        _ = drawLineA(ctx, d.stat, th.muted, strip_a * (0.62 + 0.38 * ka), @round(card.x + card.w - pad_x - d.stat_w), @round(sy));
     }
 
     // The prompt line: find, replace, go to line, quick open and the palette.
