@@ -25,12 +25,8 @@ and holds solid for a moment before it fades out and back in, the band behind th
 slides after it, a new selection fades in and one you leave (by clicking or moving the caret) fades out, the quick open list rises out of the prompt line, and
 the prompt line itself slides up from the bottom of the card, its words a moment behind. The page
 eases into place when the keyboard scrolls it. Scrolling with the trackpad or mouse follows your
-fingers exactly. Pull the trackpad
-past the top or bottom of the file (or the left edge) and the page stretches with some resistance,
-never more than three lines at the top or bottom, then springs back when you lift your fingers;
-momentum that hits an end overshoots a little and
-settles. A mouse wheel stops at the ends. The bottom end leaves three blank lines under the last
-line. Windows in the background don't show a caret, their
+fingers exactly and stops at the ends, with no stretch past them. The bottom end leaves three
+blank lines under the last line. Windows in the background don't show a caret, their
 sidebar highlight fades and their header dims. The mouse pointer hides while you type and
 comes back when you move the mouse. The sidebar's highlight and the picked row in the quick open
 list hop to their new row with a little bounce, and the buttons by the traffic lights and the

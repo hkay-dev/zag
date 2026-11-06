@@ -889,8 +889,7 @@ fn loadDur(d: *const Doc) f64 {
 /// True while scrolling, the line band, a selection fade or the quick open
 /// list still has frames to draw.
 fn scenery(d: *const Doc, now: f64) bool {
-    const stretched = d.relax and (d.ov[0] != 0 or d.ov[1] != 0);
-    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.band_a.moving(now) or now < d.focus_t0 + focus_time or d.focus_a.moving(now) or d.panel.moving(now) or d.lit.moving(now) or
+    return d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.band_a.moving(now) or now < d.focus_t0 + focus_time or d.focus_a.moving(now) or d.panel.moving(now) or d.lit.moving(now) or
         d.inked.moving(now) or
         d.prompt_t.moving(now) or d.pbar.moving(now) or now < d.shake_t0 + shake_time or now < d.card_shake_t0 + shake_time or d.hint.moving(now) or (d.blank_t0 >= 0 and now < d.blank_t0 + hint_delay) or
         d.plus_t.moving(now) or !d.pick_s.settled() or tabsMoving(d, now) or
@@ -903,57 +902,6 @@ fn scenery(d: *const Doc, now: f64) bool {
 
 const spring_k = 380.0;
 const spring_c = 33.0;
-/// AppKit's rubber band: the stretch grows at this share of finger travel,
-/// less as it nears its limit.
-const band_c = 0.55;
-/// The top and bottom stretch stays under this many lines.
-const band_lines = 3;
-
-/// Moves the stretch back to rest with a damped spring; settled values snap to 0.
-fn springBack(d: *Doc, now: f64) void {
-    var dt = @min(now - d.ov_t, 1.0 / 20.0);
-    d.ov_t = now;
-    if (!d.relax) return;
-    while (dt > 0) {
-        const h = @min(dt, 1.0 / 240.0);
-        dt -= h;
-        for (&d.ov, &d.ov_v) |*o, *v| {
-            v.* += (-spring_k * o.* - spring_c * v.*) * h;
-            o.* += v.* * h;
-        }
-    }
-    for (&d.ov, &d.ov_v) |*o, *v| if (@abs(o.*) < 0.25 and @abs(v.*) < 4) {
-        o.* = 0;
-        v.* = 0;
-    };
-}
-
-/// Applies a trackpad delta to one axis: inside the page it follows the
-/// fingers exactly, past an end it stretches with resistance, never as far
-/// as `dim`.
-fn pull(pos: *f64, o: *f64, delta: f64, lo: f64, hi: f64, dim: f64) void {
-    const most = dim * 0.95;
-    var rest = delta;
-    if (o.* != 0) {
-        const room = 1 - @abs(o.*) / dim;
-        const k = band_c * room * room;
-        const moved = rest * k;
-        if (o.* * moved >= 0 or @abs(moved) < @abs(o.*)) {
-            o.* = std.math.clamp(o.* + moved, -most, most);
-            return;
-        }
-        rest += o.* / k;
-        o.* = 0;
-    }
-    pos.* += rest;
-    if (pos.* < lo) {
-        o.* = @max((pos.* - lo) * band_c, -most);
-        pos.* = lo;
-    } else if (pos.* > hi) {
-        o.* = @min((pos.* - hi) * band_c, most);
-        pos.* = hi;
-    }
-}
 
 /// Redraws the window's sidebar strip alone.
 fn redrawSide(w: *Win) void {
@@ -1174,13 +1122,6 @@ const Doc = struct {
     c_text: bool = true,
     /// The last draw had scenery still moving.
     busy: bool = false,
-    /// How far a trackpad stretched the page past its ends in pixels (x, y;
-    /// negative before the top or left edge), and how fast it springs back.
-    ov: [2]f64 = .{ 0, 0 },
-    ov_v: [2]f64 = .{ 0, 0 },
-    ov_t: f64 = 0,
-    /// Fingers are off the pad, so the stretch springs back.
-    relax: bool = false,
     /// Soft wrap: the first screen row of each line, plus the total at the
     /// end, for rows `cols` cells wide.
     vfirst: std.ArrayList(u32) = .empty,
@@ -4929,9 +4870,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             if (d.c_text) d.cx.shift(by);
         } else d.xs.aim(d.sx, now);
     }
-    springBack(d, now);
-    d.vy = d.ys.at(now) + d.ov[1];
-    d.vx = d.xs.at(now) + d.ov[0];
+    d.vy = d.ys.at(now);
+    d.vx = d.xs.at(now);
     // The card that holds the text, header and prompt line, which draw
     // inside its rounded corners.
     const lx = gap;
@@ -6591,24 +6531,12 @@ fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const d = paneAt(w, at) orelse return;
     var dx = msg(f64, ev, "scrollingDeltaX", .{});
     var dy = msg(f64, ev, "scrollingDeltaY", .{});
-    const now = CACurrentMediaTime();
-    if (msg(bool, ev, "hasPreciseScrollingDeltas", .{})) {
-        // The trackpad stretches past the ends while the fingers or momentum
-        // push, and springs back once the fingers are off the pad.
-        const touching: usize = 1 | 2 | 4 | 32; // began, stationary, changed, may begin
-        d.relax = msg(usize, ev, "phase", .{}) & touching == 0;
-        if (!d.relax) d.ov_v = .{ 0, 0 };
-        d.ov_t = now;
-        if (!wrapping()) pull(&d.sx, &d.ov[0], -dx, 0, std.math.inf(f64), @max(rightEdge(d) - gap, cw));
-        const range = scrollRange(d);
-        pull(&d.sy, &d.ov[1], -dy, range[0], range[1], band_lines * lh);
-    } else {
+    if (!msg(bool, ev, "hasPreciseScrollingDeltas", .{})) {
         dx *= lh;
         dy *= lh;
-        d.relax = true;
-        d.sx -= dx;
-        d.sy -= dy;
     }
+    d.sx -= dx;
+    d.sy -= dy;
     clampScroll(d);
     d.ys.snap(d.sy);
     d.xs.snap(d.sx);
