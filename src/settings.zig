@@ -186,8 +186,8 @@ pub const Settings = struct {
     line_numbers: bool = true,
     /// Hides the window's chrome and centers an 80-column grey page.
     zen: bool = false,
-    /// Late-Night Focus. `load` applies `lateNight` on top of the fields
-    /// around it, so the file keeps what the user chose.
+    /// Late-Night Focus. The window applies `lateNight` to a copy of the
+    /// fields around it, so the file keeps what the user chose.
     late_night: bool = false,
     /// The folder tree on the left of folder windows.
     sidebar: bool = true,
@@ -468,9 +468,7 @@ pub fn path(gpa: Allocator) ![:0]u8 {
 pub fn load(gpa: Allocator, p: [:0]const u8) Settings {
     const text = files.read(gpa, p) catch return .{};
     defer gpa.free(text);
-    var s = parse(text);
-    if (s.late_night) s.lateNight();
-    return s;
+    return parse(text);
 }
 
 /// Makes sure the file exists, writing every key from `s` when it doesn't.

@@ -186,6 +186,8 @@ fn chromeAlpha(th: *const Theme, dark: bool, z: f64) f64 {
 
 /// Font, size, colors and toggles, from the settings file.
 var conf: settings.Settings = .{};
+/// The file's own values: what writes use, while `conf` has Late-Night laid over them.
+var conf_saved: settings.Settings = .{};
 /// The themes that draw: the settings' colors, turned grey in zen.
 var themes: [2]Theme = .{ settings.paper, settings.ink };
 var conf_path: ?[:0]u8 = null;
@@ -2850,11 +2852,6 @@ fn fadeTheme(w: *Win) void {
     for (docs.items) |d| if (d.win == w) msg(void, d.caret, "addAnimation:forKey:", .{ t, objc.str("theme") });
 }
 
-/// Enables or greys menu items (the View menus don't autoenable).
-fn lock(items: []const Id, on: bool) void {
-    for (items) |it| if (it != null) msg(void, it, "setEnabled:", .{on});
-}
-
 /// Reads the settings file and applies it to every window.
 pub fn loadSettings() void {
     if (conf_path == null) conf_path = settings.path(gpa) catch null;
@@ -2871,7 +2868,9 @@ pub fn loadSettings() void {
     const old_look = conf.look;
     const old_zen = conf.zen;
     const old_late = conf.late_night;
-    conf = settings.load(gpa, p);
+    conf_saved = settings.load(gpa, p);
+    conf = conf_saved;
+    if (conf.late_night) conf.lateNight();
     buildThemes();
     // A theme or appearance pick crossfades, and so does Late-Night; zen's own change doesn't.
     const crossfade = conf.late_night != old_late or conf.look != old_look or (conf.zen == old_zen and !std.meta.eql(old_themes, themes));
@@ -2894,12 +2893,8 @@ pub fn loadSettings() void {
     for (look_items, 0..) |it, i| {
         if (it != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(i == @intFromEnum(conf.look)))});
     }
-    // Late-Night shows its values in these items and locks them.
+    // Late-Night's own checkmark; its other items get theirs from the effective values above.
     if (late_item != null) msg(void, late_item, "setState:", .{@as(isize, @intFromBool(conf.late_night))});
-    lock(&.{ typewriter_item, zen_item }, !conf.late_night);
-    lock(&focus_items, !conf.late_night);
-    lock(&scheme_items, !conf.late_night);
-    lock(&look_items, !conf.late_night);
     // Auto leaves it to the Mac; Light and Dark pin every window.
     const look: Id = switch (conf.look) {
         .auto => null,
@@ -2926,14 +2921,14 @@ pub fn loadSettings() void {
 /// Rewrites one line of the settings file and applies it.
 fn store(key: []const u8, value: []const u8) void {
     const p = conf_path orelse return;
-    settings.store(gpa, p, &conf, key, value) catch return alert("Couldn't write the settings file.", p);
+    settings.store(gpa, p, &conf_saved, key, value) catch return alert("Couldn't write the settings file.", p);
     loadSettings();
     for (docs.items) |d| if (d.path != null and std.mem.eql(u8, d.path.?, conf_path.?)) checkOutside(d);
 }
 
 pub fn openSettings() void {
     const p = conf_path orelse return;
-    settings.ensure(gpa, p, &conf) catch return alert("Couldn't write the settings file.", p);
+    settings.ensure(gpa, p, &conf_saved) catch return alert("Couldn't write the settings file.", p);
     loadSettings();
     open(conf_path.?, blankDoc());
 }
@@ -2954,11 +2949,21 @@ pub fn toggleSidebar() void {
     store("sidebar", if (conf.sidebar) "off" else "on");
 }
 
+/// What the menu's validation says: Late-Night greys the items it has set.
+pub fn allowed(it: Id) bool {
+    if (!conf.late_night) return true;
+    const name = std.mem.span(objc.sel_getName(msg(Sel, it, "action", .{})));
+    for ([_][]const u8{ "toggleTypewriter:", "toggleZen:", "pickFocus:", "pickScheme:", "pickAppearance:" }) |n| if (std.mem.eql(u8, name, n)) return false;
+    return true;
+}
+
 pub fn toggleTypewriter() void {
+    if (conf.late_night) return;
     store("typewriter", if (conf.typewriter) "off" else "on");
 }
 
 pub fn pickFocus(i: usize) void {
+    if (conf.late_night) return;
     if (i < focus_items.len) store("focus", @tagName(@as(settings.Focus, @enumFromInt(i))));
 }
 
@@ -2978,14 +2983,14 @@ fn desaturate(c: *Rgb) void {
 
 /// Makes built-in theme `i` the one for its own mode, light or dark.
 pub fn pickScheme(i: usize) void {
-    if (i >= settings.schemes.len) return;
+    if (i >= settings.schemes.len or conf.late_night) return;
     const sc = settings.schemes[i];
     store(if (sc.dark) "dark-theme" else "light-theme", sc.key);
 }
 
 /// View > Theme > Appearance: 0 Auto, 1 Light, 2 Dark.
 pub fn pickLook(i: usize) void {
-    if (i > 2) return;
+    if (i > 2 or conf.late_night) return;
     store("appearance", @tagName(@as(settings.Look, @enumFromInt(i))));
 }
 
