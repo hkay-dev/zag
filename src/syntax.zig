@@ -1,13 +1,18 @@
 //! A small line lexer: comments, strings, numbers, keywords, function and
-//! type names, keys in data files, and Markdown. One table row per language
-//! family; anything else is plain text.
+//! type names, keys in data files, Markdown and HTML. One table row per
+//! language family; anything else is plain text.
 const std = @import("std");
 const Buffer = @import("buffer.zig").Buffer;
 
 pub const Kind = enum(u8) { text, keyword, string, comment, number, function, type };
 
-/// What is still open at the end of a line.
-pub const State = enum(u8) { normal, block_comment, triple_double, triple_single, backtick, fence };
+/// What is still open at the end of a line. The HTML ones: inside a
+/// comment, inside a tag (one that opens a style or script element says
+/// so), and inside a style or script element and what's open in there.
+pub const State = enum(u8) {
+    normal, block_comment, triple_double, triple_single, backtick, fence,
+    html_comment, tag, tag_style, tag_script, style, style_comment, script, script_comment, script_backtick,
+};
 
 pub const Lang = struct {
     line_comment: []const u8 = "",
@@ -25,6 +30,9 @@ pub const Lang = struct {
     /// the function color); `[section]` lines are keywords.
     keys: bool = false,
     markdown: bool = false,
+    /// Tags, attributes and comments, with CSS and JavaScript inside
+    /// `<style>` and `<script>`.
+    html: bool = false,
     keywords: []const []const u8 = &.{},
 };
 
@@ -105,8 +113,9 @@ const lua: Lang = .{ .line_comment = "--", .names = true, .keywords = &.{
 
 const data: Lang = .{ .keys = true, .keywords = &.{ "true", "false", "null" } };
 const hash_data: Lang = .{ .line_comment = "#", .keys = true, .keywords = &.{ "true", "false", "null" } };
-const css: Lang = .{ .block_comment = true };
+const css: Lang = .{ .block_comment = true, .keys = true };
 const markdown: Lang = .{ .markdown = true };
+const html: Lang = .{ .html = true };
 
 const by_ext = [_]struct { []const u8, *const Lang }{
     .{ "zig", &zig },       .{ "zon", &zig },        .{ "c", &c_like },       .{ "h", &c_like },
@@ -116,9 +125,11 @@ const by_ext = [_]struct { []const u8, *const Lang }{
     .{ "ts", &js },         .{ "tsx", &js },         .{ "py", &python },      .{ "rs", &rust },
     .{ "go", &go },         .{ "swift", &swift },    .{ "sh", &shell },       .{ "bash", &shell },
     .{ "zsh", &shell },     .{ "fish", &shell },     .{ "rb", &ruby },        .{ "lua", &lua },
-    .{ "json", &data },     .{ "toml", &hash_data }, .{ "yaml", &hash_data }, .{ "yml", &hash_data },
-    .{ "ini", &hash_data }, .{ "conf", &hash_data }, .{ "css", &css },       .{ "md", &markdown },
-    .{ "markdown", &markdown },
+    .{ "json", &data },     .{ "jsonl", &data },     .{ "ndjson", &data },    .{ "toml", &hash_data },
+    .{ "yaml", &hash_data }, .{ "yml", &hash_data }, .{ "ini", &hash_data }, .{ "conf", &hash_data },
+    .{ "css", &css },       .{ "md", &markdown },    .{ "markdown", &markdown }, .{ "html", &html },
+    .{ "htm", &html },      .{ "xhtml", &html },     .{ "xml", &html },       .{ "svg", &html },
+    .{ "plist", &html },
 };
 
 pub fn forPath(path: []const u8) *const Lang {
@@ -178,6 +189,7 @@ pub fn syncStates(gpa: std.mem.Allocator, lang: *const Lang, b: *Buffer, states:
 /// `out` when given, and returns the state the next line begins in.
 pub fn lexLine(lang: *const Lang, s: []const u8, state: State, out: ?[]Kind) State {
     if (lang.markdown) return lexMarkdown(s, state, out);
+    if (lang.html) return lexHtml(s, state, out);
     var st = state;
     var i: usize = if (lang.keys and st == .normal) keyAt(lang, s, out) else 0;
     while (i < s.len) {
@@ -203,7 +215,7 @@ pub fn lexLine(lang: *const Lang, s: []const u8, state: State, out: ?[]Kind) Sta
                     st = .normal;
                 } else i = s.len;
             },
-            .normal, .fence => {
+            else => {
                 const c = s[i];
                 const rest = s[i..];
                 if (lang.line_comment.len > 0 and std.mem.startsWith(u8, rest, lang.line_comment) and
@@ -351,6 +363,102 @@ fn link(s: []const u8, p: usize, out: ?[]Kind) ?usize {
     return q + 1;
 }
 
+/// HTML: tag names as keywords, attribute names as functions, their
+/// values as strings, comments, and `&entities;` as numbers. A style or
+/// script element's text is lexed as CSS or JavaScript up to its end tag.
+fn lexHtml(s: []const u8, state: State, out: ?[]Kind) State {
+    mark(out, 0, s.len, .text);
+    var st = state;
+    var i: usize = 0;
+    while (i < s.len) switch (st) {
+        .html_comment => {
+            const e = std.mem.indexOfPos(u8, s, i, "-->");
+            const end = if (e) |x| x + 3 else s.len;
+            mark(out, i, end, .comment);
+            i = end;
+            if (e != null) st = .normal;
+        },
+        .tag, .tag_style, .tag_script => i = attrs(s, i, &st, out),
+        .style, .style_comment, .script, .script_comment, .script_backtick => {
+            const in_style = st == .style or st == .style_comment;
+            const e = endTag(s, i, if (in_style) "style" else "script") orelse s.len;
+            const inner: State = switch (st) {
+                .style_comment, .script_comment => .block_comment,
+                .script_backtick => .backtick,
+                else => .normal,
+            };
+            const after = lexLine(if (in_style) &css else &js, s[i..e], inner, if (out) |o| o[i..e] else null);
+            if (e < s.len) {
+                st = .normal;
+            } else if (in_style) {
+                st = if (after == .block_comment) .style_comment else .style;
+            } else st = switch (after) {
+                .block_comment => .script_comment,
+                .backtick => .script_backtick,
+                else => .script,
+            };
+            i = e;
+        },
+        else => {
+            const c = s[i];
+            if (std.mem.startsWith(u8, s[i..], "<!--")) {
+                st = .html_comment;
+            } else if (c == '<' and i + 1 < s.len and (std.ascii.isAlphabetic(s[i + 1]) or s[i + 1] == '/' or s[i + 1] == '!' or s[i + 1] == '?')) {
+                const closing = s[i + 1] == '/';
+                i += if (closing) 2 else 1;
+                const from = i;
+                while (i < s.len and (isWord(s[i]) or s[i] == '-' or s[i] == ':' or s[i] == '!' or s[i] == '?')) i += 1;
+                mark(out, from, i, .keyword);
+                const name = s[from..i];
+                st = if (closing) .tag else if (std.ascii.eqlIgnoreCase(name, "style")) .tag_style else if (std.ascii.eqlIgnoreCase(name, "script")) .tag_script else .tag;
+            } else if (c == '&') {
+                var e = i + 1;
+                while (e < s.len and (std.ascii.isAlphanumeric(s[e]) or s[e] == '#')) e += 1;
+                if (e > i + 1 and e < s.len and s[e] == ';') {
+                    mark(out, i, e + 1, .number);
+                    i = e + 1;
+                } else i += 1;
+            } else i += 1;
+        },
+    };
+    return st;
+}
+
+/// Colors a tag's attributes from `i` up to its `>`, after which `st` goes
+/// to what the tag opened, and returns where lexing goes on from.
+fn attrs(s: []const u8, from: usize, st: *State, out: ?[]Kind) usize {
+    var i = from;
+    while (i < s.len) {
+        const c = s[i];
+        if (c == '>') {
+            st.* = switch (st.*) {
+                .tag_style => .style,
+                .tag_script => .script,
+                else => .normal,
+            };
+            return i + 1;
+        } else if (c == '"' or c == '\'') {
+            const e = if (std.mem.indexOfScalarPos(u8, s, i + 1, c)) |x| x + 1 else s.len;
+            mark(out, i, e, .string);
+            i = e;
+        } else if (isWord(c) or c == '@' or c == ':') {
+            const start = i;
+            while (i < s.len and (isWord(s[i]) or s[i] == '-' or s[i] == ':' or s[i] == '.' or s[i] == '@')) i += 1;
+            mark(out, start, i, .function);
+        } else i += 1;
+    }
+    return i;
+}
+
+/// Where `</name` next starts from `from`, in any case.
+fn endTag(s: []const u8, from: usize, name: []const u8) ?usize {
+    var i = from;
+    while (std.mem.indexOfPos(u8, s, i, "</")) |at| : (i = at + 2) {
+        if (std.ascii.startsWithIgnoreCase(s[at + 2 ..], name)) return at;
+    }
+    return null;
+}
+
 /// Where `close` next appears from `i`, skipping backslash escapes.
 fn findClose(s: []const u8, from: usize, close: []const u8) ?usize {
     var i = from;
@@ -413,6 +521,42 @@ test "data keys only at the start of a line or before a colon" {
     try t.expectEqual(Kind.string, k[6]);
 }
 
+test "html: tags, attributes, values, comments and entities" {
+    var k: [48]Kind = undefined;
+    _ = lexLine(&html, "<a href=\"x\">&amp; t</a> <!-- c -->", .normal, &k);
+    try t.expectEqual(Kind.text, k[0]);
+    try t.expectEqual(Kind.keyword, k[1]);
+    try t.expectEqual(Kind.function, k[3]);
+    try t.expectEqual(Kind.string, k[8]);
+    try t.expectEqual(Kind.number, k[12]);
+    try t.expectEqual(Kind.text, k[18]);
+    try t.expectEqual(Kind.keyword, k[21]);
+    try t.expectEqual(Kind.comment, k[25]);
+    try t.expectEqual(State.tag, lexLine(&html, "<!DOCTYPE html", .normal, &k));
+    try t.expectEqual(Kind.keyword, k[1]);
+    try t.expectEqual(State.normal, lexLine(&html, "  lang=\"en\">", .tag, &k));
+    try t.expectEqual(Kind.function, k[2]);
+    try t.expectEqual(Kind.string, k[7]);
+}
+
+test "html: style and script text is lexed as CSS and JavaScript up to the end tag" {
+    var k: [48]Kind = undefined;
+    try t.expectEqual(State.style_comment, lexLine(&html, "<style> /* a", .normal, &k));
+    try t.expectEqual(Kind.comment, k[8]);
+    try t.expectEqual(State.style, lexLine(&html, "b */ p {", .style_comment, &k));
+    try t.expectEqual(Kind.comment, k[0]);
+    try t.expectEqual(State.normal, lexLine(&html, "} </STYLE> <b>", .style, &k));
+    try t.expectEqual(Kind.keyword, k[4]);
+    try t.expectEqual(Kind.keyword, k[12]);
+    try t.expectEqual(State.script_backtick, lexLine(&html, "<script>let s = `x", .normal, &k));
+    try t.expectEqual(Kind.keyword, k[8]);
+    try t.expectEqual(Kind.string, k[16]);
+    try t.expectEqual(State.normal, lexLine(&html, "y`; if (a < b) {}</script>", .script_backtick, &k));
+    try t.expectEqual(Kind.string, k[0]);
+    try t.expectEqual(Kind.keyword, k[4]);
+    try t.expectEqual(Kind.keyword, k[19]);
+}
+
 test "markdown fences carry across lines and color nothing else inside" {
     var k: [32]Kind = undefined;
     const s1 = lexLine(&markdown, "```sh", .normal, &k);
@@ -459,6 +603,8 @@ test "incremental kinds converge inside and outside multiline regions" {
         .{ &js, "let a;\nx = `start\ninside\nend`;\nlet b;\nlet c;" },
         .{ &zig, "const a = 1;\nconst x =\n    \\\\start\n    \\\\inside\n;\nconst b = 2;" },
         .{ &markdown, "before\n```\ninside\n```\nafter\nlast" },
+        .{ &html, "<p>\n<!-- start\ninside\nend -->\n<p>\n<p>" },
+        .{ &html, "<p>\n<script>\nlet a = 1;\n</script>\n<p>\n<p>" },
     };
     inline for (cases) |case| {
         var b = try Buffer.init(t.allocator, case[1]);

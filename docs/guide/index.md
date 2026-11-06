@@ -379,13 +379,16 @@ open.
 ## Syntax colors
 
 Zag colors code by the file's extension, for Zig, C and its family (C++, Objective-C, Java,
-Kotlin, C#), JavaScript and TypeScript, Python, Rust, Go, Swift, shell, Ruby, Lua, JSON, TOML,
-YAML, INI, CSS and Markdown. Keywords are bold, and strings, comments and numbers each get a
-color. In code, a word right before `(` takes the function color, a Capitalized word the type
-color, and an ALL_CAPS word the number color. In data files, keys at the start of a line take the
-function color and `[sections]` the keyword color. In Markdown, headings, list markers and
-**strong** text take the keyword color, `code` and fenced blocks the string color, and links the
-function color with their address dimmed. Other files are plain text.
+Kotlin, C#), JavaScript and TypeScript, Python, Rust, Go, Swift, shell, Ruby, Lua, JSON and JSON
+Lines, TOML, YAML, INI, CSS, HTML (and XML, SVG and plist) and Markdown. Keywords are bold, and
+strings, comments and numbers each get a color. In code, a word right before `(` takes the
+function color, a Capitalized word the type color, and an ALL_CAPS word the number color. In data
+files and CSS, keys at the start of a line take the function color and `[sections]` the keyword
+color. In HTML, tag names take the keyword color, attribute names the function color, their
+values the string color and `&entities;` the number color, and the text inside `<style>` and
+`<script>` is colored as CSS and JavaScript. In Markdown, headings, list markers and **strong**
+text take the keyword color, `code` and fenced blocks the string color, and links the function
+color with their address dimmed. Other files are plain text.
 
 ## Themes
 
