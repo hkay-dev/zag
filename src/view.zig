@@ -1293,6 +1293,10 @@ const Win = struct {
     bold: Id = null,
     bold_row: usize = 0,
     bold_gen: u32 = 0,
+    /// The name the selection just left, kept while its highlight fades off it.
+    bold_old: Id = null,
+    bold_old_row: usize = 0,
+    bold_old_gen: u32 = 0,
     sel_was: ?usize = null,
     sel_gen: u32 = 0,
     sel_id: u32 = 0,
@@ -4305,14 +4309,18 @@ fn drawRow(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, i: usize, y:
     if (bp > 0.001) {
         const selected = w.sel_row == i;
         if (selected and (w.bold == null or w.bold_row != i or w.bold_gen != tree_gen)) {
-            if (w.bold) |l| objc.CFRelease(l);
+            // The row it leaves keeps its bold name for the length of the hop.
+            if (w.bold_old) |l| objc.CFRelease(l);
+            w.bold_old = w.bold;
+            w.bold_old_row = w.bold_row;
+            w.bold_old_gen = w.bold_gen;
             w.bold = uiLine(row.rel[row.base..], name_font, room);
             w.bold_row = i;
             w.bold_gen = tree_gen;
         }
-        // The row the highlight is leaving has no cached bold name.
-        const line = if (selected) w.bold else uiLine(row.rel[row.base..], name_font, room);
-        defer if (!selected) if (line) |l| objc.CFRelease(l);
+        const kept = if (w.bold != null and w.bold_row == i and w.bold_gen == tree_gen) w.bold else if (w.bold_old != null and w.bold_old_row == i and w.bold_old_gen == tree_gen) w.bold_old else null;
+        const line = kept orelse uiLine(row.rel[row.base..], name_font, room);
+        defer if (kept == null) if (line) |l| objc.CFRelease(l);
         const bw = drawLineA(ctx, line, th.fg, bp, nx, y + side_base);
         nw += (bw - nw) * bp;
     }
@@ -4474,10 +4482,12 @@ var side_head: Id = null;
 var side_lines: std.ArrayList(Id) = .empty;
 
 fn dropSideLines() void {
-    for (wins.items) |w| if (w.bold) |l| {
-        objc.CFRelease(l);
+    for (wins.items) |w| {
+        if (w.bold) |l| objc.CFRelease(l);
+        if (w.bold_old) |l| objc.CFRelease(l);
         w.bold = null;
-    };
+        w.bold_old = null;
+    }
     if (side_head) |l| {
         objc.CFRelease(l);
         side_head = null;
@@ -6708,6 +6718,7 @@ fn windowWillClose(self: Id, _: Sel, _: Id) callconv(.c) void {
     }
     freeNodes(w.cards);
     if (w.bold) |l| objc.CFRelease(l);
+    if (w.bold_old) |l| objc.CFRelease(l);
     for (wins.items, 0..) |x, j| if (x == w) {
         _ = wins.orderedRemove(j);
         break;
