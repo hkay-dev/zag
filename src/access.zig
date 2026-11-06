@@ -415,7 +415,7 @@ fn toBytes(t: []const u8, r: Range) [2]usize {
 
 /// An NSString of `s`, with each bad byte as U+FFFD so the units line up
 /// with `units`.
-fn nsText(s: []const u8) Id {
+pub fn nsText(s: []const u8) Id {
     var out: std.ArrayList(u16) = .empty;
     defer out.deinit(gpa);
     out.ensureTotalCapacity(gpa, s.len) catch return objc.str("");

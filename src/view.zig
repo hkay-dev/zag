@@ -99,6 +99,7 @@ var tree_gen: u32 = 0;
 /// `tree_stale` when the folders need reading again.
 var restoring = false;
 var tree_stale = false;
+var modal = false;
 
 /// Quick open's file list, one for every card: each open reads it again.
 var quick: ?finder.Files = null;
@@ -112,6 +113,10 @@ fn relOf(p: []const u8) ?[]const u8 {
 
 fn refreshAll() void {
     for (docs.items) |d| refresh(d);
+}
+
+fn refreshWin(w: *Win) void {
+    for (docs.items) |d| if (d.win == w) refresh(d);
 }
 
 const shift_key: usize = 1 << 17;
@@ -1112,6 +1117,7 @@ const Page = struct {
     /// `buf.changes` it last saved.
     draft: ?[:0]u8 = null,
     drafted: u64 = 0,
+    draft_armed: u64 = 0,
     /// Just read from disk, so showing it rises in; set by the loaders.
     fresh: bool = false,
     /// Its sidebar row's unsaved dot, 0 to 1.
@@ -1178,6 +1184,7 @@ const Doc = struct {
     /// While untitled, where its draft is kept; see `Page.draft`.
     draft: ?[:0]u8 = null,
     drafted: u64 = 0,
+    draft_armed: u64 = 0,
     lang: *const syntax.Lang = &syntax.plain,
     /// The window it's a card in, and that window's NSWindow and view.
     win: *Win = undefined,
@@ -1421,6 +1428,7 @@ const Win = struct {
     cards: *Node,
     /// The card that takes typing, the menu commands and sidebar clicks.
     focus: *Doc,
+    edited: bool = false,
     /// The last draw had scenery still moving.
     busy: bool = false,
     /// The look, dark or not, until it next changes.
@@ -1586,12 +1594,15 @@ const TabDrag = struct {
     /// whether ⌘ was down, for a click that opens it. Owned: see `freeDrag`.
     file: ?[:0]u8 = null,
     name: Id = null,
+    w: f64 = 0,
+    icon: Id = null,
     cmd: bool = false,
     /// The sidebar row it came from, which dims while it's out.
     row: ?usize = null,
 };
 
 var wins: std.ArrayList(*Win) = .empty;
+var ghost_shade: Id = null;
 
 /// The cards' layout: a card, or a split of two, side by side or one above
 /// the other, with the first taking `share` of the room. A new card grows in
@@ -1769,6 +1780,7 @@ fn install(d: *Doc, pg: Page) void {
     d.id = pg.id;
     d.draft = pg.draft;
     d.drafted = pg.drafted;
+    d.draft_armed = pg.draft_armed;
     d.dot = pg.dot;
     d.center_at = std.math.maxInt(usize);
     clearSyntax(d);
@@ -1791,16 +1803,28 @@ fn install(d: *Doc, pg: Page) void {
     d.load_t = CACurrentMediaTime();
     d.rise = pg.fresh;
     d.caret_fade = true;
+    var rebuilt = false;
     if (d.path) |p| if (relOf(p)) |rel| {
         // The folders are only read again when one had to open or the file
         // isn't listed yet (made since the last read).
         if (tree.reveal(gpa, rel) or (!tree_stale and !tree.has(rel))) {
-            if (restoring) tree_stale = true else rebuildTree();
+            if (restoring) {
+                tree_stale = true;
+            } else {
+                rebuildTree();
+                rebuilt = true;
+            }
         }
         if (d.win.focus == d) d.win.side_find = true;
     };
+    if (!restoring and root != null and tree_gen == 0) {
+        rebuildTree();
+        rebuilt = true;
+    }
     named(d);
-    if (!restoring) refreshAll();
+    if (!restoring) {
+        if (rebuilt) refreshAll() else refreshWin(d.win);
+    }
 }
 
 /// Shows page `i` of the window. The file it had keeps its tab, even an
@@ -1854,7 +1878,7 @@ fn tabDraft(d: *const Doc, j: usize) ?[]const u8 {
 
 /// The file on show as a page, for moving it; the card still points at it.
 fn asPage(d: *const Doc) Page {
-    return .{ .ed = d.ed, .path = d.path, .lang = d.lang, .stamp = d.stamp, .sx = d.sx, .sy = d.sy, .id = d.id, .draft = d.draft, .drafted = d.drafted, .dot = d.dot };
+    return .{ .ed = d.ed, .path = d.path, .lang = d.lang, .stamp = d.stamp, .sx = d.sx, .sy = d.sy, .id = d.id, .draft = d.draft, .drafted = d.drafted, .draft_armed = d.draft_armed, .dot = d.dot };
 }
 
 fn tabPath(d: *const Doc, j: usize) ?[]const u8 {
@@ -1923,7 +1947,7 @@ fn closeTab(d: *Doc, at: usize) void {
     if (j != d.at) {
         var pg = dropPage(d, j);
         pg.deinit();
-        return refreshAll();
+        return refreshWin(d.win);
     }
     rememberPlace(d);
     d.ed.deinit(gpa);
@@ -1951,7 +1975,6 @@ fn keepOrDrop(d: *Doc) bool {
 fn named(d: *Doc) void {
     dropHead(d);
     retitle(d);
-    refresh(d);
     if (d.win.focus != d) return;
     msg(void, d.window, "setTitle:", .{objc.str(d.name())});
     // Window menu, Mission Control and the Dock show the title; the card's header shows the name.
@@ -2047,7 +2070,7 @@ fn splitOff(d: *Doc, down: bool, before: bool, dropped: bool) ?*Doc {
 fn takeTab(d: *Doc, j: usize) ?Page {
     if (j != d.at) {
         const pg = dropPage(d, j);
-        refreshAll();
+        refreshWin(d.win);
         return pg;
     }
     var blank: ?Editor = null;
@@ -2341,6 +2364,7 @@ pub fn newDoc() ?*Doc {
     d.fin = d.size;
     finishWin(w);
     named(d);
+    refresh(d);
     showWin(w.window);
     return d;
 }
@@ -2433,6 +2457,8 @@ fn askAlert(title: []const u8, info: []const u8, buttons: []const []const u8) is
     msg(void, a, "setMessageText:", .{objc.str(title)});
     msg(void, a, "setInformativeText:", .{objc.str(info)});
     for (buttons) |b| _ = msg(Id, a, "addButtonWithTitle:", .{objc.str(b)});
+    modal = true;
+    defer modal = false;
     const r = msg(isize, a, "runModal", .{});
     msg(void, a, "release", .{});
     return r;
@@ -2498,6 +2524,8 @@ fn save(d: *Doc, as: bool) bool {
         const p = msg(Id, objc.class("NSSavePanel"), "savePanel", .{});
         msg(void, p, "setNameFieldStringValue:", .{objc.str(d.name())});
         if (root) |r| msg(void, p, "setDirectoryURL:", .{msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(r)})});
+        modal = true;
+        defer modal = false;
         if (msg(isize, p, "runModal", .{}) != 1) return false;
         const path = objc.utf8(msg(Id, msg(Id, p, "URL", .{}), "path", .{}));
         fresh = gpa.dupeSentinel(u8, path, 0) catch return false;
@@ -2513,10 +2541,16 @@ fn save(d: *Doc, as: bool) bool {
         return false;
     };
     if (fresh) |z| {
-        preview.rename(d.window, d.path orelse "", z);
+        // Resolve after writing so a new file in a linked folder has a real path too.
+        const abs = files.absolute(gpa, z) catch {
+            gpa.free(z);
+            return false;
+        };
+        gpa.free(z);
+        preview.rename(d.window, d.path orelse "", abs);
         if (d.path) |old| gpa.free(old);
-        d.path = z;
-        d.lang = syntax.forPath(z);
+        d.path = abs;
+        d.lang = syntax.forPath(abs);
         clearSyntax(d);
         named(d);
     }
@@ -2549,7 +2583,11 @@ pub fn openPanel() void {
     msg(void, p, "setCanChooseDirectories:", .{true});
     msg(void, p, "setAllowsMultipleSelection:", .{true});
     if (root) |r| msg(void, p, "setDirectoryURL:", .{msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(r)})});
-    if (msg(isize, p, "runModal", .{}) != 1) return;
+    {
+        modal = true;
+        defer modal = false;
+        if (msg(isize, p, "runModal", .{}) != 1) return;
+    }
     const urls = msg(Id, p, "URLs", .{});
     for (0..msg(usize, urls, "count", .{})) |i| {
         const path = objc.utf8(msg(Id, msg(Id, urls, "objectAtIndex:", .{i}), "path", .{}));
@@ -2742,13 +2780,14 @@ pub fn restoreSession() bool {
         const saved = msg(Id, defaults(), "stringForKey:", .{objc.str("root")});
         if (saved != null) {
             const z = gpa.dupeSentinel(u8, objc.utf8(saved), 0) catch return false;
-            if (files.isDir(z)) setRoot(z) else gpa.free(z);
+            if (files.isDir(z)) root = z else gpa.free(z);
         }
     }
     const list = msg(Id, defaults(), "stringArrayForKey:", .{objc.str("session")});
-    if (list == null) return false;
     restoring = true;
-    for (0..msg(usize, list, "count", .{})) |i| {
+    tree_stale = root != null;
+    const n = if (list != null) msg(usize, list, "count", .{}) else 0;
+    for (0..n) |i| {
         const entry = objc.utf8(msg(Id, list, "objectAtIndex:", .{i}));
         const tab = std.mem.indexOfScalar(u8, entry, '\t') orelse continue;
         var it = std.mem.splitScalar(u8, entry[tab + 1 ..], '\t');
@@ -2975,6 +3014,7 @@ fn sameStamp(a: ?files.Stamp, b: ?files.Stamp) bool {
 
 /// When Zag comes forward: picks up settings and files that other apps changed.
 pub fn recheckAll() void {
+    if (modal) return;
     recheckSettings();
     for (docs.items) |d| checkOutside(d);
     // The rows and their cached lines stay unless a read folder moved on
@@ -3118,6 +3158,7 @@ pub fn loadSettings() void {
     for (docs.items) |d| {
         d.dark = null;
         d.sy = d.sy / old_lh * lh;
+        for (d.pages.items) |*pg| pg.sy = pg.sy / old_lh * lh;
         d.ys.snap(d.sy);
         d.band_on = false;
         d.snap = true;
@@ -3374,6 +3415,7 @@ fn addCommands(menu: Id, prefix: []const u8) void {
     const a = cmd_arena.allocator();
     var section = prefix;
     const n: usize = @intCast(msg(isize, menu, "numberOfItems", .{}));
+    const palette_sel = objc.sel_registerName("commandPalette:");
     for (0..n) |i| {
         const it = msg(Id, menu, "itemAtIndex:", .{@as(isize, @intCast(i))});
         if (msg(bool, it, "isSeparatorItem", .{})) {
@@ -3393,7 +3435,7 @@ fn addCommands(menu: Id, prefix: []const u8) void {
             section = title;
             continue;
         }
-        if (act == objc.sel_registerName("commandPalette:")) continue;
+        if (act == palette_sel) continue;
         const name = (if (section.len > 0) std.fmt.allocPrint(a, "{s}: {s}", .{ section, title }) else a.dupe(u8, title)) catch return;
         cmd_names.append(a, name) catch return;
         cmds.append(a, .{ .item = it, .keys = keysOf(a, it) catch "", .on = msg(isize, it, "state", .{}) == 1 }) catch return;
@@ -3833,7 +3875,10 @@ fn refresh(d: *Doc) void {
     d.focus_on = conf.focus != .off;
     msg(void, d.view, "setNeedsDisplay:", .{true});
     if (d.path == null) {
-        if (d.ed.buf.changes != d.drafted) laterDrafts(d.view);
+        if (d.ed.buf.changes != d.draft_armed) {
+            d.draft_armed = d.ed.buf.changes;
+            laterDrafts(d.view);
+        }
         // An untitled file is renamed after its first line once typing
         // pauses, or at once when the caret leaves that line, as Return
         // does, so its tab doesn't change width with each letter.
@@ -3850,7 +3895,10 @@ fn refresh(d: *Doc) void {
     for (docs.items) |o| if (o.win == d.win and o.dirty()) {
         edited = true;
     };
-    msg(void, d.window, "setDocumentEdited:", .{edited});
+    if (edited != d.win.edited) {
+        d.win.edited = edited;
+        msg(void, d.window, "setDocumentEdited:", .{edited});
+    }
     access.changed(d);
 }
 
@@ -5241,7 +5289,7 @@ fn sideClick(w: *Win, p: Point, flags: usize) void {
     // A file opens when the mouse comes up, unless it's dragged to a card.
     const path = std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ root.?, row.rel }, 0) catch return;
     const ix = 16 + f(row.depth) * 16 + 10;
-    w.tdrag = .{ .from = null, .file = path, .cmd = flags & cmd_key != 0, .down = p, .at = p, .grab = p.x - ix + tab_pad, .name = uiLine(row.rel[row.base..], name_font, 1e5), .row = i };
+    w.tdrag = .{ .from = null, .file = path, .cmd = flags & cmd_key != 0, .down = p, .at = p, .grab = p.x - ix + tab_pad, .row = i };
 }
 
 /// Whether the window's look is dark, asked of AppKit again only after
@@ -6450,6 +6498,16 @@ fn dragTab(w: *Win, p: Point) void {
     if (!t.live) {
         if (@abs(p.x - t.down.x) < 4 and @abs(p.y - t.down.y) < 4) return;
         t.live = true;
+        if (t.from) |d| {
+            const s = d.slots.items[slotOf(d, t.id) orelse return endDrag(w)];
+            if (s.line) |line| t.name = objc.CFRetain(line);
+            t.icon = s.icon;
+        } else if (t.file) |path| {
+            t.name = uiLine(std.fs.path.basename(path), name_font, 1e5);
+            t.icon = iconFor(std.fs.path.basename(path));
+        }
+        const nw = if (t.name != null) objc.CTLineGetTypographicBounds(t.name, null, null, null) else 0;
+        t.w = 2 * tab_pad + tileSize() + 7 + nw;
     }
     const was: ?Zone = if (t.drop) |x| x.zone else null;
     t.drop = null;
@@ -6560,22 +6618,6 @@ fn titleSpot(dr: Drop) Point {
     return .{ .x = x, .y = r.y + head_h / 2 - 11 };
 }
 
-/// The dragged tab's or file's name and icon, for its copy under the mouse.
-fn ghostOf(t: *const TabDrag) ?struct { line: Id, icon: Id } {
-    if (t.from) |d| {
-        const s = d.slots.items[slotOf(d, t.id) orelse return null];
-        return .{ .line = s.line, .icon = s.icon };
-    }
-    return .{ .line = t.name, .icon = iconFor(std.fs.path.basename(t.file.?)) };
-}
-
-/// The width of the dragged tab's copy under the mouse.
-fn ghostW(t: *const TabDrag) f64 {
-    const g = ghostOf(t) orelse return 80;
-    const nw = if (g.line != null) objc.CTLineGetTypographicBounds(g.line, null, null, null) else 0;
-    return 2 * tab_pad + tileSize() + 7 + nw;
-}
-
 /// Springs the drop preview to where the drag would land, opens a gap in
 /// the tab row it's over (the tabs there slide aside), and fades the
 /// dragged tab's copy in off its row. A preview that was out grows into
@@ -6583,7 +6625,7 @@ fn ghostW(t: *const TabDrag) f64 {
 fn aimPreview(w: *Win, now: f64) void {
     const t = if (w.tdrag) |*p| p else null;
     const dr: ?Drop = if (t) |x| x.drop else null;
-    const gw = if (t) |x| ghostW(x) else 0;
+    const gw = if (t) |x| x.w else 0;
     w.ghost_a.aim(if (t != null and t.?.live and t.?.out) 1 else 0, now);
     if (dr) |x| {
         const r = dropRect(x, gw);
@@ -6612,7 +6654,6 @@ fn aimPreview(w: *Win, now: f64) void {
         }
         if (over) d.open_w = gw + tab_space;
         d.opening.aim(if (over) 1 else 0, now);
-        if (!d.opening.settled()) refresh(d);
     };
 }
 
@@ -6697,11 +6738,11 @@ fn drawDrag(w: *Win, ctx: Id, th: *const Theme, now: f64) void {
         ghost(ctx, th, fl.icon, fl.line, fl.w, fl.from.x + (fl.to.x - fl.from.x) * e, fl.from.y + (fl.to.y - fl.from.y) * e, alpha, lift);
     }
     const t = w.tdrag orelse return;
+    if (!t.live) return;
     const ga = w.ghost_a.at(now);
     if (ga < 0.01) return;
-    const g = ghostOf(&t) orelse return;
-    const gw = ghostW(&t);
-    ghost(ctx, th, g.icon, g.line, gw, t.at.x - std.math.clamp(t.grab, 10, gw - 10), t.at.y - 11, ga, lift);
+    const gw = t.w;
+    ghost(ctx, th, t.icon, t.name, gw, t.at.x - std.math.clamp(t.grab, 10, gw - 10), t.at.y - 11, ga, lift);
 }
 
 /// A tab's copy lifted off the page, `gw` wide with its top left at `x`, `y`,
@@ -6715,14 +6756,18 @@ fn ghost(ctx: Id, th: *const Theme, img: Id, line: Id, gw: f64, x: f64, y: f64, 
     objc.CGContextTranslateCTM(ctx, -(x + gw / 2), -(y + 11));
     // A real shadow under it, so it reads as lifted off the page.
     objc.CGContextSaveGState(ctx);
-    const shade = objc.CGColorCreateGenericGray(0, 0.22);
-    defer if (shade) |s| objc.CFRelease(s);
-    objc.CGContextSetShadowWithColor(ctx, .{ .w = 0, .h = -4 }, 12, shade);
+    if (ghost_shade == null) ghost_shade = objc.CGColorCreateGenericGray(0, 0.22);
+    objc.CGContextSetShadowWithColor(ctx, .{ .w = 0, .h = -4 }, 12, ghost_shade);
     pill(ctx, th.header, 1, x, y, gw, 22, 7);
     objc.CGContextRestoreGState(ctx);
     ring(ctx, th.fg, 0.3, x, y, gw, 22, 7);
     tile(img, x + tab_pad, @round(y + 11 - ts / 2));
-    _ = drawLine(ctx, line, th.fg, x + tab_pad + ts + 7, @round(y + 11 + name_off));
+    if (line != null) {
+        objc.CGContextSetRGBFillColor(ctx, th.fg[0], th.fg[1], th.fg[2], 1);
+        objc.CGContextSetTextPosition(ctx, x + tab_pad + ts + 7, @round(y + 11 + name_off));
+        objc.CTLineDraw(line, ctx);
+        objc.flipText(ctx);
+    }
     objc.CGContextRestoreGState(ctx);
 }
 
@@ -6732,12 +6777,11 @@ fn ghost(ctx: Id, th: *const Theme, img: Id, line: Id, gw: f64, x: f64, y: f64, 
 fn startFly(w: *Win, t: TabDrag) void {
     endFly(w);
     if (!t.live or !t.out) return;
-    const g = ghostOf(&t) orelse return;
-    const line = g.line orelse return;
-    const gw = ghostW(&t);
+    const line = t.name orelse return;
+    const gw = t.w;
     const left = std.math.clamp(t.grab, 10, gw - 10);
     const at: Point = .{ .x = t.at.x - left, .y = t.at.y - 11 };
-    var fl: Fly = .{ .line = objc.CFRetain(line), .icon = g.icon, .w = gw, .from = at, .to = at, .t0 = CACurrentMediaTime(), .row = t.row };
+    var fl: Fly = .{ .line = objc.CFRetain(line), .icon = t.icon, .w = gw, .from = at, .to = at, .t0 = CACurrentMediaTime(), .row = t.row };
     if (t.drop) |dr| {
         if (dr.zone == .tabs) {
             const r = dropRect(dr, gw);
@@ -7666,9 +7710,11 @@ fn revealInFinder(_: Id, _: Sel, _: Id) callconv(.c) void {
 }
 
 fn copyPath(_: Id, _: Sel, _: Id) callconv(.c) void {
+    const text = menu_path[0..menu_len];
+    const string = if (std.unicode.utf8ValidateSlice(text)) objc.str(text) else access.nsText(text);
     const pb = pasteboard();
     _ = msg(isize, pb, "clearContents", .{});
-    _ = msg(bool, pb, "setString:forType:", .{ objc.str(menu_path[0..menu_len]), NSPasteboardTypeString });
+    _ = msg(bool, pb, "setString:forType:", .{ string, NSPasteboardTypeString });
 }
 
 /// Each card with unsaved changes asks first.
@@ -7726,9 +7772,11 @@ extern const NSPasteboardTypeString: Id;
 fn copy(d: *Doc) void {
     const s = d.ed.sel();
     if (d.mode != .edit or s[0] == s[1]) return;
+    const text = d.ed.text()[s[0]..s[1]];
+    const string = if (std.unicode.utf8ValidateSlice(text)) objc.str(text) else access.nsText(text);
     const pb = pasteboard();
     _ = msg(isize, pb, "clearContents", .{});
-    _ = msg(bool, pb, "setString:forType:", .{ objc.str(d.ed.text()[s[0]..s[1]]), NSPasteboardTypeString });
+    _ = msg(bool, pb, "setString:forType:", .{ string, NSPasteboardTypeString });
 }
 
 fn cut(d: *Doc) void {
