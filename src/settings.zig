@@ -9,29 +9,48 @@ const Allocator = std.mem.Allocator;
 
 pub const Rgb = [3]f64;
 
-pub const Theme = struct {
-    bg: Rgb,
-    fg: Rgb,
-    muted: Rgb,
-    /// Indexed by syntax.Kind; the first one is the text color.
-    kinds: [7]Rgb,
-    sel: Rgb,
-    line: Rgb,
-    caret: Rgb,
-    match: Rgb,
-    panel: Rgb,
-    rule: Rgb,
-    /// The card's header: a step lighter than the text's background on dark
-    /// themes and a step darker on light ones.
-    header: Rgb,
-};
+/// A theme's colors, as `Rgb` at run time and as bytes in the built-in schemes.
+fn ThemeOf(comptime C: type) type {
+    return extern struct {
+        bg: C,
+        fg: C,
+        muted: C,
+        /// Indexed by syntax.Kind; the first one is the text color.
+        kinds: [7]C,
+        sel: C,
+        line: C,
+        caret: C,
+        match: C,
+        panel: C,
+        rule: C,
+        /// The card's header: a step lighter than the text's background on dark
+        /// themes and a step darker on light ones.
+        header: C,
+    };
+}
 
-fn rgb(comptime v: u24) Rgb {
-    return .{ @as(f64, @floatFromInt(v >> 16)) / 255, @as(f64, @floatFromInt((v >> 8) & 0xff)) / 255, @as(f64, @floatFromInt(v & 0xff)) / 255 };
+pub const Theme = ThemeOf(Rgb);
+const Bytes = ThemeOf([3]u8);
+
+fn rgb(comptime v: u24) [3]u8 {
+    return .{ @intCast(v >> 16), @intCast((v >> 8) & 0xff), @intCast(v & 0xff) };
+}
+
+fn wide(c: [3]u8) Rgb {
+    return .{ @as(f64, @floatFromInt(c[0])) / 255, @as(f64, @floatFromInt(c[1])) / 255, @as(f64, @floatFromInt(c[2])) / 255 };
+}
+
+/// A built-in scheme's bytes as the `Rgb` theme that draws.
+fn widen(b: Bytes) Theme {
+    const from: *const [@sizeOf(Bytes) / 3][3]u8 = @ptrCast(&b);
+    var th: Theme = undefined;
+    const to: *[from.len]Rgb = @ptrCast(&th);
+    for (to, from) |*o, c| o.* = wide(c);
+    return th;
 }
 
 /// Warm paper in light mode.
-pub const paper: Theme = .{
+const paper_c: Bytes = .{
     .bg = rgb(0xF5F2EA),
     .fg = rgb(0x2E2C28),
     .muted = rgb(0x736E64),
@@ -46,7 +65,7 @@ pub const paper: Theme = .{
 };
 
 /// Ink in dark mode.
-pub const ink: Theme = .{
+const ink_c: Bytes = .{
     .bg = rgb(0x17171B),
     .fg = rgb(0xD9D4C7),
     .muted = rgb(0x8A857B),
@@ -61,7 +80,7 @@ pub const ink: Theme = .{
 };
 
 /// Ayu Light, from the ayu theme family.
-const ayu_light: Theme = .{
+const ayu_light: Bytes = .{
     .bg = rgb(0xF8F9FA),
     .fg = rgb(0x5C6166),
     .muted = rgb(0x6D7379),
@@ -76,7 +95,7 @@ const ayu_light: Theme = .{
 };
 
 /// Ayu Dark.
-const ayu_dark: Theme = .{
+const ayu_dark: Bytes = .{
     .bg = rgb(0x0B0E14),
     .fg = rgb(0xBFBDB6),
     .muted = rgb(0x7C7F85),
@@ -91,7 +110,7 @@ const ayu_dark: Theme = .{
 };
 
 /// One Light, Atom's light theme.
-const one_light: Theme = .{
+const one_light: Bytes = .{
     .bg = rgb(0xFAFAFA),
     .fg = rgb(0x383A42),
     .muted = rgb(0x727277),
@@ -106,7 +125,7 @@ const one_light: Theme = .{
 };
 
 /// One Dark, Atom's dark theme.
-const one_dark: Theme = .{
+const one_dark: Bytes = .{
     .bg = rgb(0x282C34),
     .fg = rgb(0xABB2BF),
     .muted = rgb(0x8B93A4),
@@ -123,7 +142,7 @@ const one_dark: Theme = .{
 /// Black for OLED screens: pure black with off-white text a step softer than
 /// Ink's, since black raises the contrast, and Ink's hues pulled a tenth
 /// toward black to sit with it.
-pub const black: Theme = .{
+const black_c: Bytes = .{
     .bg = rgb(0x000000),
     .fg = rgb(0xCBC6BA),
     .muted = rgb(0x7B776F),
@@ -137,24 +156,28 @@ pub const black: Theme = .{
     .header = rgb(0x111113),
 };
 
+pub const paper = widen(paper_c);
+pub const ink = widen(ink_c);
+pub const black = widen(black_c);
+
 pub const Scheme = struct {
     /// How the settings file names it.
     key: []const u8,
     /// How the View menu names it.
     title: [:0]const u8,
     dark: bool,
-    theme: Theme,
+    colors: Bytes,
 };
 
 /// The built-in themes, light ones first. Either mode can use any of them.
 pub const schemes = [_]Scheme{
-    .{ .key = "paper", .title = "Paper", .dark = false, .theme = paper },
-    .{ .key = "ayu-light", .title = "Ayu Light", .dark = false, .theme = ayu_light },
-    .{ .key = "one-light", .title = "One Light", .dark = false, .theme = one_light },
-    .{ .key = "ink", .title = "Ink", .dark = true, .theme = ink },
-    .{ .key = "ayu-dark", .title = "Ayu Dark", .dark = true, .theme = ayu_dark },
-    .{ .key = "one-dark", .title = "One Dark", .dark = true, .theme = one_dark },
-    .{ .key = "black", .title = "Black", .dark = true, .theme = black },
+    .{ .key = "paper", .title = "Paper", .dark = false, .colors = paper_c },
+    .{ .key = "ayu-light", .title = "Ayu Light", .dark = false, .colors = ayu_light },
+    .{ .key = "one-light", .title = "One Light", .dark = false, .colors = one_light },
+    .{ .key = "ink", .title = "Ink", .dark = true, .colors = ink_c },
+    .{ .key = "ayu-dark", .title = "Ayu Dark", .dark = true, .colors = ayu_dark },
+    .{ .key = "one-dark", .title = "One Dark", .dark = true, .colors = one_dark },
+    .{ .key = "black", .title = "Black", .dark = true, .colors = black_c },
 };
 
 fn schemeIndex(key: []const u8) ?u8 {
@@ -221,7 +244,7 @@ pub const Settings = struct {
         s.look = .dark;
         s.light_scheme = i;
         s.dark_scheme = i;
-        s.dark = schemes[i].theme;
+        s.dark = widen(schemes[i].colors);
     }
 };
 
@@ -321,8 +344,8 @@ pub fn parse(text: []const u8) Settings {
             s.dark_scheme = schemeIndex(e.val) orelse s.dark_scheme;
         }
     }
-    s.light = schemes[s.light_scheme].theme;
-    s.dark = schemes[s.dark_scheme].theme;
+    s.light = widen(schemes[s.light_scheme].colors);
+    s.dark = widen(schemes[s.dark_scheme].colors);
     it.reset();
     while (nextEntry(&it)) |e| {
         const key = e.key;
@@ -445,7 +468,7 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
     );
     for ([_][]const u8{ "light", "dark" }, 0..) |name, n| {
         var th = if (n == 0) s.light else s.dark;
-        var base = schemes[if (n == 0) s.light_scheme else s.dark_scheme].theme;
+        var base = widen(schemes[if (n == 0) s.light_scheme else s.dark_scheme].colors);
         for (colors) |c| {
             const v = slot(&th, c).?.*;
             if (std.mem.eql(f64, &v, &slot(&base, c).?.*)) continue;
@@ -713,7 +736,7 @@ test "a single color applies on top of the chosen theme wherever its line sits" 
         \\light-theme = nonsense
     );
     try t.expectEqual(paper, s.light);
-    try t.expectEqual(one_dark.bg, s.dark.bg);
+    try t.expectEqual(widen(one_dark).bg, s.dark.bg);
     try t.expectEqual(@as(f64, 3) / 255, s.dark.kinds[1][2]);
     const text = try render(t.allocator, &s);
     defer t.allocator.free(text);
@@ -737,8 +760,9 @@ fn contrastRatio(a: Rgb, b: Rgb) f64 {
 
 test "every theme's muted text reads at 4.5:1 and its comments at 3:1 on the page" {
     for (schemes) |sc| {
-        try t.expect(contrastRatio(sc.theme.muted, sc.theme.bg) >= 4.5);
-        try t.expect(contrastRatio(sc.theme.kinds[3], sc.theme.bg) >= 3.0);
+        const th = widen(sc.colors);
+        try t.expect(contrastRatio(th.muted, th.bg) >= 4.5);
+        try t.expect(contrastRatio(th.kinds[3], th.bg) >= 3.0);
     }
 }
 
