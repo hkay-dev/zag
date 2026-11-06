@@ -5418,8 +5418,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     if (d.bar.to == 1 and !d.busy) {
         const left = @max(d.bar_t0 + bar_hold - now, 0) + 0.02;
         const sel = objc.sel_registerName("barHold:");
-        msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:selector:object:", .{ d.view, sel, @as(Id, null) });
-        msg(void, d.view, "performSelector:withObject:afterDelay:", .{ sel, @as(Id, null), left });
+        msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:selector:object:", .{ d.view, sel, d.caret });
+        msg(void, d.view, "performSelector:withObject:afterDelay:", .{ sel, d.caret, left });
     }
 }
 
