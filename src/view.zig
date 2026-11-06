@@ -1190,9 +1190,13 @@ const Doc = struct {
     blank_t0: f64 = -1,
     /// The header's folder as a CoreText line fitting `head_w`, from
     /// `headLine`, with the middles of the gaps between its folders, where
-    /// chevrons go, in `head_marks`.
+    /// chevrons go, in `head_marks`. It was built for `head_w` of room (-1
+    /// for none yet), is `head_lw` wide, and `head_cut` when that loses a
+    /// folder or its end.
     head: Id = null,
     head_w: f64 = -1,
+    head_lw: f64 = 0,
+    head_cut: bool = false,
     head_marks: [max_marks]f64 = undefined,
     head_n: usize = 0,
 
@@ -3816,6 +3820,8 @@ const max_marks = 8;
 /// file or one at the top of the open folder.
 fn headLine(d: *Doc, room: f64) Id {
     d.head_n = 0;
+    d.head_lw = 0;
+    d.head_cut = false;
     const p = d.path orelse return null;
     const dir = std.fs.path.dirname(p) orelse "/";
     var pbuf: [std.fs.max_path_bytes]u8 = undefined;
@@ -3870,14 +3876,18 @@ fn headLine(d: *Doc, room: f64) Id {
         }
         const text = tbuf[0..len];
         const last = from + 1 >= n;
-        const line = uiLine(text, path_font, if (last) room else 1e9);
-        if (line == null) return null;
-        if (!last and objc.CTLineGetTypographicBounds(line, null, null, null) > room) {
+        var line = uiLine(text, path_font, 1e9);
+        if (line != null and objc.CTLineGetTypographicBounds(line, null, null, null) > room) {
             objc.CFRelease(line.?);
-            continue;
+            if (!last) continue;
+            line = uiLine(text, path_font, room);
+            d.head_cut = true;
         }
+        if (line == null) return null;
+        d.head_cut = d.head_cut or from > 0;
         // The last try is cut at its end to fit; a chevron the cut reached goes too.
         const lw = objc.CTLineGetTypographicBounds(line, null, null, null);
+        d.head_lw = lw;
         for (marks[0..m]) |at| {
             const pre = uiLine(text[0..at], path_font, 1e9);
             const x = if (pre != null) objc.CTLineGetTypographicBounds(pre, null, null, null) else 0;
@@ -5341,9 +5351,11 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
     if (folder_a > 0.01) {
         const note_w = if (d.note.len > 0) f(d.note.len + 2) * cw else 0;
         const head_room = @max(@floor(x1 - nx - note_w), 24);
-        // Made again when the room changes or `dropHead` clears it; a file
-        // at the top of the open folder has none.
-        if (d.head_w != head_room) {
+        // Made again when `dropHead` clears it, when the room shrinks below
+        // the line, or when the room changes for a line that was cut; one
+        // that fit whole stays right in more room. A file at the top of the
+        // open folder has none.
+        if (d.head_w < 0 or (d.head_w != head_room and (d.head_cut or head_room < d.head_lw))) {
             if (d.head) |l| objc.CFRelease(l);
             d.head = headLine(d, head_room);
             d.head_w = head_room;
