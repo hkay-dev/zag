@@ -26,10 +26,16 @@ pub var root: ?[]const u8 = null;
 /// The sidebar's rows, shared by every window.
 var tree: tree_mod.Tree = .init(gpa);
 
-/// Makes `dir` (owned by gpa) the folder, and shows it in the sidebar.
-pub fn setRoot(dir: []const u8) void {
+/// Adopts an owned folder path; its tree rows will be read before display.
+pub fn adoptRoot(dir: []const u8) void {
     if (root) |r| gpa.free(r);
     root = dir;
+    tree_stale = true;
+}
+
+/// Makes `dir` (owned by gpa) the folder, and shows it in the sidebar.
+pub fn setRoot(dir: []const u8) void {
+    adoptRoot(dir);
     // A quick open on show lists the new folder. Otherwise the old list stays
     // for a panel still sliding shut; the next ⌘P reads the folder again anyway.
     if (quick) |*q| for (docs.items) |d| if (d.mode == .open) {
@@ -50,6 +56,7 @@ pub fn setRoot(dir: []const u8) void {
 }
 
 fn rebuildTree() void {
+    tree_stale = false;
     const r = root orelse return;
     var kept: std.StringHashMapUnmanaged(usize) = .empty;
     defer kept.deinit(gpa);
@@ -94,10 +101,9 @@ fn rebuildTree() void {
 /// Counts tree rebuilds, so a window knows when to look up its selected row again.
 var tree_gen: u32 = 0;
 
-/// Set while `restoreSession` opens last session's tabs: `install` leaves
-/// the folder read and the redraw to one pass at its end, and marks
-/// `tree_stale` when the folders need reading again.
+/// Session restore defers reading folders and redrawing until its end.
 var restoring = false;
+/// The rows no longer match the root or the set of open folders.
 var tree_stale = false;
 var modal = false;
 
@@ -109,6 +115,10 @@ fn relOf(p: []const u8) ?[]const u8 {
     const r = root orelse return null;
     if (p.len <= r.len + 1 or !std.mem.startsWith(u8, p, r) or p[r.len] != '/') return null;
     return p[r.len + 1 ..];
+}
+
+fn revealFile(rel: []const u8) void {
+    if (tree.reveal(gpa, rel) or (!tree_stale and !tree.has(rel))) tree_stale = true;
 }
 
 fn refreshAll() void {
@@ -1212,8 +1222,9 @@ const Doc = struct {
     /// Where scrolling shows right now.
     vx: f64 = 0,
     vy: f64 = 0,
-    /// Typewriter mode last centered on this caret offset and text height.
+    /// Typewriter mode last centered on this caret, buffer change and text height.
     center_at: usize = std.math.maxInt(usize),
+    center_changes: u64 = 0,
     center_h: f64 = 0,
     xs: Tween = .{ .dur = scroll_time },
     ys: Tween = .{ .dur = scroll_time },
@@ -1789,19 +1800,10 @@ fn install(d: *Doc, pg: Page) void {
     d.caret_fade = true;
     var rebuilt = false;
     if (d.file.path) |p| if (relOf(p)) |rel| {
-        // The folders are only read again when one had to open or the file
-        // isn't listed yet (made since the last read).
-        if (tree.reveal(gpa, rel) or (!tree_stale and !tree.has(rel))) {
-            if (restoring) {
-                tree_stale = true;
-            } else {
-                rebuildTree();
-                rebuilt = true;
-            }
-        }
+        revealFile(rel);
         if (d.win.focus == d) d.win.side_find = true;
     };
-    if (!restoring and root != null and tree_gen == 0) {
+    if (!restoring and tree_stale) {
         rebuildTree();
         rebuilt = true;
     }
@@ -2489,7 +2491,7 @@ fn save(d: *Doc, as: bool) bool {
     } else if (files.stamp(d.file.path.?)) |now| {
         // Another app wrote the file since Zag read or saved it. A deleted
         // file is just written again.
-        if (!sameStamp(now, d.file.stamp) and !askOverwrite(d)) return false;
+        if (!std.meta.eql(@as(?files.Stamp, now), d.file.stamp) and !askOverwrite(d)) return false;
     }
     const to = fresh orelse d.file.path.?;
     files.write(to, d.file.ed.text()) catch {
@@ -2516,7 +2518,7 @@ fn save(d: *Doc, as: bool) bool {
     d.file.stamp = files.stamp(d.file.path.?);
     d.note = "saved";
     noteRecent(d.file.path.?);
-    if (conf_path != null and std.mem.eql(u8, d.file.path.?, conf_path.?)) loadSettings();
+    if (isConf(d.file.path)) loadSettings();
     // A new file shows in the tree when its folder's rows are listed; every
     // file's dot goes away.
     if (relOf(d.file.path.?)) |rel| if (!tree.has(rel) and listed(std.fs.path.dirname(rel))) {
@@ -2734,12 +2736,11 @@ pub fn restoreSession() bool {
         const saved = msg(Id, defaults(), "stringForKey:", .{objc.str("root")});
         if (saved != null) {
             const z = gpa.dupeSentinel(u8, objc.utf8(saved), 0) catch return false;
-            if (files.isDir(z)) root = z else gpa.free(z);
+            if (files.isDir(z)) adoptRoot(z) else gpa.free(z);
         }
     }
     const list = msg(Id, defaults(), "stringArrayForKey:", .{objc.str("session")});
     restoring = true;
-    tree_stale = root != null;
     const n = if (list != null) msg(usize, list, "count", .{}) else 0;
     for (0..n) |i| {
         const entry = objc.utf8(msg(Id, list, "objectAtIndex:", .{i}));
@@ -2748,10 +2749,7 @@ pub fn restoreSession() bool {
         restoreWindow(entry[0..tab], &it);
     }
     restoring = false;
-    if (tree_stale) {
-        tree_stale = false;
-        rebuildTree();
-    }
+    if (tree_stale) rebuildTree();
     refreshAll();
     return docs.items.len > 0;
 }
@@ -2801,11 +2799,7 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
         for (&head) |*v| v.* = std.fmt.parseInt(usize, nums.next() orelse "0", 10) catch 0;
     }
     const d = newPane(w) orelse return null;
-    // The window's focus is read while installing: the first card made holds it
-    // until `restoreWindow` picks the lit one.
-    if (for (docs.items) |o| {
-        if (o.win == w and o != d) break false;
-    } else true) w.focus = d;
+    w.focus = d;
     // The tabs wait as parked pages; only the lit one is installed, once.
     var on: usize = 0;
     for (0..head[0]) |i| {
@@ -2824,25 +2818,19 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
         };
         if (i == head[1] or d.pages.items.len == 1) on = d.pages.items.len - 1;
         // The folders its file is in open in the sidebar.
-        if (pg.path) |pp| if (relOf(pp)) |rel| {
-            if (tree.reveal(gpa, rel) or (!tree_stale and !tree.has(rel))) tree_stale = true;
-        };
+        if (pg.path) |pp| if (relOf(pp)) |rel| revealFile(rel);
     }
     const tabs = d.pages.items.len;
     if (tabs == 0) {
         closePane(d);
         return null;
     }
-    // Opening the tabs one by one remembered each place but the lit last tab's.
-    // Doing it again keeps the open tabs at the front of the 100 places kept,
-    // so a tab that stays parked for many launches doesn't lose its place.
-    for (d.pages.items, 0..) |pg, k| {
-        if (k == tabs - 1 and on == tabs - 1) break;
-        rememberPlace(&pg);
-    }
+    // Keep open tabs at the front of the 100 places so parked tabs keep theirs.
+    for (d.pages.items) |pg| rememberPlace(&pg);
     d.file.ed.deinit(gpa);
     dropDraft(&d.file.draft);
     var pg = d.pages.orderedRemove(on);
+    // The old one-by-one restore rose only the last tab.
     pg.rise = on == tabs - 1;
     d.at = on;
     install(d, pg);
@@ -2962,11 +2950,6 @@ fn draftHeld(abs: []const u8) bool {
 
 // ---- changes from outside ----
 
-fn sameStamp(a: ?files.Stamp, b: ?files.Stamp) bool {
-    if (a == null or b == null) return a == null and b == null;
-    return std.meta.eql(a.?, b.?);
-}
-
 /// When Zag comes forward: picks up settings and files that other apps changed.
 pub fn recheckAll() void {
     if (modal) return;
@@ -2983,7 +2966,7 @@ pub fn recheckAll() void {
 fn checkOutside(d: *Doc) void {
     const p = d.file.path orelse return;
     const now = files.stamp(p);
-    if (sameStamp(now, d.file.stamp)) return;
+    if (std.meta.eql(now, d.file.stamp)) return;
     d.file.stamp = now;
     if (now == null) {
         d.file.ed.buf.saved = std.math.maxInt(u64);
@@ -2998,34 +2981,37 @@ fn checkOutside(d: *Doc) void {
     refresh(d);
 }
 
+fn changedTitle(d: *Doc, buf: *[300]u8) []const u8 {
+    return std.fmt.bufPrint(buf, "{s} changed in another app.", .{d.name()}) catch "This file changed in another app.";
+}
+
 fn askReload(d: *Doc) bool {
     // A Dev build never puts an alert in front of Harsha: it keeps its copy.
     if (background) return false;
     msg(void, d.win.window, "makeKeyAndOrderFront:", .{@as(Id, null)});
     var buf: [300]u8 = undefined;
-    const title = std.fmt.bufPrint(&buf, "{s} changed in another app.", .{d.name()}) catch "This file changed in another app.";
-    return askAlert(title, "Reloading it loses your unsaved changes here.", &.{ "Keep Mine", "Reload" }) == 1001;
+    return askAlert(changedTitle(d, &buf), "Reloading it loses your unsaved changes here.", &.{ "Keep Mine", "Reload" }) == 1001;
 }
 
 /// Saving over a file another app changed since Zag read or saved it.
 fn askOverwrite(d: *Doc) bool {
     if (background) return true;
     var buf: [300]u8 = undefined;
-    const title = std.fmt.bufPrint(&buf, "{s} changed in another app.", .{d.name()}) catch "This file changed in another app.";
-    return askAlert(title, "Saving replaces that version with yours.", &.{ "Save Anyway", "Cancel" }) == 1000;
+    return askAlert(changedTitle(d, &buf), "Saving replaces that version with yours.", &.{ "Save Anyway", "Cancel" }) == 1000;
 }
 
 // ---- settings ----
+
+fn desaturate(c: *Rgb) void {
+    c.* = @splat(c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722);
+}
 
 /// Sets the colors that draw from the settings' themes: grey in zen, and
 /// with Increase Contrast on, muted text lifted to the text color at 0.8.
 fn buildThemes() void {
     themes = .{ conf.light, conf.dark };
     if (conf.zen) for (&themes) |*th| {
-        inline for (@typeInfo(Theme).@"struct".field_names) |name| {
-            const c = &@field(th, name);
-            if (@TypeOf(c.*) == Rgb) desaturate(c) else for (c) |*k| desaturate(k);
-        }
+        for (settings.all(th)) |*c| desaturate(c);
     };
     if (contrast) for (&themes) |*th| {
         for (&th.muted, th.bg, th.fg) |*m, back, text| m.* = back + 0.8 * (text - back);
@@ -3045,7 +3031,6 @@ fn fadeTheme(w: *Win) void {
 
 /// Reads the settings file and applies it to every window.
 pub fn loadSettings() void {
-    if (conf_path == null) conf_path = settings.path(gpa) catch null;
     // Once the file exists, use the path open() gives it (/tmp is /private/tmp).
     if (conf_path != null and files.exists(conf_path.?)) {
         if (files.absolute(gpa, conf_path.?)) |abs| {
@@ -3056,17 +3041,14 @@ pub fn loadSettings() void {
     const p = conf_path orelse return;
     const old_lh = lh;
     const old_themes = themes;
-    const old_look = conf.look;
     const old_conf = conf;
-    const old_zen = conf.zen;
-    const old_late = conf.late_night;
     conf_saved = settings.load(gpa, p);
     conf = conf_saved;
     if (conf.late_night) conf.lateNight();
     const fonts_changed = old_conf.size != conf.size or old_conf.spacing != conf.spacing or !std.mem.eql(u8, old_conf.font(), conf.font());
     buildThemes();
     // A theme or appearance pick crossfades, and so does Late-Night; zen's own change doesn't.
-    const crossfade = conf.late_night != old_late or conf.look != old_look or (conf.zen == old_zen and !std.meta.eql(old_themes, themes));
+    const crossfade = conf.late_night != old_conf.late_night or conf.look != old_conf.look or (conf.zen == old_conf.zen and !std.meta.eql(old_themes, themes));
     side_w = conf.sidebar_width;
     conf_stamp = files.stamp(p);
     if (font == null or fonts_changed) setFont();
@@ -3124,12 +3106,18 @@ pub fn loadSettings() void {
     }
 }
 
+fn isConf(path: ?[]const u8) bool {
+    const p = path orelse return false;
+    const c = conf_path orelse return false;
+    return std.mem.eql(u8, p, c);
+}
+
 /// Rewrites one line of the settings file and applies it.
 fn store(key: []const u8, value: []const u8) void {
     const p = conf_path orelse return;
     settings.store(gpa, p, &conf_saved, key, value) catch return alert("Couldn't write the settings file.", p);
     loadSettings();
-    for (docs.items) |d| if (d.file.path != null and std.mem.eql(u8, d.file.path.?, conf_path.?)) checkOutside(d);
+    for (docs.items) |d| if (isConf(d.file.path)) checkOutside(d);
 }
 
 // ---- the settings file, watched ----
@@ -3194,7 +3182,7 @@ fn confChanged(_: ?*anyopaque) callconv(.c) void {
 fn recheckSettings() void {
     const p = conf_path orelse return;
     const now = files.stamp(p) orelse return;
-    if (!sameStamp(now, conf_stamp)) loadSettings();
+    if (!std.meta.eql(@as(?files.Stamp, now), conf_stamp)) loadSettings();
 }
 
 pub fn openSettings() void {
@@ -3248,10 +3236,6 @@ pub fn toggleLateNight() void {
     store("late-night", if (conf.late_night) "false" else "true");
 }
 
-fn desaturate(c: *Rgb) void {
-    c.* = @splat(c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722);
-}
-
 /// Makes built-in theme `i` the one for its own mode, light or dark.
 pub fn pickScheme(i: usize) void {
     if (i >= settings.schemes.len or conf.late_night) return;
@@ -3261,7 +3245,7 @@ pub fn pickScheme(i: usize) void {
 
 /// View > Theme > Appearance: 0 Auto, 1 Light, 2 Dark.
 pub fn pickLook(i: usize) void {
-    if (i > 2 or conf.late_night) return;
+    if (i >= look_items.len or conf.late_night) return;
     store("appearance", @tagName(@as(settings.Look, @enumFromInt(i))));
 }
 
@@ -3787,13 +3771,7 @@ fn center(d: *Doc) void {
     reveal(d);
 }
 
-/// Redraws `d`'s window, which shows the dot of unsaved changes in its
-/// close button when any of its cards has some.
-fn refresh(d: *Doc) void {
-    // Typewriter mode recenters when the caret moves or the text changes,
-    // but not after a wheel scroll alone.
-    if (conf.typewriter and (d.center_at != d.file.ed.cur or d.file.ed.buf.touched != std.math.maxInt(usize))) reveal(d);
-    d.center_at = d.file.ed.cur;
+fn trackFocus(d: *Doc) void {
     if (conf.focus != .off) {
         const b = &d.file.ed.buf;
         const text = d.file.ed.text();
@@ -3830,23 +3808,36 @@ fn refresh(d: *Doc) void {
         } else d.focus_new[1] = end;
     }
     d.focus_on = conf.focus != .off;
-    msg(void, d.win.view, "setNeedsDisplay:", .{true});
-    if (d.file.path == null) {
-        if (d.file.ed.buf.changes != d.file.draft_armed) {
-            d.file.draft_armed = d.file.ed.buf.changes;
-            laterDrafts(d.win.view);
-        }
-        // An untitled file is renamed after its first line once typing
-        // pauses, or at once when the caret leaves that line, as Return
-        // does, so its tab doesn't change width with each letter.
-        var nb: [48]u8 = undefined;
-        if (!std.mem.eql(u8, untitledName(&d.file.ed, &nb), d.name())) {
-            const row = nameRow(&d.file.ed);
-            const sel = objc.sel_registerName("retitle:");
-            msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:selector:object:", .{ d.win.view, sel, @as(Id, null) });
-            if (row != null and row.? != d.file.ed.buf.lineOf(d.file.ed.cur)) retitle(d) else msg(void, d.win.view, "performSelector:withObject:afterDelay:", .{ sel, @as(Id, null), @as(f64, 0.6) });
-        }
+}
+
+fn untitledChanged(d: *Doc) void {
+    if (d.file.ed.buf.changes != d.file.draft_armed) {
+        d.file.draft_armed = d.file.ed.buf.changes;
+        laterDrafts(d.win.view);
     }
+    // An untitled file is renamed after its first line once typing
+    // pauses, or at once when the caret leaves that line, as Return
+    // does, so its tab doesn't change width with each letter.
+    var nb: [48]u8 = undefined;
+    if (!std.mem.eql(u8, untitledName(&d.file.ed, &nb), d.name())) {
+        const row = nameRow(&d.file.ed);
+        const sel = objc.sel_registerName("retitle:");
+        msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:selector:object:", .{ d.win.view, sel, @as(Id, null) });
+        if (row != null and row.? != d.file.ed.buf.lineOf(d.file.ed.cur)) retitle(d) else msg(void, d.win.view, "performSelector:withObject:afterDelay:", .{ sel, @as(Id, null), @as(f64, 0.6) });
+    }
+}
+
+/// Redraws `d`'s window, which shows the dot of unsaved changes in its
+/// close button when any of its cards has some.
+fn refresh(d: *Doc) void {
+    // Typewriter mode recenters when the caret moves or the text changes,
+    // but not after a wheel scroll alone.
+    if (conf.typewriter and (d.center_at != d.file.ed.cur or d.center_changes != d.file.ed.buf.changes)) reveal(d);
+    d.center_at = d.file.ed.cur;
+    d.center_changes = d.file.ed.buf.changes;
+    trackFocus(d);
+    msg(void, d.win.view, "setNeedsDisplay:", .{true});
+    if (d.file.path == null) untitledChanged(d);
     preview.update(d, &themes, isDark(d.win));
     var edited = false;
     for (docs.items) |o| if (o.win == d.win and o.dirty()) {
@@ -4091,6 +4082,8 @@ fn lineKinds(d: *Doc, i: usize, l: []const u8, walk: *usize) ?[]const syntax.Kin
     } else _ = syntax.lexLine(d.file.lang, l, d.states.items[i], out);
     return out;
 }
+
+// ---- untitled names ----
 
 /// The first line with words on it, which names an untitled file.
 fn nameRow(ed: *const Editor) ?usize {

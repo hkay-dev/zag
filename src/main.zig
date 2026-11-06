@@ -262,7 +262,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     // From a terminal, quick open and the sidebar use the folder Zag started
     // in. Finder starts apps in /, so there the last folder or home is used.
     if (files.cwd(view.gpa)) |dir| {
-        if (dir.len > 1) view.root = dir else view.gpa.free(dir);
+        if (dir.len > 1) view.adoptRoot(dir) else view.gpa.free(dir);
     }
 
     const d = objc.ClassBuilder.begin("NSObject", "ZeApp");
