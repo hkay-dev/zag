@@ -13,6 +13,14 @@ var source: Id = null;
 var path: Id = null;
 var theme: settings.Theme = undefined;
 var fade = false;
+/// The doc and edit count `source` was last made from; `update` skips the doc until either changes.
+var seen_id: u32 = std.math.maxInt(u32);
+var seen_changes: u64 = 0;
+/// Fonts and paragraph styles don't depend on the theme, so each is made once and kept.
+/// `fonts[block][traits]`: body, three heading sizes, mono; each with italic and bold added.
+var fonts: [5][4]Id = @splat(@splat(null));
+/// Indexed by `list | quote << 1 | heading_gap << 2`.
+var styles: [8]Id = @splat(null);
 
 fn color(rgb: settings.Rgb) Id {
     return msg(Id, objc.class("NSColor"), "colorWithSRGBRed:green:blue:alpha:", .{ rgb[0], rgb[1], rgb[2], @as(f64, 1) });
@@ -66,13 +74,24 @@ pub fn update(d: anytype, conf: *const settings.Settings) void {
     const active = std.mem.eql(u8, objc.utf8(path), d.path orelse "");
     const appearance = objc.utf8(msg(Id, msg(Id, d.view, "effectiveAppearance", .{}), "name", .{}));
     const th = if (std.mem.indexOf(u8, appearance, "Dark") != null) &conf.dark else &conf.light;
-    const bytes = d.ed.text();
-    if (std.meta.eql(theme, th.*) and (!active or d.ed.buf.touched == std.math.maxInt(usize) or std.mem.eql(u8, objc.utf8(source), bytes))) return;
-    if (active) {
-        msg(void, source, "release", .{});
-        source = msg(Id, objc.str(bytes), "retain", .{});
+    const same_theme = std.meta.eql(theme, th.*);
+    // A caret move or scroll changes nothing: `changes` counts every edit, undo and redo.
+    if (same_theme and (!active or (seen_id == d.id and seen_changes == d.ed.buf.changes))) return;
+    var edited = !same_theme;
+    if (active and (seen_id != d.id or seen_changes != d.ed.buf.changes)) {
+        const first = seen_id != d.id;
+        seen_id = d.id;
+        seen_changes = d.ed.buf.changes;
+        const bytes = d.ed.text();
+        // The first look at a doc (the preview just opened, or another tab came back) compares once.
+        if (!first or !std.mem.eql(u8, objc.utf8(source), bytes)) {
+            msg(void, source, "release", .{});
+            source = msg(Id, objc.str(bytes), "retain", .{});
+            edited = true;
+        }
     }
-    fade = fade or !std.meta.eql(theme, th.*);
+    if (!edited) return;
+    fade = fade or !same_theme;
     theme = th.*;
     msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:", .{target});
     msg(void, target, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("render:"), @as(Id, null), @as(f64, 0.15) });
@@ -89,6 +108,7 @@ pub fn toggle(w: Id, name: []const u8, bytes: []const u8, th: *const settings.Th
     }
     owner = w;
     path = msg(Id, objc.str(name), "mutableCopy", .{});
+    seen_id = std.math.maxInt(u32);
     theme = th.*;
     source = msg(Id, objc.str(bytes), "retain", .{});
     const frame: objc.Rect = .{ .w = 620, .h = 700 };
@@ -113,6 +133,34 @@ pub fn toggle(w: Id, name: []const u8, bytes: []const u8, th: *const settings.Th
     render(null, null, null);
     msg(void, window, "orderFront:", .{@as(Id, null)});
 }
+/// The font for block kind `base` (0 body, 1 to 3 headings, 4 mono) with the italic (1) and bold (2) traits.
+fn font(base: usize, traits: usize) Id {
+    const slot = &fonts[base][traits];
+    if (slot.* == null) {
+        const class = objc.class("NSFont");
+        const f = switch (base) {
+            0 => msg(Id, class, "systemFontOfSize:", .{@as(f64, 15)}),
+            1...3 => msg(Id, class, "systemFontOfSize:weight:", .{ @as(f64, if (base == 1) 26 else if (base == 2) 20 else 17), @as(f64, 0.3) }),
+            else => msg(Id, class, "monospacedSystemFontOfSize:weight:", .{ @as(f64, 14), @as(f64, 0) }),
+        };
+        slot.* = msg(Id, if (traits == 0) f else msg(Id, msg(Id, objc.class("NSFontManager"), "sharedFontManager", .{}), "convertFont:toHaveTrait:", .{ f, traits }), "retain", .{});
+    }
+    return slot.*;
+}
+/// The paragraph style for `flags` (list 1, quote 2, space before a heading 4). Never changed after it's made.
+fn style(flags: usize) Id {
+    const slot = &styles[flags];
+    if (slot.* == null) {
+        const p = objc.new("NSMutableParagraphStyle");
+        msg(void, p, "setLineHeightMultiple:", .{@as(f64, 1.35)});
+        msg(void, p, "setParagraphSpacing:", .{@as(f64, if (flags & 1 != 0) 4 else 10)});
+        if (flags & 4 != 0) msg(void, p, "setParagraphSpacingBefore:", .{@as(f64, 18)});
+        if (flags & 3 != 0) msg(void, p, "setHeadIndent:", .{@as(f64, 24)});
+        if (flags & 2 != 0) msg(void, p, "setFirstLineHeadIndent:", .{@as(f64, 24)});
+        slot.* = p;
+    }
+    return slot.*;
+}
 fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     const options = objc.new("NSAttributedStringMarkdownParsingOptions");
     defer msg(void, options, "release", .{});
@@ -121,7 +169,6 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     defer msg(void, parsed, "release", .{});
     const out = objc.new("NSMutableAttributedString");
     defer msg(void, out, "release", .{});
-    const fonts = objc.class("NSFont");
     const key_intent, const key_inline, const key_link = .{ objc.str("NSPresentationIntent"), objc.str("NSInlinePresentationIntent"), objc.str("NSLink") };
     const key_font, const key_color, const key_style, const key_back = .{ objc.str("NSFont"), objc.str("NSColor"), objc.str("NSParagraphStyle"), objc.str("NSBackgroundColor") };
     const fg, const link, const muted, const panel = .{ color(theme.fg), color(theme.kinds[5]), color(theme.muted), color(theme.panel) };
@@ -136,43 +183,38 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
         const identity = msg(usize, intent, "identity", .{});
         const fresh = identity != previous;
         if (fresh and i > 0) msg(void, msg(Id, out, "mutableString", .{}), "appendString:", .{objc.str("\n")});
-        var font = msg(Id, fonts, "systemFontOfSize:", .{@as(f64, 15)});
+        var base: usize = 0;
         var ink = fg;
         const all: Range = .{ .loc = 0, .len = r.len };
-        const paragraph = objc.new("NSMutableParagraphStyle");
-        defer msg(void, paragraph, "release", .{});
-        msg(void, paragraph, "setLineHeightMultiple:", .{@as(f64, 1.35)});
-        msg(void, paragraph, "setParagraphSpacing:", .{@as(f64, 10)});
+        var flags: usize = 0;
         var prefix: Id = null;
         var c = intent;
         while (c != null) : (c = msg(Id, c, "parentIntent", .{})) {
             switch (msg(isize, c, "intentKind", .{})) {
                 1 => {
                     const level = msg(usize, c, "headerLevel", .{});
-                    font = msg(Id, fonts, "systemFontOfSize:weight:", .{ @as(f64, if (level == 1) 26 else if (level == 2) 20 else 17), @as(f64, 0.3) });
-                    if (i > 0) msg(void, paragraph, "setParagraphSpacingBefore:", .{@as(f64, 18)});
+                    base = if (level == 1) 1 else if (level == 2) 2 else 3;
+                    if (i > 0) flags |= 4;
                 },
                 4 => {
-                    msg(void, paragraph, "setParagraphSpacing:", .{@as(f64, 4)});
-                    msg(void, paragraph, "setHeadIndent:", .{@as(f64, 24)});
+                    flags |= 1;
                     const ordered = msg(isize, msg(Id, c, "parentIntent", .{}), "intentKind", .{}) == 2;
                     // stringWithFormat: is variadic, which msg can't pass on arm64.
                     var num: [24]u8 = undefined;
                     if (fresh and prefix == null) prefix = if (ordered) objc.str(std.fmt.bufPrint(&num, "{d}. ", .{msg(isize, c, "ordinal", .{})}) catch "") else objc.str("• ");
                 },
-                5 => { font = msg(Id, fonts, "monospacedSystemFontOfSize:weight:", .{ @as(f64, 14), @as(f64, 0) }); attr(part, key_back, panel, all); },
-                6 => { ink = muted; msg(void, paragraph, "setHeadIndent:", .{@as(f64, 24)}); msg(void, paragraph, "setFirstLineHeadIndent:", .{@as(f64, 24)}); },
+                5 => { base = 4; attr(part, key_back, panel, all); },
+                6 => { ink = muted; flags |= 2; },
                 7 => if (fresh) { prefix = objc.str("────────────────────────"); },
                 else => {},
             }
         }
         const inline_intent = msg(usize, msg(Id, attrs, "objectForKey:", .{key_inline}), "unsignedIntegerValue", .{});
-        if (inline_intent & 4 != 0) font = msg(Id, fonts, "monospacedSystemFontOfSize:weight:", .{ @as(f64, 14), @as(f64, 0) });
-        if (inline_intent & 3 != 0) font = msg(Id, msg(Id, objc.class("NSFontManager"), "sharedFontManager", .{}), "convertFont:toHaveTrait:", .{ font, inline_intent & 3 });
+        if (inline_intent & 4 != 0) base = 4;
         if (msg(Id, attrs, "objectForKey:", .{key_link}) != null) ink = link;
-        attr(part, key_font, font, all);
+        attr(part, key_font, font(base, inline_intent & 3), all);
         attr(part, key_color, ink, all);
-        attr(part, key_style, paragraph, all);
+        attr(part, key_style, style(flags), all);
         msg(void, part, "removeAttribute:range:", .{ key_intent, all });
         if (prefix != null) msg(void, part, "replaceCharactersInRange:withString:", .{ Range{ .loc = 0, .len = 0 }, prefix });
         msg(void, out, "appendAttributedString:", .{part});
@@ -192,7 +234,7 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     }
     msg(void, text, "setBackgroundColor:", .{color(theme.bg)});
     msg(void, window, "setBackgroundColor:", .{color(theme.bg)});
-    msg(void, text, "setLinkTextAttributes:", .{msg(Id, objc.class("NSDictionary"), "dictionaryWithObject:forKey:", .{ color(theme.kinds[5]), objc.str("NSColor") })});
+    msg(void, text, "setLinkTextAttributes:", .{msg(Id, objc.class("NSDictionary"), "dictionaryWithObject:forKey:", .{ link, key_color })});
     msg(void, msg(Id, text, "textStorage", .{}), "setAttributedString:", .{out});
     msg(void, text, "scrollPoint:", .{objc.Point{ .x = position.x, .y = position.y }});
 }
