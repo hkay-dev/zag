@@ -325,12 +325,13 @@ fn glyph(cp: u21, heavy: bool) Fallback {
         if (fallbacks.items[mid].cp < cp) lo = mid + 1 else hi = mid;
     }
     if (lo < fallbacks.items.len and fallbacks.items[lo].cp == cp) return fallbacks.items[lo].fb;
+    fallbacks.ensureUnusedCapacity(gpa, 1) catch return .{ .font = font, .glyph = 0 };
     var fb: Fallback = .{ .font = font, .glyph = 0 };
     const alt = objc.fallbackFont(font, units[0..n]);
     if (alt != null and objc.CTFontGetGlyphsForCharacters(alt, &units, &g, @intCast(n))) {
         fb = .{ .font = alt, .glyph = g[0] };
     } else if (alt != null) objc.CFRelease(alt.?);
-    fallbacks.insert(gpa, lo, .{ .cp = cp, .fb = fb }) catch {};
+    fallbacks.insertAssumeCapacity(lo, .{ .cp = cp, .fb = fb });
     return fb;
 }
 
