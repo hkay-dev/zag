@@ -141,7 +141,7 @@ fn gutCols(d: *const Doc) f64 {
 
 /// The gutter's width once it's done easing; zen has none.
 fn gutter(d: *const Doc) f64 {
-    return if (conf.zen) 0 else d.gut.to * cw;
+    return if (conf.zen) 0 else gutCols(d) * cw;
 }
 
 /// Soft wrap is on, or zen wraps at 80 columns.
@@ -5087,7 +5087,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     const skip: usize = @intFromFloat(@max(@ceil(d.vx / cw), 0));
     const tx = lx + padL(d);
     // Sideways-scrolled text stops at the line numbers rather than running under them.
-    const clip_l = card.x + (tx - card.x) * std.math.clamp(d.gw / (3.5 * cw), 0, 1);
+    const clip_l = card.x + (tx - 0.5 * cw - card.x) * std.math.clamp(d.gw / (3.5 * cw), 0, 1);
     const ox = tx + f(skip) * cw - d.vx;
     // Text stops a whole column inside the same margin on the right as on
     // the left, rather than running into the card's border.
@@ -5331,16 +5331,24 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     const ga = std.math.clamp(d.gw / (3.5 * cw), 0, 1);
     if (ga > 0) {
         const at_line = if (d.mode == .edit) lineOfRow(d, here.row) else std.math.maxInt(usize);
-        k.selected = .{ 0, 0 };
+        const fo = k.focus;
+        k.focus = null;
         for (vis[0..nvis], first..) |v, row| {
             if (v.seg.start != 0) continue;
             var nb: [20]u8 = undefined;
             const num = std.fmt.bufPrint(&nb, "{d}", .{v.line + 1}) catch continue;
-            const ink = mixRgb(th.bg, if (v.line == at_line) mixRgb(th.bg, th.fg, 0.85) else th.muted, ga);
-            k.offset = b.lineStart(v.line);
+            var ink = mixRgb(th.bg, if (v.line == at_line) mixRgb(th.bg, th.fg, 0.85) else th.muted, ga);
+            if (fo) |fc| {
+                const ls = b.lineStart(v.line);
+                const le = ls + b.line(v.line).len;
+                const in_new: f64 = if (fc.new[0] <= le and fc.new[1] > ls) 1 else 0;
+                const in_old: f64 = if (fc.old[0] <= le and fc.old[1] > ls) 1 else 0;
+                ink = mixRgb(th.bg, ink, 1 - fc.amt * (0.78 - 0.78 * (in_new * fc.t + in_old * (1 - fc.t))));
+            }
             _ = k.text(num, null, th, ink, tx - 1.5 * cw - f(num.len) * cw, top_h + f(row) * lh - d.vy + baseline, 0, num.len);
         }
         k.flush();
+        k.focus = fo;
     }
     k.focus = null;
     objc.CGContextRestoreGState(ctx);
