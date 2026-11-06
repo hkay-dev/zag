@@ -2217,6 +2217,7 @@ pub fn newDoc() ?*Doc {
 fn newPane(w: *Win) ?*Doc {
     const d = gpa.create(Doc) catch return null;
     d.* = .{ .ed = Editor.init(gpa, "") catch return null, .id = newId(), .win = w, .window = w.window, .view = w.view };
+    if (conf.focus != .off) d.focus_a.snap(1);
     docs.append(gpa, d) catch return null;
     d.caret = msg(Id, objc.class("CALayer"), "layer", .{});
     msg(void, d.caret, "setCornerRadius:", .{@as(f64, 1)});
