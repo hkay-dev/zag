@@ -76,10 +76,10 @@ Ghostty's terminal core. ze drops all three.
   Unlike md4c, cmark-gfm or WebKit, it adds no library and starts no web process. Release
   `__text` goes from 117,932 to 122,568 bytes (+4,636); the file goes from 222,240 to 223,248
   bytes.
-- **No input methods and no accessibility.** ze is for US English typing on Apple Silicon only.
-  It has no input method support (Chinese, Japanese or accented-letter composing), no VoiceOver
-  or other accessibility support, and none is planned. Harsha set this on 2026-11-05, so new
-  features like the file sidebar can draw their own UI without accessibility hooks.
+- **No input methods.** ze is for US English typing on Apple Silicon only. It has no input
+  method support (Chinese, Japanese or accented-letter composing), and none is planned. Harsha
+  set this on 2026-11-05. VoiceOver came later (zig-editor#1xsq): `access.zig` makes its
+  stand-in elements only when VoiceOver asks for them, so it does no work while VoiceOver is off.
 
 ## Gotchas
 
