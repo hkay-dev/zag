@@ -4855,9 +4855,12 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
         drawIcon(icon(.plus, dark, th), side_w - gap - 30, hy - 10, 20);
         objc.CGContextRestoreGState(ctx);
     }
-    if (root != null and !conf.zen) {
+    // In zen it fades out with the lights, on the same spring.
+    if (root != null and la > 0.01) {
+        if (la < 1) objc.CGContextSetAlpha(ctx, la);
         hoverPill(ctx, th, w.hot_t[0].at(now), if (w.press == 1) down else 0, toggle_x, hy);
         drawIcon(icon(.sidebar, dark, th), toggle_x - 10, hy - 10, 20);
+        if (la < 1) objc.CGContextSetAlpha(ctx, 1);
     }
     drawDrag(w, ctx, th, now);
     // Only the sidebar's strip moves when its rows' highlights are all that does.
