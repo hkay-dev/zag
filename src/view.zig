@@ -218,7 +218,8 @@ var lh: f64 = 22;
 var baseline: f64 = 15;
 var ascii: [2][95]u16 = undefined;
 const Fallback = struct { font: Id, glyph: u16 };
-var fallbacks: std.AutoHashMapUnmanaged(u21, Fallback) = .empty;
+const FallbackEntry = struct { cp: u21, fb: Fallback };
+var fallbacks: std.ArrayList(FallbackEntry) = .empty;
 /// The sidebar's fonts: the system font for file names, a heavier one for
 /// the folder's name and the card's header, and a small one for the line
 /// above the folder. Rows are `side_h` tall, with the baseline that centers
@@ -293,8 +294,7 @@ fn setFont() void {
     path_off = (objc.CTFontGetAscent(path_font) - objc.CTFontGetDescent(path_font)) / 2;
     dropSideLines();
     for (docs.items) |d| dropHead(d);
-    var it = fallbacks.valueIterator();
-    while (it.next()) |fb| if (fb.font != font) objc.CFRelease(fb.font.?);
+    for (fallbacks.items) |e| if (e.fb.font != font) objc.CFRelease(e.fb.font.?);
     fallbacks.clearRetainingCapacity();
     msg(void, msg(Id, objc.class("NSFontManager"), "sharedFontManager", .{}), "setSelectedFont:isMultiple:", .{ font, false });
 }
@@ -318,15 +318,20 @@ fn glyph(cp: u21, heavy: bool) Fallback {
     const n = utf16(cp, &units);
     var g: [2]u16 = .{ 0, 0 };
     if (objc.CTFontGetGlyphsForCharacters(font, &units, &g, @intCast(n)) and g[0] != 0) return .{ .font = font, .glyph = g[0] };
-    const e = fallbacks.getOrPut(gpa, cp) catch return .{ .font = font, .glyph = 0 };
-    if (!e.found_existing) {
-        e.value_ptr.* = .{ .font = font, .glyph = 0 };
-        const fb = objc.fallbackFont(font, units[0..n]);
-        if (fb != null and objc.CTFontGetGlyphsForCharacters(fb, &units, &g, @intCast(n))) {
-            e.value_ptr.* = .{ .font = fb, .glyph = g[0] };
-        } else if (fb != null) objc.CFRelease(fb.?);
+    var lo: usize = 0;
+    var hi = fallbacks.items.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (fallbacks.items[mid].cp < cp) lo = mid + 1 else hi = mid;
     }
-    return e.value_ptr.*;
+    if (lo < fallbacks.items.len and fallbacks.items[lo].cp == cp) return fallbacks.items[lo].fb;
+    var fb: Fallback = .{ .font = font, .glyph = 0 };
+    const alt = objc.fallbackFont(font, units[0..n]);
+    if (alt != null and objc.CTFontGetGlyphsForCharacters(alt, &units, &g, @intCast(n))) {
+        fb = .{ .font = alt, .glyph = g[0] };
+    } else if (alt != null) objc.CFRelease(alt.?);
+    fallbacks.insert(gpa, lo, .{ .cp = cp, .fb = fb }) catch {};
+    return fb;
 }
 
 /// Batches glyphs that share a font and color into one draw call.
