@@ -17,8 +17,8 @@ var fade = false;
 fn color(rgb: settings.Rgb) Id {
     return msg(Id, objc.class("NSColor"), "colorWithSRGBRed:green:blue:alpha:", .{ rgb[0], rgb[1], rgb[2], @as(f64, 1) });
 }
-fn attr(s: Id, key: []const u8, value: Id, r: Range) void {
-    msg(void, s, "addAttribute:value:range:", .{ objc.str(key), value, r });
+fn attr(s: Id, key: Id, value: Id, r: Range) void {
+    msg(void, s, "addAttribute:value:range:", .{ key, value, r });
 }
 fn closed(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:", .{target});
@@ -122,6 +122,9 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     const out = objc.new("NSMutableAttributedString");
     defer msg(void, out, "release", .{});
     const fonts = objc.class("NSFont");
+    const key_intent, const key_inline, const key_link = .{ objc.str("NSPresentationIntent"), objc.str("NSInlinePresentationIntent"), objc.str("NSLink") };
+    const key_font, const key_color, const key_style, const key_back = .{ objc.str("NSFont"), objc.str("NSColor"), objc.str("NSParagraphStyle"), objc.str("NSBackgroundColor") };
+    const fg, const link, const muted, const panel = .{ color(theme.fg), color(theme.kinds[5]), color(theme.muted), color(theme.panel) };
     var i: usize = 0;
     var previous: usize = 0;
     while (i < msg(usize, parsed, "length", .{})) {
@@ -129,12 +132,12 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
         const attrs = msg(Id, parsed, "attributesAtIndex:effectiveRange:", .{ i, &r });
         const part = msg(Id, msg(Id, parsed, "attributedSubstringFromRange:", .{r}), "mutableCopy", .{});
         defer msg(void, part, "release", .{});
-        const intent = msg(Id, attrs, "objectForKey:", .{objc.str("NSPresentationIntent")});
+        const intent = msg(Id, attrs, "objectForKey:", .{key_intent});
         const identity = msg(usize, intent, "identity", .{});
         const fresh = identity != previous;
         if (fresh and i > 0) msg(void, msg(Id, out, "mutableString", .{}), "appendString:", .{objc.str("\n")});
         var font = msg(Id, fonts, "systemFontOfSize:", .{@as(f64, 15)});
-        var ink = color(theme.fg);
+        var ink = fg;
         const all: Range = .{ .loc = 0, .len = r.len };
         const paragraph = objc.new("NSMutableParagraphStyle");
         defer msg(void, paragraph, "release", .{});
@@ -157,20 +160,20 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
                     var num: [24]u8 = undefined;
                     if (fresh and prefix == null) prefix = if (ordered) objc.str(std.fmt.bufPrint(&num, "{d}. ", .{msg(isize, c, "ordinal", .{})}) catch "") else objc.str("• ");
                 },
-                5 => { font = msg(Id, fonts, "monospacedSystemFontOfSize:weight:", .{ @as(f64, 14), @as(f64, 0) }); attr(part, "NSBackgroundColor", color(theme.panel), all); },
-                6 => { ink = color(theme.muted); msg(void, paragraph, "setHeadIndent:", .{@as(f64, 24)}); msg(void, paragraph, "setFirstLineHeadIndent:", .{@as(f64, 24)}); },
+                5 => { font = msg(Id, fonts, "monospacedSystemFontOfSize:weight:", .{ @as(f64, 14), @as(f64, 0) }); attr(part, key_back, panel, all); },
+                6 => { ink = muted; msg(void, paragraph, "setHeadIndent:", .{@as(f64, 24)}); msg(void, paragraph, "setFirstLineHeadIndent:", .{@as(f64, 24)}); },
                 7 => if (fresh) { prefix = objc.str("────────────────────────"); },
                 else => {},
             }
         }
-        const inline_intent = msg(usize, msg(Id, attrs, "objectForKey:", .{objc.str("NSInlinePresentationIntent")}), "unsignedIntegerValue", .{});
+        const inline_intent = msg(usize, msg(Id, attrs, "objectForKey:", .{key_inline}), "unsignedIntegerValue", .{});
         if (inline_intent & 4 != 0) font = msg(Id, fonts, "monospacedSystemFontOfSize:weight:", .{ @as(f64, 14), @as(f64, 0) });
-        font = msg(Id, msg(Id, objc.class("NSFontManager"), "sharedFontManager", .{}), "convertFont:toHaveTrait:", .{ font, inline_intent & 3 });
-        if (msg(Id, attrs, "objectForKey:", .{objc.str("NSLink")}) != null) ink = color(theme.kinds[5]);
-        attr(part, "NSFont", font, all);
-        attr(part, "NSColor", ink, all);
-        attr(part, "NSParagraphStyle", paragraph, all);
-        msg(void, part, "removeAttribute:range:", .{ objc.str("NSPresentationIntent"), all });
+        if (inline_intent & 3 != 0) font = msg(Id, msg(Id, objc.class("NSFontManager"), "sharedFontManager", .{}), "convertFont:toHaveTrait:", .{ font, inline_intent & 3 });
+        if (msg(Id, attrs, "objectForKey:", .{key_link}) != null) ink = link;
+        attr(part, key_font, font, all);
+        attr(part, key_color, ink, all);
+        attr(part, key_style, paragraph, all);
+        msg(void, part, "removeAttribute:range:", .{ key_intent, all });
         if (prefix != null) msg(void, part, "replaceCharactersInRange:withString:", .{ Range{ .loc = 0, .len = 0 }, prefix });
         msg(void, out, "appendAttributedString:", .{part});
         previous = identity;
