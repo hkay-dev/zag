@@ -897,6 +897,7 @@ fn scenery(d: *const Doc, now: f64) bool {
         (d.pick_live and (now < d.rows_t0 + row_lag * 5 + row_fade or now < d.pick_t0 + xfade_time)) or
         !d.pop.settled() or now < d.prev_t0 + fade_time or now < d.stag_t0 + stag_cap + fade_time or (d.flash_n > 0 and now < d.flash_t0 + flash_hold + flash_time) or
         now < d.load_t + loadDur(d) or (d.had_sel and now < d.sel_t0 + fade_time) or d.bar.moving(now) or
+        d.sel_out.moving(now) or
         now < d.fresh_t0 + fade_time;
 }
 
@@ -1110,6 +1111,12 @@ const Doc = struct {
     focus_on: bool = false,
     had_sel: bool = false,
     sel_t0: f64 = 0,
+    /// The selection as last drawn and the buffer's change count then: when the
+    /// selection collapses with the text untouched, `sel_last` fades out on
+    /// `sel_out` (1 to 0) instead of cutting.
+    sel_last: [2]usize = .{ 0, 0 },
+    sel_chg: u64 = 0,
+    sel_out: Tween = .{ .dur = fade_time, .from = 0, .to = 0 },
     /// Height of the quick open list.
     panel: Tween = .{ .dur = panel_time },
     /// The quick open list's picked row highlight, which springs from row to
@@ -1649,6 +1656,7 @@ fn install(d: *Doc, pg: Page) void {
     d.xs.snap(d.sx);
     d.band_on = false;
     d.had_sel = false;
+    d.sel_out.snap(0);
     d.snap = true;
     d.load_t = CACurrentMediaTime();
     d.rise = pg.fresh;
@@ -4975,10 +4983,23 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
 
     // A new selection fades in.
     const has_sel = s[0] != s[1];
-    if (has_sel and !d.had_sel) d.sel_t0 = now;
+    const was_sel = d.had_sel;
+    if (has_sel and !was_sel) d.sel_t0 = now;
     d.had_sel = has_sel;
     const fade = std.math.clamp((now - d.sel_t0) / fade_time, 0, 1);
     const sel_a = 1 - (1 - fade) * (1 - fade) * (1 - fade);
+    if (d.ed.buf.changes != d.sel_chg) d.sel_out.snap(0);
+    // A selection that collapses with the text untouched (a click, an arrow, Escape)
+    // fades out where it was; an edit under it cuts, and a new selection replaces it.
+    if (has_sel) {
+        d.sel_out.snap(0);
+        d.sel_last = s;
+    } else if (was_sel and d.ed.buf.changes == d.sel_chg) {
+        d.sel_out.snap(sel_a);
+        d.sel_out.aim(0, now);
+    }
+    d.sel_chg = d.ed.buf.changes;
+    const out_a = d.sel_out.at(now);
 
     // The find indicator marks the current match: the selection while it is a
     // match of the search, or the selection a find jump just made.
@@ -5048,6 +5069,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             }
         }.fill;
         if (has_sel) span(ctx, th.sel, sel_a, s, ls, l, sg, ox, skip, y);
+        if (out_a > 0) span(ctx, th.sel, out_a, d.sel_last, ls, l, sg, ox, skip, y);
         if (flash_a > 0) for (d.flash[0..d.flash_n]) |fr| span(ctx, th.caret, flash_a, fr, ls, l, sg, ox, skip, y);
         if (pills.len > 0) {
             // Opening find on prefilled text fades the matches in, the nearest first.
