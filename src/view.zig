@@ -5021,7 +5021,10 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     const ph = d.panel.at(now);
     const closing = listing(d) == null;
     // The rows and highlight stay as they were while the panel slides shut.
-    if (closing and ph <= 0.5) d.pick_live = false;
+    if (closing and ph <= 0.5) {
+        d.pick_live = false;
+        d.pick_s.snap(d.pick_s.to);
+    }
     if (ph > 0.5 and (d.palette or d.list != null)) {
         const px = card.x + 6;
         const pw = card.w - 12;
@@ -5052,7 +5055,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         if (d.npicks > 0 or (crossing and d.prev_n > 0)) {
             const keep: f64 = if (d.npicks > 0) 1 else 1 - swap;
             selFill(ctx, th, dark, win_key, keep, px + 6, by - ph + ppad + d.pick_s.step(now), pw - 12, prow, 6);
-        }
+        } else d.pick_s.snap(d.pick_s.to);
         const shown = if (crossing) @max(d.npicks, d.prev_n) else d.npicks;
         for (0..shown) |i| {
             const y = by - ph + ppad + f(i) * prow;
