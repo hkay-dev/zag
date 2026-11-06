@@ -879,7 +879,7 @@ fn loadDur(d: *const Doc) f64 {
 /// list still has frames to draw.
 fn scenery(d: *const Doc, now: f64) bool {
     const stretched = d.relax and (d.ov[0] != 0 or d.ov[1] != 0);
-    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or now < d.focus_t0 + focus_time or d.panel.moving(now) or d.lit.moving(now) or
+    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.band_a.moving(now) or now < d.focus_t0 + focus_time or d.panel.moving(now) or d.lit.moving(now) or
         d.prompt_t.moving(now) or d.pbar.moving(now) or now < d.shake_t0 + shake_time or now < d.card_shake_t0 + shake_time or d.hint.moving(now) or (d.blank_t0 >= 0 and now < d.blank_t0 + hint_delay) or
         d.plus_t.moving(now) or !d.pick_s.settled() or tabsMoving(d, now) or
         (d.pick_live and (now < d.rows_t0 + row_lag * 5 + row_fade or now < d.pick_t0 + xfade_time)) or
@@ -1080,6 +1080,8 @@ const Doc = struct {
     /// The caret line's band, in page coordinates.
     band: Tween = .{ .dur = caret_time },
     band_on: bool = false,
+    /// The band's opacity: it fades out while a prompt is open.
+    band_a: Tween = .{ .dur = panel_time, .from = 1, .to = 1 },
     /// Focus mode's lit span, the one it's fading from, and when the fade began.
     focus_new: [2]usize = .{ 0, 0 },
     focus_old: [2]usize = .{ 0, 0 },
@@ -4863,7 +4865,9 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     const band_on = d.mode == .edit;
     if (band_on and d.band_on) d.band.aim(f(here.row) * lh, now) else d.band.snap(f(here.row) * lh);
     d.band_on = band_on;
-    if (band_on) fill(ctx, th.line, lx, top_h + d.band.at(now) - d.vy, card.w, lh);
+    d.band_a.aim(if (band_on) 1 else 0, now);
+    const band_alpha = d.band_a.at(now);
+    if (band_alpha > 0) fillA(ctx, th.line, band_alpha, lx, top_h + d.band.at(now) - d.vy, card.w, lh);
     objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = ox + f(cols) * cw - card.x, .h = card.h });
 
     // A new selection fades in.
