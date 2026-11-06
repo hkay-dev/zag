@@ -1004,6 +1004,8 @@ const Page = struct {
     drafted: u64 = 0,
     /// Just read from disk, so showing it rises in; set by the loaders.
     fresh: bool = false,
+    /// Its sidebar row's unsaved dot, 0 to 1.
+    dot: Tween = .{ .dur = fade_time },
 
     /// Closing its tab: an untitled file's draft goes too.
     fn deinit(p: *Page) void {
@@ -1054,6 +1056,8 @@ const Doc = struct {
     plus_down: Tween = .{ .dur = press_time },
     /// Absolute path, or null while untitled.
     path: ?[:0]u8 = null,
+    /// Its sidebar row's unsaved dot, 0 to 1; goes with the file between pages.
+    dot: Tween = .{ .dur = fade_time },
     /// While untitled, where its draft is kept; see `Page.draft`.
     draft: ?[:0]u8 = null,
     drafted: u64 = 0,
@@ -1620,6 +1624,7 @@ fn install(d: *Doc, pg: Page) void {
     d.id = pg.id;
     d.draft = pg.draft;
     d.drafted = pg.drafted;
+    d.dot = pg.dot;
     d.center_at = std.math.maxInt(usize);
     clearSyntax(d);
     d.vfirst.clearRetainingCapacity();
@@ -1679,7 +1684,7 @@ fn tabDraft(d: *const Doc, j: usize) ?[]const u8 {
 
 /// The file on show as a page, for moving it; the card still points at it.
 fn asPage(d: *const Doc) Page {
-    return .{ .ed = d.ed, .path = d.path, .lang = d.lang, .stamp = d.stamp, .sx = d.sx, .sy = d.sy, .id = d.id, .draft = d.draft, .drafted = d.drafted };
+    return .{ .ed = d.ed, .path = d.path, .lang = d.lang, .stamp = d.stamp, .sx = d.sx, .sy = d.sy, .id = d.id, .draft = d.draft, .drafted = d.drafted, .dot = d.dot };
 }
 
 fn tabPath(d: *const Doc, j: usize) ?[]const u8 {
@@ -4104,13 +4109,27 @@ fn panelRow(ctx: Id, d: *const Doc, th: *const Theme, p: usize, left: f64, right
     _ = rowText(ctx, path[0..slash], panel_small, dim, left + nw + 8, y, right - left - nw - 8);
 }
 
-/// Whether this window holds `rel` with unsaved changes, in any card.
-fn rowDirty(w: *const Win, rel: []const u8) bool {
+/// How much of `rel`'s unsaved dot shows (0 to 1), from whichever card holds it.
+fn rowDot(w: *const Win, rel: []const u8, now: f64) f64 {
     for (docs.items) |d| if (d.win == w) {
-        if (d.path) |p| if (relOf(p)) |r| if (std.mem.eql(u8, r, rel)) return d.ed.buf.dirty();
-        for (d.pages.items) |pg| if (pg.path) |p| if (relOf(p)) |r| if (std.mem.eql(u8, r, rel)) return pg.ed.buf.dirty();
+        if (d.path) |p| if (relOf(p)) |r| if (std.mem.eql(u8, r, rel)) return std.math.clamp(d.dot.at(now), 0, 1);
+        for (d.pages.items) |pg| if (pg.path) |p| if (relOf(p)) |r| if (std.mem.eql(u8, r, rel)) return std.math.clamp(pg.dot.at(now), 0, 1);
     };
-    return false;
+    return 0;
+}
+
+/// Aims each file's dot at its unsaved state. True while any is fading.
+fn sideDotsBusy(w: *const Win, now: f64) bool {
+    var busy = false;
+    for (docs.items) |d| if (d.win == w) {
+        d.dot.aim(if (d.path != null and d.ed.buf.dirty()) 1 else 0, now);
+        busy = busy or d.dot.moving(now);
+        for (d.pages.items) |*pg| {
+            pg.dot.aim(if (pg.path != null and pg.ed.buf.dirty()) 1 else 0, now);
+            busy = busy or pg.dot.moving(now);
+        }
+    };
+    return busy;
 }
 
 /// `p` with the home folder written as ~.
@@ -4346,7 +4365,7 @@ fn selFill(ctx: Id, th: *const Theme, dark: bool, key: bool, fade: f64, x: f64, 
 /// `turn` is how far a folding folder's chevron has turned, 0 to 1. The file
 /// on show in the focused card has its name in bold, which fades in as the
 /// selection's highlight arrives and out as it leaves.
-fn drawRow(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, i: usize, y: f64, turn: ?f64) void {
+fn drawRow(w: *Win, ctx: Id, th: *const Theme, dark: bool, i: usize, y: f64, turn: ?f64) void {
     const row = tree.rows.items[i];
     const s = side_icon;
     const now = CACurrentMediaTime();
@@ -4401,15 +4420,18 @@ fn drawRow(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, i: usize, y:
         nw += (bw - nw) * bp;
     }
     if (lift > 0.01) objc.CGContextRestoreGState(ctx);
-    if (!row.dir and rowDirty(w, row.rel)) _ = k.text(" •", null, th, th.caret, nx + nw, y + side_base, 0, 2);
+    const da = if (row.dir) 0 else rowDot(w, row.rel, now);
+    if (da > 0.001) {
+        if (side_dot == null) side_dot = uiLine(" •", font, side_w);
+        _ = drawLineA(ctx, side_dot, th.caret, da, nx + nw, y + side_base);
+    }
 }
 
 /// The folder's name pinned at the top, then a row per file and open
 /// folder down to the window's bottom. The open folders holding the rows
 /// at the top pin under the name, and the next folder pushes them up.
 /// `fade` is the sidebar's alpha while it slides.
-fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, bg: Rgb, fade: f64, now: f64) void {
-    k.flush();
+fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, fade: f64, now: f64) void {
     const rows = tree.rows.items;
     const lt = listTop();
     const full_h = msg(Rect, w.view, "bounds", .{}).h;
@@ -4515,8 +4537,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
             objc.CGContextSaveGState(ctx);
             objc.CGContextClipToRect(ctx, .{ .y = lt + f(v.at + 1) * side_h - sy - sh, .w = side_w, .h = f(v.n) * side_h - v.off });
             objc.CGContextSetAlpha(ctx, fade * v.p);
-            drawRow(w, ctx, th, k, dark, i, y, null);
-            k.flush();
+            drawRow(w, ctx, th, dark, i, y, null);
             objc.CGContextRestoreGState(ctx);
             continue;
         }
@@ -4524,7 +4545,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
         for (vs[0..vn]) |v| if (v.at == i) {
             turn = v.p;
         };
-        drawRow(w, ctx, th, k, dark, i, y, turn);
+        drawRow(w, ctx, th, dark, i, y, turn);
     }
 
     // Pinned folders, each held up by the end of its rows, the outer ones
@@ -4545,10 +4566,9 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
         for (vs[0..vn]) |v| if (v.at == a) {
             turn = v.p;
         };
-        drawRow(w, ctx, th, k, dark, a, y, turn);
+        drawRow(w, ctx, th, dark, a, y, turn);
         low = @max(low, y + side_h);
     }
-    k.flush();
     // A hairline under whatever is pinned, once rows pass under it.
     const shade = std.math.clamp(sy / side_h, 0, 1);
     if (shade > 0) fillA(ctx, th.fg, 0.08 * shade, 12, low - 1, side_w - 24, 1);
@@ -4560,8 +4580,12 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
 /// the font changes; drawing one costs no layout.
 var side_head: Id = null;
 var side_lines: std.ArrayList(Id) = .empty;
+/// The unsaved dot after a file's name, one line shared by every row.
+var side_dot: Id = null;
 
 fn dropSideLines() void {
+    if (side_dot) |l| objc.CFRelease(l);
+    side_dot = null;
     for (wins.items) |w| {
         if (w.bold) |l| objc.CFRelease(l);
         if (w.bold_old) |l| objc.CFRelease(l);
@@ -4754,7 +4778,9 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
         w.hot_t[0].moving(now) or
         w.pv_a.moving(now) or w.ghost_a.moving(now) or w.menu_a.moving(now) or w.fly != null or
         !w.lift.settled() or w.key_a.moving(now) or !side_stretch.settled() or !w.z.settled();
-    const side_busy = w.side_t.moving(now) or foldsBusy(now) or !w.sel.settled() or w.sel_a.moving(now) or w.hot_t[1].moving(now) or !w.hov.settled() or w.hov_a.moving(now);
+    const dots_busy = sideDotsBusy(w, now) and shown;
+    const side_busy = w.side_t.moving(now) or foldsBusy(now) or !w.sel.settled() or w.sel_a.moving(now) or w.hot_t[1].moving(now) or !w.hov.settled() or w.hov_a.moving(now)
+        or dots_busy;
     for (w.pv) |s| busy = busy or !s.settled();
     busy = busy or w.press_t.moving(now);
     const down = w.press_t.at(now);
@@ -4791,13 +4817,12 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     // The sidebar, and the buttons by the traffic lights, each with a soft
     // highlight under the mouse.
     const hy = gap + head_h / 2;
-    var k: Ink = .{ .ctx = ctx };
     if (slid > 0.002 and root != null) {
         objc.CGContextSaveGState(ctx);
         objc.CGContextClipToRect(ctx, .{ .w = side_w * slid, .h = r.h });
         objc.CGContextTranslateCTM(ctx, side_w * (slid - 1), 0);
         if (slid < 1) objc.CGContextSetAlpha(ctx, slid * slid);
-        drawSide(w, ctx, th, &k, dark, key, chrome(th, dark, w.z.x), if (slid < 1) slid * slid else 1, now);
+        drawSide(w, ctx, th, dark, key, chrome(th, dark, w.z.x), if (slid < 1) slid * slid else 1, now);
         hoverPill(ctx, th, w.hot_t[1].at(now), if (w.press == 2) down else 0, side_w - gap - 20, hy);
         drawIcon(icon(.plus, dark, th), side_w - gap - 30, hy - 10, 20);
         objc.CGContextRestoreGState(ctx);
