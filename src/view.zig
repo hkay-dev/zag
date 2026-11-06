@@ -5417,7 +5417,9 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // when it's over, and the fade out takes it from there.
     if (d.bar.to == 1 and !d.busy) {
         const left = @max(d.bar_t0 + bar_hold - now, 0) + 0.02;
-        msg(void, d.view, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("barHold:"), @as(Id, null), left });
+        const sel = objc.sel_registerName("barHold:");
+        msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:selector:object:", .{ d.view, sel, @as(Id, null) });
+        msg(void, d.view, "performSelector:withObject:afterDelay:", .{ sel, @as(Id, null), left });
     }
 }
 
