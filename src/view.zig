@@ -932,11 +932,18 @@ fn tick(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
     const now = CACurrentMediaTime();
     if (w.busy) {
+        w.hov_stale = true;
         if (w.part) {
             for (docs.items) |d| if (d.win == w) moveCaret(d, now);
             return redrawSide(w);
         }
         return msg(void, self, "setNeedsDisplay:", .{true});
+    }
+    // Tabs or rows that slid under a still mouse: look again once, as
+    // the motion ends.
+    if (w.hov_stale) {
+        w.hov_stale = false;
+        hoverNow(w);
     }
     var gliding = false;
     for (docs.items) |d| if (d.win == w) {
@@ -1270,6 +1277,9 @@ const Win = struct {
     focus: *Doc,
     /// The last draw had scenery still moving.
     busy: bool = false,
+    /// Motion ran since the hover was last resolved, so `tick` looks it up
+    /// again when the motion ends.
+    hov_stale: bool = false,
     /// Only the sidebar's strip has frames to draw, so `tick` redraws just that.
     part: bool = false,
     /// How far the sidebar is scrolled.
@@ -4314,6 +4324,7 @@ fn startFold(i: usize) void {
     var e = at + 1;
     while (e < rows.len and rows[e].depth > rows[at].depth) e += 1;
     fo.n = e - at - 1;
+    for (wins.items) |w| hoverNow(w);
 }
 
 /// Shuts folder `o` for good: the tree drops its rows, and the other
@@ -4324,6 +4335,7 @@ fn finishFold(o: *Fold) void {
     rebuildTree();
     const now = CACurrentMediaTime();
     for (&folds) |*x| if (x != o) refindFold(x, now);
+    for (wins.items) |w| hoverNow(w);
     refreshAll();
 }
 
@@ -6445,7 +6457,12 @@ fn resizeSide(w: *Win, x: f64) void {
 /// whichever card it's over.
 fn mouseMoved(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
-    const p = local(self, ev);
+    hoverAt(w, local(self, ev));
+}
+
+/// Lights what's under `p` in the window: its tool button, tab or tab's
+/// close button, and the sidebar's row.
+fn hoverAt(w: *Win, p: Point) void {
     const tool = toolAt(w, p);
     const hot: u8 = if (tool) |t| (if (t == .sidebar) 1 else 2) else 0;
     if (hot != w.hot) {
@@ -6459,6 +6476,17 @@ fn mouseMoved(self: Id, _: Sel, ev: Id) callconv(.c) void {
         setHover(d, if (hit) |h| h.id else 0, if (hit) |h| h.close else false, d == over and onTabPlus(d, lp));
     };
     sideHover(w, p);
+}
+
+/// Runs the hover hit test again from where the mouse sits now, for when
+/// rows or tabs have moved under a still mouse. Does nothing while the
+/// mouse is outside the window's view.
+fn hoverNow(w: *Win) void {
+    const at = msg(Point, w.window, "mouseLocationOutsideOfEventStream", .{});
+    const p = msg(Point, w.view, "convertPoint:fromView:", .{ at, @as(Id, null) });
+    const b = msg(Rect, w.view, "bounds", .{});
+    if (p.x < 0 or p.y < 0 or p.x >= b.w or p.y >= b.h) return;
+    hoverAt(w, p);
 }
 
 /// Points the sidebar's hover highlight at the row under `p`: a row of the
