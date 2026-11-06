@@ -960,6 +960,21 @@ fn redrawSide(w: *Win) void {
     msg(void, w.view, "setNeedsDisplayInRect:", .{Rect{ .w = side_w, .h = msg(Rect, w.view, "bounds", .{}).h }});
 }
 
+/// Whether the sidebar button sits in the sidebar's strip: the sidebar
+/// fully shown and wide enough to hold it. Otherwise it's over the cards.
+fn toggleInSide(shown: bool, slid: f64) bool {
+    return shown and slid >= 1 and toggle_x + 14 <= side_w;
+}
+
+/// Redraws for a change of the hot button (`hot` has its old and new bits
+/// or'd): the strip alone when every button involved is in it, else the window.
+fn redrawHot(w: *Win, hot: u8) void {
+    const shown = sideShown(w);
+    const slid = w.side_a.at(CACurrentMediaTime());
+    if (shown and slid >= 1 and (hot & 1 == 0 or toggleInSide(shown, slid))) return redrawSide(w);
+    msg(void, w.view, "setNeedsDisplay:", .{true});
+}
+
 /// Display link callback: redraws while the scenery moves, otherwise just
 /// moves the carets, and pauses once everything has settled.
 fn tick(self: Id, _: Sel, _: Id) callconv(.c) void {
@@ -4803,12 +4818,12 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     // its scroll and folding folders) redraws only its strip; anything else
     // redraws the window.
     var busy = w.side_a.moving(now) or cardsMoving(w.cards) or
-        w.hot_t[0].moving(now) or
+        (w.hot_t[0].moving(now) and !toggleInSide(shown, slid)) or
         w.pv_a.moving(now) or w.ghost_a.moving(now) or w.menu_a.moving(now) or w.fly != null or
         !w.lift.settled() or w.key_a.moving(now) or !side_stretch.settled() or !w.z.settled();
     const dots_busy = sideDotsBusy(w, now) and shown;
     const side_busy = w.side_t.moving(now) or foldsBusy(now) or !w.sel.settled() or w.sel_a.moving(now) or w.hot_t[1].moving(now) or !w.hov.settled() or w.hov_a.moving(now)
-        or dots_busy;
+        or dots_busy or (w.hot_t[0].moving(now) and toggleInSide(shown, slid));
     for (w.pv) |s| busy = busy or !s.settled();
     busy = busy or w.press_t.moving(now);
     const down = w.press_t.at(now);
@@ -6442,8 +6457,8 @@ fn mouseMoved(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const tool = toolAt(w, p);
     const hot: u8 = if (tool) |t| (if (t == .sidebar) 1 else 2) else 0;
     if (hot != w.hot) {
+        redrawHot(w, w.hot | hot);
         w.hot = hot;
-        msg(void, w.view, "setNeedsDisplay:", .{true});
     }
     const over = if (tool == null) paneAt(w, p) else null;
     for (docs.items) |d| if (d.win == w) {
@@ -6482,8 +6497,8 @@ fn setHover(d: *Doc, id: u32, shut: bool, plus: bool) void {
 fn mouseExited(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
     if (w.hot != 0) {
+        redrawHot(w, w.hot);
         w.hot = 0;
-        msg(void, w.view, "setNeedsDisplay:", .{true});
     }
     for (docs.items) |d| if (d.win == w) setHover(d, 0, false, false);
     if (w.hov_row != null) {
