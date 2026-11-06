@@ -28,9 +28,34 @@ const Kind = enum(u8) { text, tabs, tab, outline, row };
 /// for a tab its id, for a row a hash of its path.
 const Key = struct { kind: Kind, owner: usize, key: u64 };
 const Held = struct { obj: Id, stamp: u32 };
+const Entry = struct { key: Key, h: Held };
+
+fn before(a: Key, b: Key) bool {
+    if (a.kind != b.kind) return @intFromEnum(a.kind) < @intFromEnum(b.kind);
+    if (a.owner != b.owner) return a.owner < b.owner;
+    return a.key < b.key;
+}
+
+/// Where `k` is, or would go.
+fn lowerBound(k: Key) usize {
+    var lo: usize = 0;
+    var hi = held.items.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (before(held.items[mid].key, k)) lo = mid + 1 else hi = mid;
+    }
+    return lo;
+}
+
+fn find(k: Key) ?*Held {
+    const i = lowerBound(k);
+    if (i < held.items.len and !before(k, held.items[i].key)) return &held.items[i].h;
+    return null;
+}
 
 /// Every element made so far, retained.
-var held: std.AutoHashMapUnmanaged(Key, Held) = .empty;
+/// Sorted by key, so a lookup is a binary search.
+var held: std.ArrayList(Entry) = .empty;
 /// Bumped each time a list of children is built, to tell which ones it kept.
 var stamp: u32 = 0;
 var classes: [5]Id = @splat(null);
@@ -136,9 +161,8 @@ fn post(obj: Id, comptime name: []const u8) void {
 /// After an edit or a caret move in `d`: tells VoiceOver, when it has
 /// asked about `d`'s text before.
 pub fn changed(d: *Doc) void {
-    if (held.count() == 0) return;
-    const h = held.get(.{ .kind = .text, .owner = @intFromPtr(d), .key = 0 }) orelse return;
-    const obj = h.obj;
+    if (held.items.len == 0) return;
+    const obj = (find(.{ .kind = .text, .owner = @intFromPtr(d), .key = 0 }) orelse return).obj;
     if (slot(obj, .id).* != d.id or slot(obj, .changes).* != d.ed.buf.changes) {
         slot(obj, .id).* = d.id;
         slot(obj, .changes).* = d.ed.buf.changes;
@@ -153,7 +177,7 @@ pub fn changed(d: *Doc) void {
 
 /// Card `d` took the typing.
 pub fn focused(d: *Doc) void {
-    if (held.count() == 0) return;
+    if (held.items.len == 0) return;
     post(textOf(d), "AXFocusedUIElementChanged");
 }
 
@@ -179,13 +203,19 @@ pub fn dropWin(w: *Win) void {
 
 /// Lets go of every element `ctx.gone` picks.
 fn sweep(ctx: anytype) void {
-    if (held.count() == 0) return;
-    var dead: std.ArrayList(Key) = .empty;
+    if (held.items.len == 0) return;
+    var dead: std.ArrayList(Id) = .empty;
     defer dead.deinit(gpa);
-    var it = held.iterator();
-    while (it.next()) |e| if (ctx.gone(e.key_ptr.*, e.value_ptr.*)) dead.append(gpa, e.key_ptr.*) catch {};
-    for (dead.items) |k| {
-        const obj = (held.fetchRemove(k) orelse continue).value.obj;
+    var keep: usize = 0;
+    for (held.items) |e| {
+        if (ctx.gone(e.key, e.h)) {
+            if (dead.append(gpa, e.h.obj)) |_| continue else |_| {}
+        }
+        held.items[keep] = e;
+        keep += 1;
+    }
+    held.items.len = keep;
+    for (dead.items) |obj| {
         slot(obj, .owner).* = 0;
         post(obj, "AXUIElementDestroyed");
         msg(void, obj, "release", .{});
@@ -196,13 +226,13 @@ fn sweep(ctx: anytype) void {
 
 fn element(kind: Kind, owner: usize, key: u64, parent: Id) Id {
     const k: Key = .{ .kind = kind, .owner = owner, .key = key };
-    if (held.getPtr(k)) |h| {
+    if (find(k)) |h| {
         h.stamp = stamp;
         return h.obj;
     }
     const obj = msg(Id, msg(Id, classes[@intFromEnum(kind)], "alloc", .{}), "init", .{});
     if (obj == null) return null;
-    held.put(gpa, k, .{ .obj = obj, .stamp = stamp }) catch {
+    held.insert(gpa, lowerBound(k), .{ .key = k, .h = .{ .obj = obj, .stamp = stamp } }) catch {
         msg(void, obj, "release", .{});
         return null;
     };
