@@ -128,8 +128,13 @@ pub fn toggle(w: Id, name: []const u8, bytes: []const u8, th: *const settings.Th
     msg(void, window, "setContentView:", .{scroll});
     msg(void, scroll, "release", .{});
     msg(void, text, "release", .{});
-    const fr = msg(objc.Rect, w, "frame", .{});
-    msg(void, window, "setFrameTopLeftPoint:", .{objc.Point{ .x = fr.x + fr.w - 80, .y = fr.y + fr.h }});
+    // A saved frame wins; only a first opening is placed beside the editor's window.
+    const name_key = objc.str("ZePreview");
+    if (!msg(bool, window, "setFrameUsingName:", .{name_key})) {
+        const fr = msg(objc.Rect, w, "frame", .{});
+        msg(void, window, "setFrameTopLeftPoint:", .{objc.Point{ .x = fr.x + fr.w - 80, .y = fr.y + fr.h }});
+    }
+    _ = msg(bool, window, "setFrameAutosaveName:", .{name_key});
     resized(null, null, null);
     render(null, null, null);
     msg(void, window, "orderFront:", .{@as(Id, null)});
