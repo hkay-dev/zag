@@ -169,11 +169,14 @@ folders have a small tinted folder. Names are in the Mac's system font and end i
 don't fit. The file on show in the focused card is marked with a soft rounded fill and its name
 is in bold; when the selection moves, the bold fades from the old name to the new one. A fainter
 highlight follows the mouse down the list, sliding from row to row without a bounce, and fades
-out when the mouse leaves.
+out when the mouse leaves. It stays on the row under a still mouse when a folder opens or
+closes and when tabs slide, so a tab that moves under the mouse lights up too.
 
 The folder's name stays pinned at the top while the rows scroll. An open folder whose
 files fill the top of the list pins under the name too, up to three levels deep, until the next
-folder's row pushes it away. Click a pinned folder to scroll back to it.
+folder's row pushes it away. Click a pinned folder to scroll back to it. The list stops a little
+above the window's bottom edge, level with the cards, and when more rows sit below, the last few
+points fade out.
 
 - Click a folder to open or close it. Its files fade in or out while the rows below slide to make
   room, and its arrow turns. Clicking another row while a folder is closing doesn't make the list

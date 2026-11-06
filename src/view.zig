@@ -4426,14 +4426,16 @@ fn drawRow(w: *Win, ctx: Id, th: *const Theme, dark: bool, i: usize, y: f64, tur
 }
 
 /// The folder's name pinned at the top, then a row per file and open
-/// folder down to the window's bottom. The open folders holding the rows
+/// folder down to the cards' bottom edge, fading out there when more rows
+/// sit below. The open folders holding the rows
 /// at the top pin under the name, and the next folder pushes them up.
 /// `fade` is the sidebar's alpha while it slides.
 fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, fade: f64, now: f64) void {
     const rows = tree.rows.items;
     const lt = listTop();
     const full_h = msg(Rect, w.view, "bounds", .{}).h;
-    const view_h = full_h - lt;
+    // The list stops where the cards do, a gap above the window's bottom.
+    const view_h = full_h - lt - gap;
     const cur = if (w.focus.path) |p| relOf(p) else null;
     // The list glides to a focused file that's out of view, once it's
     // been drawn; on the first draw it's just there.
@@ -4577,6 +4579,59 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
     // A hairline under whatever is pinned, once rows pass under it.
     const shade = std.math.clamp(sy / side_h, 0, 1);
     if (shade > 0) fillA(ctx, th.fg, (if (contrast) @as(f64, 0.2) else 0.08) * shade, 12, low - 1, side_w - 24, 1);
+    // With more rows below the list's end, its last points fade away.
+    const more = std.math.clamp((f(rows.len) * side_h - moved - sy - view_h) / side_fade, 0, 1);
+    if (more > 0.01) fadeList(ctx, bg, chromeAlpha(dark, w.z.x), lt + view_h - side_fade, more * fade);
+    objc.CGContextRestoreGState(ctx);
+}
+
+/// How tall the list's fade into the sidebar's background is at its bottom.
+const side_fade = 16.0;
+/// The two gradients that make it, built on first use and again when the
+/// chrome color or its alpha changes: one erases the rows (clear to
+/// opaque), the other puts the sidebar's background back as it was.
+var fade_out: ?*anyopaque = null;
+var fade_in: ?*anyopaque = null;
+var fade_key: [4]f64 = undefined;
+
+const cg = struct {
+    extern fn CGGradientCreateWithColorComponents(space: ?*anyopaque, comps: [*]const f64, locs: ?[*]const f64, n: usize) ?*anyopaque;
+    extern fn CGContextDrawLinearGradient(ctx: Id, g: ?*anyopaque, from: Point, to: Point, opts: u32) void;
+};
+
+/// Fades the rows in the `side_fade` points from `y` down into the sidebar's
+/// background `bg` (painted at alpha `a` over the material), by `m` (0 to 1).
+/// The rows are erased with a gradient, then the background goes back with
+/// the alpha that leaves the strip's empty parts as they were.
+fn fadeList(ctx: Id, bg: Rgb, a: f64, y: f64, m: f64) void {
+    const key = [4]f64{ bg[0], bg[1], bg[2], a };
+    if (fade_out == null or !std.mem.eql(f64, &key, &fade_key)) {
+        const space = objc.CGColorSpaceCreateDeviceRGB();
+        defer if (space) |s| objc.CFRelease(s);
+        if (fade_out) |g| objc.CFRelease(g);
+        if (fade_in) |g| objc.CFRelease(g);
+        const gone = [8]f64{ 0, 0, 0, 0, 0, 0, 0, 1 };
+        fade_out = cg.CGGradientCreateWithColorComponents(space, &gone, null, 2);
+        var comps: [20]f64 = undefined;
+        var locs: [5]f64 = undefined;
+        for (0..5) |i| {
+            const t = f(i) / 4;
+            locs[i] = t;
+            comps[4 * i ..][0..3].* = bg;
+            comps[4 * i + 3] = a * t / (1 - a + a * t);
+        }
+        fade_in = cg.CGGradientCreateWithColorComponents(space, &comps, &locs, 5);
+        fade_key = key;
+    }
+    const from = Point{ .y = y };
+    const to = Point{ .y = y + side_fade };
+    objc.CGContextSaveGState(ctx);
+    objc.CGContextClipToRect(ctx, .{ .y = y, .w = side_w, .h = side_fade });
+    objc.CGContextSetAlpha(ctx, m);
+    objc.CGContextSetBlendMode(ctx, 23);
+    cg.CGContextDrawLinearGradient(ctx, fade_out, from, to, 0);
+    objc.CGContextSetBlendMode(ctx, 0);
+    cg.CGContextDrawLinearGradient(ctx, fade_in, from, to, 0);
     objc.CGContextRestoreGState(ctx);
 }
 
