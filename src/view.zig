@@ -1409,6 +1409,11 @@ const Win = struct {
     /// traffic lights follow it. And the lights' alpha as last set.
     z: Spring = .{ .k = 200, .c = 28, .eps = 0.002 },
     lights_a: f64 = 1,
+    /// The lights peeking back in Zen: 1 while the mouse is in the window's
+    /// top-left corner and for a hold after it leaves (`peek_out`).
+    peek: Tween = .{ .dur = 0.2 },
+    peek_in: bool = false,
+    peek_out: f64 = 0,
     /// The sidebar row under the mouse (of tree `hov_gen`), the row the
     /// hover highlight last went to, where it springs to in the list, and
     /// how far it's faded in.
@@ -4922,7 +4927,7 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     const th = &themes[@intFromBool(dark)];
     const r = msg(Rect, w.view, "bounds", .{});
     dev_px = 1 / @max(1, msg(f64, w.window, "backingScaleFactor", .{}));
-    fitTitlebar(w);
+    const full = fitTitlebar(w);
     // A stretched sidebar edge springs back to its limit.
     if (side_stretch.x != 0 or side_stretch.v != 0) {
         _ = side_stretch.step(now);
@@ -4950,10 +4955,12 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     w.side_seen = true;
     // Zen eases in: the lights follow it, the margin and header in drawPane.
     _ = w.z.step(now);
+    w.peek.aim(if (conf.zen and (w.peek_in or now < w.peek_out)) 1 else 0, now);
     const la = 1 - std.math.clamp(w.z.x, 0, 1);
-    if (la != w.lights_a) {
-        setLights(w, la);
-        w.lights_a = la;
+    const lit: f64 = if (full) 1 else @max(la, w.peek.at(now));
+    if (lit != w.lights_a) {
+        setLights(w, lit);
+        w.lights_a = lit;
     }
     const slid = std.math.clamp(w.side_a.at(now), 0, 1);
     // Once a sidebar that was dragged shut has slid away, its width goes
@@ -5043,7 +5050,8 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     drawDrag(w, ctx, th, now);
     // Only the sidebar's strip moves when its rows' highlights are all that does.
     w.part = !busy and side_busy and shown and slid >= 1;
-    w.busy = busy or side_busy;
+    w.busy = busy or side_busy or
+        w.peek.moving(now) or now < w.peek_out;
     if (w.busy or gliding) msg(void, w.link, "setPaused:", .{false});
 }
 
@@ -6422,11 +6430,12 @@ fn setLights(w: *Win, a: f64) void {
 /// Reads where AppKit put the traffic lights, which it centers in the
 /// window's empty toolbar, so the header's middle sits on their line and
 /// its tabs start past them; and the window's corner radius, so the cards'
-/// corners nest inside it a gap in. Full screen keeps the last values.
-fn fitTitlebar(w: *Win) void {
-    if (msg(usize, w.window, "styleMask", .{}) & (1 << 14) != 0) return;
+/// corners nest inside it a gap in. Full screen keeps the last values, and
+/// is what it returns.
+fn fitTitlebar(w: *Win) bool {
+    if (msg(usize, w.window, "styleMask", .{}) & (1 << 14) != 0) return true;
     const last = msg(Id, w.window, "standardWindowButton:", .{@as(usize, 2)});
-    if (last == null) return;
+    if (last == null) return false;
     const at = msg(Rect, last, "convertRect:toView:", .{ msg(Rect, last, "bounds", .{}), w.view });
     head_h = std.math.clamp(@round(2 * (at.y + at.h / 2 - gap)), 28, 44);
     top_h = gap + head_h + 6;
@@ -6438,6 +6447,7 @@ fn fitTitlebar(w: *Win) void {
     const ask = objc.sel_registerName("_getCachedWindowCornerRadius");
     const asked: f64 = if (frame != null and msg(bool, frame, "respondsToSelector:", .{ask})) msg(f64, frame, "_getCachedWindowCornerRadius", .{}) else 0;
     card_radius = std.math.clamp((if (asked >= 1) asked else 26) - gap, 6, 24);
+    return false;
 }
 
 /// In full screen the empty toolbar hides with the menu bar, so the cards
@@ -6477,7 +6487,11 @@ fn keyDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
         if (std.mem.indexOfScalar(u16, &.{ 51, 117, 115, 119, 123, 124, 125, 126 }, code) == null) return;
     }
     // Like NSTextView: the pointer hides while typing and returns when the mouse moves.
-    if (code < 123 or code > 126) msg(void, objc.class("NSCursor"), "setHiddenUntilMouseMoves:", .{true});
+    if (code < 123 or code > 126) {
+        msg(void, objc.class("NSCursor"), "setHiddenUntilMouseMoves:", .{true});
+        // Typing fades Zen's peeking lights out at once.
+        if (winOf(self)) |w| if (w.peek.to != 0) peekTo(w, false, 0);
+    }
     const arr = msg(Id, objc.class("NSArray"), "arrayWithObject:", .{ev});
     msg(void, self, "interpretKeyEvents:", .{arr});
 }
@@ -6758,7 +6772,10 @@ fn resizeSide(w: *Win, x: f64) void {
 /// whichever card it's over.
 fn mouseMoved(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
-    hoverAt(w, local(self, ev));
+    const p = local(self, ev);
+    // The corner is the lights' span (as fitTitlebar measured) plus a margin.
+    if (conf.zen and w.peek_in != (p.x < toggle_x - 11 and p.y < gap + head_h / 2 + 21)) peekTo(w, !w.peek_in, 0.6);
+    hoverAt(w, p);
 }
 
 /// Lights what's under `p` in the window: its tool button, tab or tab's
@@ -6820,6 +6837,7 @@ fn setHover(d: *Doc, id: u32, shut: bool, plus: bool) void {
 
 fn mouseExited(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
+    if (w.peek.to != 0) peekTo(w, false, 0.6);
     if (w.hot != 0) {
         redrawHot(w, w.hot);
         w.hot = 0;
@@ -6829,6 +6847,14 @@ fn mouseExited(self: Id, _: Sel, _: Id) callconv(.c) void {
         w.hov_row = null;
         redrawSide(w);
     }
+}
+
+/// Zen's lights peek back while the mouse is in the window's top-left
+/// corner, and fade out a hold after it leaves.
+fn peekTo(w: *Win, in: bool, hold: f64) void {
+    w.peek_in = in;
+    w.peek_out = if (in) 0 else CACurrentMediaTime() + hold;
+    msg(void, w.view, "setNeedsDisplay:", .{true});
 }
 
 /// The mouse lets go of a button it pressed: the button's fill fades.

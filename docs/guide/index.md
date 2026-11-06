@@ -292,8 +292,12 @@ the window. They all fade together over about half a second.
 The text stays left-aligned and wraps at 80 columns, or at the window's edge when the window is
 narrower. With split cards, each card centers its own page. Find, go to line, quick open and the
 command palette still open their prompt line at the bottom. Drag the empty strip at the top to
-move the window. Turn Zen Mode off to bring the window back as it was. The choice applies to
-every window and is remembered; your sidebar, wrap and theme settings don't change.
+move the window. The traffic lights hide; move the mouse to the window's top-left corner and they
+fade back so you can close, minimize or go full screen. They fade out again a moment after the
+mouse leaves, or as soon as you type. In full screen they come with the menu bar at the top of
+the screen, and **View > Enter Full Screen** (⌃⌘F) works too. Turn Zen Mode off to bring the
+window back as it was. The choice applies to every window and is remembered; your sidebar, wrap
+and theme settings don't change.
 
 ## Late-Night Focus
 
