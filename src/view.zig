@@ -5010,7 +5010,9 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     const want_ph: f64 = if (listing(d) != null) f(d.npicks) * prow + 2 * ppad else 0;
     d.panel.aim(want_ph, now);
     const ph = d.panel.at(now);
-    if (listing(d) == null) d.pick_live = false;
+    const closing = listing(d) == null;
+    // The rows and highlight stay as they were while the panel slides shut.
+    if (closing and ph <= 0.5) d.pick_live = false;
     if (ph > 0.5 and (d.palette or d.list != null)) {
         const px = card.x + 6;
         const pw = card.w - 12;
@@ -5026,10 +5028,12 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         clipRound(ctx, px, by - ph, pw, ph + 8, 8);
         fill(ctx, th.panel, px, by - ph, pw, ph);
         // The picked row's highlight springs from row to row.
-        const pick_y = f(d.pick) * prow;
-        if (d.pick_live) d.pick_s.aim(pick_y, now) else d.pick_s.snap(pick_y);
-        if (!d.pick_live) d.rows_t0 = now;
-        d.pick_live = true;
+        if (!closing) {
+            const pick_y = f(d.pick) * prow;
+            if (d.pick_live) d.pick_s.aim(pick_y, now) else d.pick_s.snap(pick_y);
+            if (!d.pick_live) d.rows_t0 = now;
+            d.pick_live = true;
+        }
         if (d.npicks > 0) pill(ctx, th.fg, 0.10, px + 6, by - ph + ppad + d.pick_s.step(now), pw - 12, prow, 6);
         // The first rows fade in a step apart; rows that changed under the
         // typing crossfade from what was there.
