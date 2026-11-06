@@ -1297,10 +1297,12 @@ const Doc = struct {
     /// Find has no matches, and when its words last shook for it.
     nomatch: bool = false,
     shake_t0: f64 = -1,
-    /// The scroll bar's opacity, when the page last moved, and where it was.
+    /// The scroll bar's opacity, when the page last moved, where it was, and
+    /// the move its hold timer is armed for.
     bar: Tween = .{ .dur = bar_time },
     bar_t0: f64 = 0,
     bar_vy: f64 = 0,
+    bar_armed: f64 = -1,
     cx: Tween = .{ .dur = caret_time },
     cy: Tween = .{ .dur = caret_time },
     /// The caret tween is in page coordinates (else window coordinates).
@@ -3040,7 +3042,7 @@ fn loadSettings() void {
     msg(void, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "setAppearance:", .{look});
     for (wins.items) |w| {
         if (crossfade) fadeTheme(w);
-        if (fonts_changed) w.side_find = true;
+        if (fonts_changed or conf.sidebar != old_conf.sidebar or conf.sidebar_width != old_conf.sidebar_width) w.side_find = true;
         msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
     }
     for (docs.items) |d| {
@@ -5533,7 +5535,10 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     d.busy = scenery(d, now);
     // The scroll bar's hold has no frames to draw: a one-shot timer redraws
     // when it's over, and the fade out takes it from there.
-    if (d.bar.to == 1 and !d.busy) objc.later(d.win.view, "holdRedraw:", d.caret, @max(d.bar_t0 + bar_hold - now, 0) + 0.02);
+    if (d.bar.to == 1 and !d.busy and d.bar_armed != d.bar_t0) {
+        d.bar_armed = d.bar_t0;
+        objc.later(d.win.view, "holdRedraw:", d.caret, @max(d.bar_t0 + bar_hold - now, 0) + 0.02);
+    }
 }
 
 // Line numbers stay beside the text and dim with Focus. Wrapped rows carry none.
@@ -5592,7 +5597,6 @@ fn drawBar(d: *Doc, ctx: Id, th: *const Theme, card: Rect, now: f64) void {
             pill(ctx, th.fg, bar_alpha * alpha, card.x + card.w - bar_w - 3, top_h + 2 + at_y, bar_w, knob, bar_w * 0.5);
         }
     } else if (d.bar.to != 0) d.bar.snap(0);
-
 }
 
 fn drawPanel(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, card: Rect, now: f64) void {
@@ -6914,8 +6918,10 @@ fn mouseMoved(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
     const p = local(self, ev);
     // The corner is the header's strip up to where its tabs start, past the lights.
-    const corner = conf.zen and p.x < tabs_from and p.y < top_h;
-    if (w.peek_in != corner) peekTo(w, corner, 0.6);
+    // It's tracked in every mode so Zen turned on under the pointer keeps them lit;
+    // only Zen holds them after the pointer leaves.
+    const corner = p.x < tabs_from and p.y < top_h;
+    if (w.peek_in != corner) peekTo(w, corner, if (conf.zen) 0.6 else 0);
     hoverAt(w, p);
 }
 
@@ -6978,7 +6984,7 @@ fn setHover(d: *Doc, id: u32, shut: bool, plus: bool) void {
 
 fn mouseExited(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
-    if (conf.zen) peekTo(w, false, 0.6);
+    peekTo(w, false, if (conf.zen) 0.6 else 0);
     if (w.hot != 0) {
         redrawHot(w, w.hot);
         w.hot = 0;
