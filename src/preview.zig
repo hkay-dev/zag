@@ -17,6 +17,8 @@ var fade = false;
 var seen_id: u32 = std.math.maxInt(u32);
 var seen_changes: u64 = 0;
 var text_of: *const fn (u32) ?[]const u8 = undefined;
+/// The text last rendered, kept so a theme change still repaints after its tab closes.
+var source: Id = null;
 /// Fonts and paragraph styles don't depend on the theme, so each is made once and kept.
 /// `fonts[block][traits]`: body, three heading sizes, mono; each with italic and bold added.
 var fonts: [5][4]Id = @splat(@splat(null));
@@ -35,6 +37,8 @@ fn closed(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     path = null;
     owner = null;
     window = null;
+    msg(void, source, "release", .{});
+    source = null;
     text = null;
     fade = false;
 }
@@ -161,11 +165,15 @@ fn style(flags: usize) Id {
     return slot.*;
 }
 fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
-    const bytes = text_of(seen_id) orelse return;
+    if (text_of(seen_id)) |bytes| {
+        msg(void, source, "release", .{});
+        source = msg(Id, objc.str(bytes), "retain", .{});
+    }
+    if (source == null) return;
     const options = objc.new("NSAttributedStringMarkdownParsingOptions");
     defer msg(void, options, "release", .{});
     msg(void, options, "setInterpretedSyntax:", .{@as(isize, 0)});
-    const parsed = msg(Id, msg(Id, objc.class("NSAttributedString"), "alloc", .{}), "initWithMarkdown:options:baseURL:error:", .{ msg(Id, objc.str(bytes), "dataUsingEncoding:", .{@as(usize, 4)}), options, @as(Id, null), @as(?*Id, null) });
+    const parsed = msg(Id, msg(Id, objc.class("NSAttributedString"), "alloc", .{}), "initWithMarkdown:options:baseURL:error:", .{ msg(Id, source, "dataUsingEncoding:", .{@as(usize, 4)}), options, @as(Id, null), @as(?*Id, null) });
     defer msg(void, parsed, "release", .{});
     const out = objc.new("NSMutableAttributedString");
     defer msg(void, out, "release", .{});
