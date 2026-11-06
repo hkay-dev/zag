@@ -1764,6 +1764,8 @@ fn park(d: *Doc, after: bool) bool {
         return true;
     }
     d.pages.insert(gpa, d.at, asPage(d)) catch return false;
+    // Its name may still wait on a retitle that now goes to the next tab.
+    if (slotOf(d, d.id)) |k| d.slots.items[k].drop();
     rememberPlace(d);
     if (after) d.at += 1;
     return true;
@@ -5812,7 +5814,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             const at_y = @round((track - knob) * std.math.clamp((d.vy - range[0]) / bar_span, 0, 1));
             pill(ctx, th.fg, bar_alpha * alpha, card.x + card.w - bar_w - 3, top_h + 2 + at_y, bar_w, knob, bar_w * 0.5);
         }
-    }
+    } else if (d.bar.to != 0) d.bar.snap(0);
 
     const by = bottom(d);
     if (d.mode == .edit) {
