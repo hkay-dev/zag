@@ -344,7 +344,7 @@ const Ink = struct {
                     if (at < k.selected[0] or at >= k.selected[1]) {
                         const in_new: f64 = if (at >= fo.new[0] and at < fo.new[1]) 1 else 0;
                         const in_old: f64 = if (at >= fo.old[0] and at < fo.old[1]) 1 else 0;
-                        const a = 0.22 + 0.78 * (in_new * fo.t + in_old * (1 - fo.t));
+                        const a = 1 - fo.amt * (0.78 - 0.78 * (in_new * fo.t + in_old * (1 - fo.t)));
                         for (&paint, th.bg) |*v, bg| v.* = bg + (v.* - bg) * a;
                     }
                 }
@@ -359,7 +359,7 @@ const Ink = struct {
 
 /// Focus mode's lit text: the byte range it's fading to, the one it's
 /// fading from, and how far along the fade is.
-const Focus = struct { new: [2]usize, old: [2]usize, t: f64 };
+const Focus = struct { new: [2]usize, old: [2]usize, t: f64, amt: f64 };
 /// Focus mode fades from one span to the next at an even rate.
 const focus_time = 0.25;
 
@@ -879,7 +879,7 @@ fn loadDur(d: *const Doc) f64 {
 /// list still has frames to draw.
 fn scenery(d: *const Doc, now: f64) bool {
     const stretched = d.relax and (d.ov[0] != 0 or d.ov[1] != 0);
-    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.band_a.moving(now) or now < d.focus_t0 + focus_time or d.panel.moving(now) or d.lit.moving(now) or
+    return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.band_a.moving(now) or now < d.focus_t0 + focus_time or d.focus_a.moving(now) or d.panel.moving(now) or d.lit.moving(now) or
         d.prompt_t.moving(now) or d.pbar.moving(now) or now < d.shake_t0 + shake_time or now < d.card_shake_t0 + shake_time or d.hint.moving(now) or (d.blank_t0 >= 0 and now < d.blank_t0 + hint_delay) or
         d.plus_t.moving(now) or !d.pick_s.settled() or tabsMoving(d, now) or
         (d.pick_live and (now < d.rows_t0 + row_lag * 5 + row_fade or now < d.pick_t0 + xfade_time)) or
@@ -1086,6 +1086,8 @@ const Doc = struct {
     focus_new: [2]usize = .{ 0, 0 },
     focus_old: [2]usize = .{ 0, 0 },
     focus_t0: f64 = 0,
+    /// How much of the dimming shows: 0 with Focus off, 1 with it on.
+    focus_a: Tween = .{ .dur = focus_time },
     focus_on: bool = false,
     had_sel: bool = false,
     sel_t0: f64 = 0,
@@ -4964,7 +4966,9 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
 
     // Text.
     var k: Ink = .{ .ctx = ctx };
-    if (d.focus_on) k.focus = .{ .new = d.focus_new, .old = d.focus_old, .t = std.math.clamp((now - d.focus_t0) / focus_time, 0, 1) };
+    d.focus_a.aim(if (d.focus_on) 1 else 0, now);
+    const focus_amt = d.focus_a.at(now);
+    if (d.focus_on or focus_amt > 0) k.focus = .{ .new = d.focus_new, .old = d.focus_old, .t = std.math.clamp((now - d.focus_t0) / focus_time, 0, 1), .amt = focus_amt };
     k.selected = s;
     std.mem.swap(Kinds, &d.lex[0], &d.lex[1]);
     d.lex[0].clear();
