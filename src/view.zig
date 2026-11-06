@@ -30,9 +30,14 @@ var tree: tree_mod.Tree = .init(gpa);
 pub fn setRoot(dir: []const u8) void {
     if (root) |r| gpa.free(r);
     root = dir;
-    // The quick-open list was read from the old folder.
-    if (quick) |*q| q.deinit();
-    quick = null;
+    // A quick open on show lists the new folder. Otherwise the old list stays
+    // for a panel still sliding shut; the next ⌘P reads the folder again anyway.
+    if (quick) |*q| for (docs.items) |d| if (d.mode == .open) {
+        q.deinit();
+        quick = finder.scan(gpa, dir) catch null;
+        for (docs.items) |o| if (o.mode == .open) pickFiles(o);
+        break;
+    };
     // The header's folder is written relative to the open folder.
     for (docs.items) |d| dropHead(d);
     for (tree.open.items) |o| gpa.free(o);
@@ -2715,6 +2720,11 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
         for (&head) |*v| v.* = std.fmt.parseInt(usize, nums.next() orelse "0", 10) catch 0;
     }
     const d = newPane(w) orelse return null;
+    // The window's focus is read while installing: the first card made holds it
+    // until `restoreWindow` picks the lit one.
+    if (for (docs.items) |o| {
+        if (o.win == w and o != d) break false;
+    } else true) w.focus = d;
     // The tabs wait as parked pages; only the lit one is installed, once.
     var on: usize = 0;
     for (0..head[0]) |i| {
