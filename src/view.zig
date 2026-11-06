@@ -4226,7 +4226,7 @@ var folds: [2]Fold = .{ .{}, .{} };
 
 /// A folding folder as drawn: its row, where its rows end, how far open it
 /// is and how far the rows after it have slid up.
-const FoldView = struct { at: usize, rest: usize, n: usize, p: f64, off: f64 };
+const FoldView = struct { at: usize, rest: usize, n: usize, p: f64, off: f64, closing: bool };
 
 /// The folders that are folding on screen, by `rows`, into `out`.
 fn foldViews(rows: []const tree_mod.Row, now: f64, out: *[2]FoldView) usize {
@@ -4234,7 +4234,7 @@ fn foldViews(rows: []const tree_mod.Row, now: f64, out: *[2]FoldView) usize {
     for (&folds) |*o| {
         if (!o.t.moving(now) or o.at >= rows.len or !std.mem.eql(u8, rows[o.at].rel, o.rel[0..o.len])) continue;
         const p = std.math.clamp(o.t.at(now), 0, 1);
-        out[nv] = .{ .at = o.at, .rest = o.at + o.n + 1, .n = o.n, .p = p, .off = (1 - p) * f(o.n) * side_h };
+        out[nv] = .{ .at = o.at, .rest = o.at + o.n + 1, .n = o.n, .p = p, .off = (1 - p) * f(o.n) * side_h, .closing = o.closing };
         nv += 1;
     }
     return nv;
@@ -4451,7 +4451,18 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
         };
     }
     w.side_drawn = true;
-    w.side_y = std.math.clamp(w.side_y, 0, @max(0, f(rows.len + 1) * side_h - view_h));
+    // A closing folder's rows are still in the tree while it folds: leave
+    // out the part already shut, so the clamp eases down with the fold
+    // instead of dropping in one frame when the rows go.
+    var vs: [2]FoldView = undefined;
+    const vn = foldViews(rows, now, &vs);
+    var moved: f64 = 0;
+    var shut: f64 = 0;
+    for (vs[0..vn]) |v| {
+        moved += v.off;
+        if (v.closing) shut += v.off;
+    }
+    w.side_y = std.math.clamp(w.side_y, 0, @max(0, f(rows.len + 1) * side_h - shut - view_h));
     if (glide and was != w.side_y) {
         w.side_t.snap(was);
         w.side_t.aim(w.side_y, now);
@@ -4466,10 +4477,6 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
     drawIcon(icon(.parents, dark, th), 16 + hw + 5, top_h + (side_h - 12) / 2, 12);
 
     objc.CGContextClipToRect(ctx, .{ .y = lt, .w = side_w - 2, .h = view_h });
-    var vs: [2]FoldView = undefined;
-    const vn = foldViews(rows, now, &vs);
-    var moved: f64 = 0;
-    for (vs[0..vn]) |v| moved += v.off;
 
     // A faint highlight follows the mouse down the list, sliding from row
     // to row on a spring that settles without a bounce. It fades in where
