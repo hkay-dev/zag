@@ -4587,30 +4587,6 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
     objc.CGContextRestoreGState(ctx);
 }
 
-/// Opaque to clear, left to right, made on first use and kept: a mask for
-/// the last column of a row cut at the page's right margin.
-var edge_grad: ?*anyopaque = null;
-
-fn edgeFade() ?*anyopaque {
-    if (edge_grad == null) {
-        const space = objc.CGColorSpaceCreateDeviceRGB();
-        defer if (space) |s| objc.CFRelease(s);
-        const comps = [8]f64{ 0, 0, 0, 1, 0, 0, 0, 0 };
-        edge_grad = objc.CGGradientCreateWithColorComponents(space, &comps, null, 2);
-    }
-    return edge_grad;
-}
-
-/// Line `i`'s kinds as `lineKinds` already added them to `lex[0]` this frame.
-fn lexedKinds(d: *Doc, i: usize) ?[]const syntax.Kind {
-    const now = &d.lex[0];
-    for (now.lines.items, 0..) |e, n| if (e.line == i) {
-        const end = if (n + 1 < now.lines.items.len) now.lines.items[n + 1].at else now.kinds.items.len;
-        return now.kinds.items[e.at..end];
-    };
-    return null;
-}
-
 /// How tall the list's fade into the sidebar's background is at its bottom.
 const side_fade = 16.0;
 /// The two gradients that make it, built on first use and again when the
@@ -5155,48 +5131,59 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     var walk: usize = 0;
     var lexed: usize = std.math.maxInt(usize);
     var kinds: ?[]const syntax.Kind = null;
-    // The first pass stops a column short of the margin; it draws one cell
-    // more than fits to learn which rows reach it (1) and which run past (2).
-    // The second draws the last column of every such row through a
-    // transparency layer, and a short ramp takes only the cut rows' alpha to
-    // nothing, so their text fades into whatever is under it (page, band or
-    // selection) while a row that just fits keeps its last character.
+    // Pass 0 stops a column short of the margin; it draws one cell more than
+    // fits to learn which rows reach it (1) and which run past it (2). Pass 1
+    // draws the last columns of rows that just fit at full strength, and the
+    // passes after it the cut rows' last column in vertical strips of falling
+    // alpha, so the text fades toward the page, band or selection under it
+    // with no layer and one batch per strip however many rows are cut.
+    const strip_a = [_]f64{ 0.8, 0.55, 0.3, 0.1 };
+    const base_a: f64 = if (loaded >= 1) 1 else if (d.rise) loaded else swap_from + (1 - swap_from) * loaded;
     var reach: [400]u8 = undefined;
+    var row_kinds: [400]?[]const syntax.Kind = undefined;
     var any_reach = prev_a > 0 or cur_m != null;
     var any_cut = false;
-    for (0..2) |pass| {
+    for (0..2 + strip_a.len) |pass| {
         const x0 = ox + f(cols -| 1) * cw;
-        if (pass == 1) {
-            if (!any_reach or cols == 0) break;
-            objc.CGContextSaveGState(ctx);
-            objc.CGContextClipToRect(ctx, .{ .x = x0, .y = card.y, .w = cw, .h = card.h });
-            if (any_cut) objc.CGContextBeginTransparencyLayer(ctx, null);
-        } else {
-            objc.CGContextSaveGState(ctx);
+        objc.CGContextSaveGState(ctx);
+        if (pass == 0) {
             if (cols > 0) objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = x0 - card.x, .h = card.h });
+        } else {
+            if (!any_reach or cols == 0 or (pass >= 2 and !any_cut)) {
+                objc.CGContextRestoreGState(ctx);
+                break;
+            }
+            if (pass == 1) {
+                objc.CGContextClipToRect(ctx, .{ .x = x0, .y = card.y, .w = cw, .h = card.h });
+            } else {
+                const sw = cw / f(strip_a.len);
+                objc.CGContextClipToRect(ctx, .{ .x = x0 + sw * f(pass - 2), .y = card.y, .w = sw, .h = card.h });
+                objc.CGContextSetAlpha(ctx, base_a * strip_a[pass - 2]);
+            }
         }
         lexed = std.math.maxInt(usize);
         for (vis[0..nvis], first..) |v, row| {
-            if (pass == 1 and reach[row - first] == 0 and prev_a <= 0 and cur_m == null) continue;
+            const ri = row - first;
+            if (pass == 1 and (reach[ri] == 2 or (reach[ri] == 0 and prev_a <= 0 and cur_m == null))) continue;
+            if (pass >= 2 and reach[ri] != 2) continue;
             const l = b.line(v.line);
-            if (v.line != lexed) {
-                lexed = v.line;
-                // `lex[0]` was cleared above, so pass 1 finds only this frame's lines.
-                kinds = if (d.lang != &syntax.plain and v.line < d.states.items.len)
-                    (if (pass == 1) lexedKinds(d, v.line) else lineKinds(d, v.line, l, &walk))
-                else
-                    null;
+            if (pass == 0) {
+                if (v.line != lexed) {
+                    lexed = v.line;
+                    kinds = if (d.lang != &syntax.plain and v.line < d.states.items.len) lineKinds(d, v.line, l, &walk) else null;
+                }
+                row_kinds[ri] = kinds;
             }
             k.offset = b.lineStart(v.line);
             const row_y = top_h + f(row) * lh - d.vy;
-            // Pass 1 redraws only the last columns, at the x pass 0 gives them.
+            // Later passes redraw only the last columns, at the x pass 0 gives them.
             const back = @min(cols, 2);
-            const used = if (pass == 1)
-                k.run(l, v.seg.start, v.seg.end, v.seg.col, kinds, th, th.fg, ox + f(cols - back) * cw, row_y + baseline, skip + cols - back, back + 1)
+            const used = if (pass > 0)
+                k.run(l, v.seg.start, v.seg.end, v.seg.col, row_kinds[ri], th, th.fg, ox + f(cols - back) * cw, row_y + baseline, skip + cols - back, back + 1)
             else
-                k.run(l, v.seg.start, v.seg.end, v.seg.col, kinds, th, th.fg, ox, row_y + baseline, skip, cols + 1);
+                k.run(l, v.seg.start, v.seg.end, v.seg.col, row_kinds[ri], th, th.fg, ox, row_y + baseline, skip, cols + 1);
             if (pass == 0) {
-                reach[row - first] = if (used > cols) 2 else if (used == cols) 1 else 0;
+                reach[ri] = if (used > cols) 2 else if (used == cols) 1 else 0;
                 any_reach = any_reach or used >= cols;
                 any_cut = any_cut or used > cols;
             }
@@ -5204,18 +5191,6 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             if (cur_m) |m| pillOver(&k, th, dark, l, k.offset, v.seg, m, ox, skip, row_y, pop, 1);
         }
         k.flush();
-        if (pass == 1 and any_cut) {
-            objc.CGContextSetBlendMode(ctx, 22);
-            for (vis[0..nvis], first..) |_, row| {
-                if (reach[row - first] != 2) continue;
-                objc.CGContextSaveGState(ctx);
-                objc.CGContextClipToRect(ctx, .{ .x = x0, .y = top_h + f(row) * lh - d.vy, .w = cw, .h = lh });
-                objc.CGContextDrawLinearGradient(ctx, edgeFade(), .{ .x = x0 }, .{ .x = x0 + cw }, 0);
-                objc.CGContextRestoreGState(ctx);
-            }
-            objc.CGContextSetBlendMode(ctx, 0);
-            objc.CGContextEndTransparencyLayer(ctx);
-        }
         objc.CGContextRestoreGState(ctx);
     }
     k.focus = null;
