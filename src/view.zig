@@ -4269,10 +4269,16 @@ fn finishFolds(now: f64) void {
 /// The sidebar's selection: a soft rounded fill with no outline, fainter
 /// when the window isn't key.
 fn selPill(ctx: Id, th: *const Theme, dark: bool, key: bool, y: f64) void {
-    const hw = side_w - 2 * side_inset - 2;
+    selFill(ctx, th, dark, key, 1, side_inset, y, side_w - 2 * side_inset - 2, side_h, side_radius);
+}
+
+/// The fill the sidebar's selection and the palette's picked row share: a
+/// soft rounded fill, fainter when the window isn't key, with a ring under
+/// Increase Contrast. `fade` (0 to 1) scales both.
+fn selFill(ctx: Id, th: *const Theme, dark: bool, key: bool, fade: f64, x: f64, y: f64, w: f64, h: f64, radius: f64) void {
     const a: f64 = if (contrast) 0.16 else if (dark) (if (key) 0.12 else 0.07) else (if (key) 0.09 else 0.05);
-    pill(ctx, th.fg, a, side_inset, y, hw, side_h, side_radius);
-    if (contrast) ring(ctx, th.fg, 0.4, side_inset, y, hw, side_h, side_radius);
+    pill(ctx, th.fg, a * fade, x, y, w, h, radius);
+    if (contrast) ring(ctx, th.fg, 0.4 * fade, x, y, w, h, radius);
 }
 
 /// One row of the tree with its top at `y`: chevron, icon, name and dot.
@@ -5044,8 +5050,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         const swap = std.math.clamp((now - d.pick_t0) / xfade_time, 0, 1);
         const crossing = swap < 1 and d.rows_t0 < d.pick_t0;
         if (d.npicks > 0 or (crossing and d.prev_n > 0)) {
-            const pa: f64 = if (d.npicks > 0) 0.10 else 0.10 * (1 - swap);
-            pill(ctx, th.fg, pa, px + 6, by - ph + ppad + d.pick_s.step(now), pw - 12, prow, 6);
+            const keep: f64 = if (d.npicks > 0) 1 else 1 - swap;
+            selFill(ctx, th, dark, win_key, keep, px + 6, by - ph + ppad + d.pick_s.step(now), pw - 12, prow, 6);
         }
         const shown = if (crossing) @max(d.npicks, d.prev_n) else d.npicks;
         for (0..shown) |i| {
