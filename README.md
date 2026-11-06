@@ -20,3 +20,7 @@ scripts/ship.sh              # Ship it: installs the stable Zag at ~/Application
 Stable and dev builds are explained in [AGENTS.md](AGENTS.md).
 
 The guide is in [docs/guide](docs/guide/index.md).
+
+## License
+
+MIT, see [LICENSE](LICENSE).
