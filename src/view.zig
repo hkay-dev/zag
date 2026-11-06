@@ -6627,6 +6627,21 @@ fn resetCursorRects(self: Id, _: Sel) callconv(.c) void {
     if (sideShown(w)) {
         msg(void, self, "addCursorRect:cursor:", .{ Rect{ .x = side_w - edge_grab, .y = top_h, .w = 2 * edge_grab, .h = r.h - top_h }, msg(Id, objc.class("NSCursor"), "resizeLeftRightCursor", .{}) });
     }
+    // The two buttons by the traffic lights get their menu items' names;
+    // `toolTip` answers nil where zen hides them.
+    msg(void, self, "removeAllToolTips", .{});
+    if (root != null) {
+        const hy = gap + head_h / 2;
+        _ = msg(isize, self, "addToolTipRect:owner:userData:", .{ Rect{ .x = toggle_x - 14, .y = hy - 14, .w = 28, .h = 28 }, self, @as(?*anyopaque, null) });
+        _ = msg(isize, self, "addToolTipRect:owner:userData:", .{ Rect{ .x = side_w - gap - 34, .y = hy - 14, .w = 28, .h = 28 }, self, @as(?*anyopaque, null) });
+    }
+}
+
+/// The tooltip for the button under `p`: the title of the menu item it runs.
+fn toolTip(self: Id, _: Sel, _: Id, _: isize, p: Point, _: ?*anyopaque) callconv(.c) Id {
+    const w = winOf(self) orelse return null;
+    const t = toolAt(w, p) orelse return null;
+    return objc.str(if (t == .sidebar) objc.utf8(msg(Id, sidebar_item, "title", .{})) else "New Tab");
 }
 
 /// Also the window delegate's key and resign key calls, so the caret shows
@@ -7156,6 +7171,7 @@ pub fn setup() void {
     c.method("mouseExited:", @ptrCast(&mouseExited), "v@:@");
     c.method("scrollWheel:", @ptrCast(&scrollWheel), "v@:@");
     c.method("resetCursorRects", @ptrCast(&resetCursorRects), "v@:");
+    c.method("view:stringForToolTip:point:userData:", @ptrCast(&toolTip), "@@:@q{CGPoint=dd}^v");
     c.method("viewDidChangeEffectiveAppearance", @ptrCast(&lookChanged), "v@:");
     c.method("windowDidBecomeKey:", @ptrCast(&appearanceChanged), "v@:@");
     c.method("windowDidResignKey:", @ptrCast(&appearanceChanged), "v@:@");

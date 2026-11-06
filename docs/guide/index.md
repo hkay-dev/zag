@@ -50,7 +50,7 @@ Right-click (or control-click) in the text for **Cut**, **Copy**, **Paste**, **S
 
 The window has no title bar of its own. The traffic lights sit at the top of the sidebar, in line
 with the header, next to a sidebar button that shows or hides the sidebar and a **+** button
-at the sidebar's right that opens a new tab. With the sidebar hidden, the traffic lights and
+at the sidebar's right that opens a new tab; hover either for its name. With the sidebar hidden, the traffic lights and
 the sidebar button sit on the header. A folder too long for the header or the sidebar's top line
 loses its start to "…", keeping the folders nearest the file. Drag the header or the empty band
 above the sidebar to move the window, and double-click it to zoom (or minimize, or nothing, as
