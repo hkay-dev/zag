@@ -5155,47 +5155,57 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     var walk: usize = 0;
     var lexed: usize = std.math.maxInt(usize);
     var kinds: ?[]const syntax.Kind = null;
-    // A row cut at the margin draws its last column again through a
-    // transparency layer whose alpha a short ramp takes to nothing, so the
-    // text fades into whatever is under it (page, band or selection). The
-    // first pass stops a column short; it draws one cell more than fits to
-    // learn which rows are cut.
-    var ends: [400]bool = undefined;
-    var any_end = false;
+    // The first pass stops a column short of the margin; it draws one cell
+    // more than fits to learn which rows reach it (1) and which run past (2).
+    // The second draws the last column of every such row through a
+    // transparency layer, and a short ramp takes only the cut rows' alpha to
+    // nothing, so their text fades into whatever is under it (page, band or
+    // selection) while a row that just fits keeps its last character.
+    var reach: [400]u8 = undefined;
+    var any_reach = false;
     for (0..2) |pass| {
+        const x0 = ox + f(cols -| 1) * cw;
         if (pass == 1) {
-            if (!any_end or cols == 0) break;
-            const x0 = ox + f(cols - 1) * cw;
+            if (!any_reach or cols == 0) break;
             objc.CGContextSaveGState(ctx);
             objc.CGContextClipToRect(ctx, .{ .x = x0, .y = card.y, .w = cw, .h = card.h });
             objc.CGContextBeginTransparencyLayer(ctx, null);
         } else {
             objc.CGContextSaveGState(ctx);
-            if (cols > 0) objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = ox + f(cols - 1) * cw - card.x, .h = card.h });
+            if (cols > 0) objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = x0 - card.x, .h = card.h });
         }
         lexed = std.math.maxInt(usize);
         for (vis[0..nvis], first..) |v, row| {
-            if (pass == 1 and !ends[row - first]) continue;
+            if (pass == 1 and reach[row - first] == 0) continue;
             const l = b.line(v.line);
             if (v.line != lexed) {
                 lexed = v.line;
-                kinds = if (pass == 1) lexedKinds(d, v.line) else if (d.lang != &syntax.plain and v.line < d.states.items.len) lineKinds(d, v.line, l, &walk) else null;
+                // `lex[0]` was cleared above, so pass 1 finds only this frame's lines.
+                kinds = if (d.lang != &syntax.plain and v.line < d.states.items.len)
+                    (if (pass == 1) lexedKinds(d, v.line) else lineKinds(d, v.line, l, &walk))
+                else
+                    null;
             }
             k.offset = b.lineStart(v.line);
             const row_y = top_h + f(row) * lh - d.vy;
             const used = k.run(l, v.seg.start, v.seg.end, v.seg.col, kinds, th, th.fg, ox, row_y + baseline, skip, cols + 1);
             if (pass == 0) {
-                ends[row - first] = used > cols;
-                any_end = any_end or used > cols;
+                reach[row - first] = if (used > cols) 2 else if (used == cols) 1 else 0;
+                any_reach = any_reach or used >= cols;
             }
             if (prev_a > 0) pillOver(&k, th, dark, l, k.offset, v.seg, d.prev_m, ox, skip, row_y, 1, prev_a);
             if (cur_m) |m| pillOver(&k, th, dark, l, k.offset, v.seg, m, ox, skip, row_y, pop, 1);
         }
         k.flush();
         if (pass == 1) {
-            const x0 = ox + f(cols - 1) * cw;
             objc.CGContextSetBlendMode(ctx, 22);
-            objc.CGContextDrawLinearGradient(ctx, edgeFade(), .{ .x = x0 }, .{ .x = x0 + cw }, 0);
+            for (vis[0..nvis], first..) |_, row| {
+                if (reach[row - first] != 2) continue;
+                objc.CGContextSaveGState(ctx);
+                objc.CGContextClipToRect(ctx, .{ .x = x0, .y = top_h + f(row) * lh - d.vy, .w = cw, .h = lh });
+                objc.CGContextDrawLinearGradient(ctx, edgeFade(), .{ .x = x0 }, .{ .x = x0 + cw }, 0);
+                objc.CGContextRestoreGState(ctx);
+            }
             objc.CGContextSetBlendMode(ctx, 0);
             objc.CGContextEndTransparencyLayer(ctx);
         }
