@@ -5537,6 +5537,9 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
     for (&d.hl, act) |*h, v| if (a < 0.01 or top_id == d.id) h.snap(v) else h.aim(v, now);
     const hx = d.hl[0].step(now);
     const hw = d.hl[1].step(now);
+    // The row stops at its ends: tabs scrolled past them are cut there.
+    objc.CGContextSaveGState(ctx);
+    objc.CGContextClipToRect(ctx, .{ .x = x0 - pad, .y = 0, .w = @max(x1 - x0 + pad, 0), .h = gap + head_h });
     if (a > 0.01) {
         tabFill(ctx, th, ka, a, hx, hy - 11, hw);
     }
@@ -5548,6 +5551,10 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
             drawTab(d, s, ctx, th, dark, ka, a, cap, x0, x1, now, back or (dragged != null and dragged.?.out and s.id == dragged.?.id), pass == 1);
         }
     }
+    // The ends have tabs past them while the row is scrolled.
+    tabFade(ctx, th, x0 - pad, 1, off / tab_fade);
+    tabFade(ctx, th, x1, -1, (span - room - off) / tab_fade * a);
+    objc.CGContextRestoreGState(ctx);
 
     // With one tab, the folder after the name; with more, the + after the
     // tabs. One goes before the other comes, so they never overlap.
@@ -5587,6 +5594,38 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
     }
     if (d.note.len > 0) _ = k.text(d.note, null, th, th.muted, nx, mono_y, 0, 200);
     k.flush();
+}
+
+extern fn CGGradientCreateWithColorComponents(space: ?*anyopaque, comps: [*]const f64, locs: ?[*]const f64, n: usize) ?*anyopaque;
+extern fn CGContextDrawLinearGradient(ctx: Id, g: ?*anyopaque, from: objc.Point, to: objc.Point, opts: u32) void;
+
+/// How far the tab row fades at an end that has tabs past it.
+const tab_fade = 16.0;
+/// The header's colour fading to clear, made on first use and again when
+/// the header colour changes, and kept.
+var tab_fade_grad: ?*anyopaque = null;
+var tab_fade_rgb: Rgb = .{ -1, -1, -1 };
+
+/// The header's own colour laid over the tab row's end at `edge`, `dir` 1
+/// for the left end (solid at `edge`, clear `tab_fade` to its right) or -1
+/// for the right, `t` of full strength.
+fn tabFade(ctx: Id, th: *const Theme, edge: f64, dir: f64, t: f64) void {
+    if (t < 0.01) return;
+    if (tab_fade_grad == null or !std.mem.eql(f64, &tab_fade_rgb, &th.header)) {
+        if (tab_fade_grad) |g| objc.CFRelease(g);
+        const space = objc.CGColorSpaceCreateDeviceRGB();
+        defer if (space) |s| objc.CFRelease(s);
+        const c = th.header;
+        const comps = [8]f64{ c[0], c[1], c[2], 1, c[0], c[1], c[2], 0 };
+        tab_fade_grad = CGGradientCreateWithColorComponents(space, &comps, null, 2);
+        tab_fade_rgb = th.header;
+    }
+    const hy = gap + head_h / 2;
+    objc.CGContextSaveGState(ctx);
+    objc.CGContextClipToRect(ctx, .{ .x = if (dir > 0) edge else edge - tab_fade, .y = hy - 12, .w = tab_fade, .h = 24 });
+    if (t < 0.99) objc.CGContextSetAlpha(ctx, t);
+    CGContextDrawLinearGradient(ctx, tab_fade_grad, .{ .x = edge, .y = hy }, .{ .x = edge + dir * tab_fade, .y = hy }, 0);
+    objc.CGContextRestoreGState(ctx);
 }
 
 /// The active tab's pill and ring at (`x`, `y`) and width `w`, as selFill's
