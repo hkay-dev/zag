@@ -627,10 +627,12 @@ const Slot = struct {
     /// while it isn't the active tab, made on first draw.
     line: Id = null,
     thin: Id = null,
-    /// The names cut short with an ellipsis to `cut_w`, when the tab is squeezed.
+    /// The names cut short with an ellipsis to `cut_w` and `thin_cut_w`, each
+    /// made when its weight draws on a squeezed tab.
     cut: Id = null,
     thin_cut: Id = null,
     cut_w: f64 = -1,
+    thin_cut_w: f64 = -1,
     /// Its file kind's icon, from `iconFor`.
     icon: Id = null,
     gone: bool = false,
@@ -652,6 +654,7 @@ const Slot = struct {
             p.* = null;
         };
         s.cut_w = -1;
+        s.thin_cut_w = -1;
     }
 };
 
@@ -5639,30 +5642,30 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, ka: f64, a:
     objc.CGContextSaveGState(ctx);
     const fit = shut_x - nx;
     objc.CGContextClipToRect(ctx, .{ .x = nx, .y = hy - 12, .w = @max(fit + 1, 0), .h = 24 });
-    // A squeezed tab's name ends in an ellipsis; one popping in or
-    // folding away is just cut off.
-    const room_w = @floor(cap - 2 * pad - ts - 7 - tab_shut * a);
-    const squeezed = j != null and room_w + 1 < nw;
-    if (squeezed and room_w != s.cut_w) {
-        for ([_]*Id{ &s.cut, &s.thin_cut }) |l| if (l.*) |old| objc.CFRelease(old);
-        s.cut = cutTab(s.line, 0, room_w);
-        s.thin_cut = cutTab(s.thin, 1, room_w);
-        s.cut_w = room_w;
-    }
     // How much the highlight covers this tab, so a tab that it only sits
     // next to stays unlit; a lone tab is the window's title.
     const cover = @min(d.hl[0].x + d.hl[1].x, sx + s.w) - @max(d.hl[0].x, sx);
     const lit = if (a < 0.5) 1 else std.math.clamp(cover / @max(s.w, d.hl[1].x, 1), 0, 1);
+    // A squeezed tab's name ends in an ellipsis; one popping in or
+    // folding away is just cut off. Only the weight that draws is cut,
+    // when its room has moved a point.
+    const room_w = @floor(cap - 2 * pad - ts - 7 - tab_shut * a);
+    const squeezed = j != null and room_w + 1 < nw;
+    const heavy = lit >= 0.5;
+    const pick = if (heavy) &s.cut else &s.thin_cut;
+    const pick_w = if (heavy) &s.cut_w else &s.thin_cut_w;
+    if (squeezed and @abs(room_w - pick_w.*) >= 1) {
+        if (pick.*) |old| objc.CFRelease(old);
+        pick.* = cutTab(if (heavy) s.line else s.thin, if (heavy) 0 else 1, room_w);
+        pick_w.* = room_w;
+    }
     const ink_a = 1 + (0.62 + 0.38 * @max(lit, hv) - 1) * ka;
     const ink = mixRgb(th.muted, th.fg, ka);
     const by = @round(hy + name_off);
     // The weight switches halfway while the ink brightens: the two weights
     // have different widths, so drawing both at once smears the name.
     objc.CGContextSetAlpha(ctx, alpha * ink_a);
-    const name = if (lit >= 0.5)
-        (if (squeezed and s.cut != null) s.cut else s.line)
-    else
-        (if (squeezed and s.thin_cut != null) s.thin_cut else s.thin);
+    const name = if (squeezed and pick.* != null) pick.* else if (heavy) s.line else s.thin;
     _ = drawLine(ctx, name, ink, nx, by);
     objc.CGContextRestoreGState(ctx);
     // The unsaved dot sits after the name with one tab and slides into
