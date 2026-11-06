@@ -349,11 +349,14 @@ When another app changes a file that's open in Zag, Zag notices the next time yo
 - If the file was deleted, Zag says "deleted on disk" and keeps the text as unsaved changes, so
   ⌘S writes it back.
 
+If another app changes the file while you're still in Zag, ⌘S asks before saving over it: Save
+Anyway writes your text, Cancel leaves the other app's version alone.
+
 ## Save and close
 
 ⌘S saves and ⇧⌘S saves under a new name. Zag writes the file next to the old one and then swaps
 it in, so a crash halfway through a save never leaves a half-written file. The file keeps its
-permissions.
+permissions and its Finder tags. If a save under a new name fails, the file keeps its old name.
 
 Closing a window with unsaved changes, or quitting with unsaved changes to files, asks whether to
 save them first. Closing also asks about untitled files with text in them, since their drafts go

@@ -94,10 +94,12 @@ pub const Editor = struct {
     /// Replaces the selection with `s`.
     pub fn insert(e: *Editor, gpa: Allocator, s: []const u8) !void {
         const r = e.sel();
-        const join = e.typing and !e.hasSel() and s.len == 1 and s[0] != '\n';
-        try e.buf.replace(gpa, r[0], r[1], s, e.cur, join);
+        // One typed character, ASCII or not, joins the typing run; a newline
+        // starts the next one.
+        const one = s.len > 0 and (std.unicode.utf8ByteSequenceLength(s[0]) catch 0) == s.len;
+        try e.buf.replace(gpa, r[0], r[1], s, e.cur, e.typing and !e.hasSel() and one and s[0] != '\n');
         e.select(r[0] + s.len, r[0] + s.len);
-        e.typing = s.len == 1;
+        e.typing = one;
     }
 
     /// Newline that keeps the current line's indentation.
@@ -123,7 +125,7 @@ pub const Editor = struct {
             e.anchor = switch (unit) {
                 .char => if (e.cur == ls and row > 0) e.buf.lineEnd(row - 1) else prevChar(t, e.cur),
                 .word => wordLeft(t, e.cur),
-                .line => if (e.cur == ls) prevChar(t, e.cur) else ls,
+                .line => if (e.cur != ls) ls else if (row > 0) e.buf.lineEnd(row - 1) else ls,
             };
         }
         try e.cut(gpa, unit == .char);
@@ -137,7 +139,7 @@ pub const Editor = struct {
             e.anchor = switch (unit) {
                 .char => if (e.cur == le and row + 1 < e.buf.lines()) e.buf.lineStart(row + 1) else nextChar(t, e.cur),
                 .word => wordRight(t, e.cur),
-                .line => if (e.cur == le) nextChar(t, e.cur) else le,
+                .line => if (e.cur != le) le else if (row + 1 < e.buf.lines()) e.buf.lineStart(row + 1) else le,
             };
         }
         try e.cut(gpa, unit == .char);
@@ -584,6 +586,25 @@ test "CRLF files get CRLF newlines" {
     e.move(.end, false, 0);
     try e.newline(gpa_t);
     try t_.expectEqualStrings("a\r\n\r\nb", e.text());
+}
+
+test "line deletes at a line's edge take the whole CRLF break" {
+    var e = try Editor.init(gpa_t, "a\r\nb\r\n");
+    defer e.deinit(gpa_t);
+    e.select(3, 3);
+    try e.deleteBack(gpa_t, .line);
+    try t_.expectEqualStrings("ab\r\n", e.text());
+    e.select(2, 2);
+    try e.deleteForward(gpa_t, .line);
+    try t_.expectEqualStrings("ab", e.text());
+}
+
+test "typed characters outside ASCII join the typing run" {
+    var e = try Editor.init(gpa_t, "");
+    defer e.deinit(gpa_t);
+    for ([_][]const u8{ "ü", "b", "😀", "r" }) |s| try e.insert(gpa_t, s);
+    try e.undo(gpa_t);
+    try t_.expectEqualStrings("", e.text());
 }
 
 test "comment toggle adds at the shallowest indent and removes again" {

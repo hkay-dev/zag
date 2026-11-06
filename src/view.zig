@@ -1066,6 +1066,13 @@ const Page = struct {
         if (p.path) |s| gpa.free(s);
         dropDraft(&p.draft);
     }
+
+    /// Dropping it while an untitled file's draft stays on disk.
+    fn deinitKeepDraft(p: *Page) void {
+        if (p.draft) |s| gpa.free(s);
+        p.draft = null;
+        p.deinit();
+    }
 };
 
 /// Tabs, pages and windows get ids from here.
@@ -2426,13 +2433,28 @@ pub fn settleAll() bool {
 }
 
 fn save(d: *Doc, as: bool) bool {
+    // Save As writes before the doc takes the new path, so a failed write
+    // leaves it as it was.
+    var fresh: ?[:0]u8 = null;
     if (d.path == null or as) {
         const p = msg(Id, objc.class("NSSavePanel"), "savePanel", .{});
         msg(void, p, "setNameFieldStringValue:", .{objc.str(d.name())});
         if (root) |r| msg(void, p, "setDirectoryURL:", .{msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(r)})});
         if (msg(isize, p, "runModal", .{}) != 1) return false;
         const path = objc.utf8(msg(Id, msg(Id, p, "URL", .{}), "path", .{}));
-        const z = gpa.dupeSentinel(u8, path, 0) catch return false;
+        fresh = gpa.dupeSentinel(u8, path, 0) catch return false;
+    } else if (files.stamp(d.path.?)) |now| {
+        // Another app wrote the file since Zag read or saved it. A deleted
+        // file is just written again.
+        if (!sameStamp(now, d.stamp) and !askOverwrite(d)) return false;
+    }
+    const to = fresh orelse d.path.?;
+    files.write(to, d.ed.text()) catch {
+        alert("Couldn't save this file.", to);
+        if (fresh) |z| gpa.free(z);
+        return false;
+    };
+    if (fresh) |z| {
         preview.rename(d.window, d.path orelse "", z);
         if (d.path) |old| gpa.free(old);
         d.path = z;
@@ -2440,10 +2462,6 @@ fn save(d: *Doc, as: bool) bool {
         clearSyntax(d);
         named(d);
     }
-    files.write(d.path.?, d.ed.text()) catch {
-        alert("Couldn't save this file.", d.path.?);
-        return false;
-    };
     d.ed.buf.markSaved();
     dropDraft(&d.draft);
     d.stamp = files.stamp(d.path.?);
@@ -2607,21 +2625,30 @@ pub fn saveSession() void {
     const order = msg(Id, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "orderedWindows", .{});
     var line: std.ArrayList(u8) = .empty;
     defer line.deinit(gpa);
+    // Back to front, so the front window opens last and stays in front.
+    // Windows AppKit leaves out of `orderedWindows` (hidden or minimized
+    // ones, if it does) go first.
+    for (wins.items) |wn| {
+        if (msg(usize, order, "indexOfObject:", .{wn.window}) == std.math.maxInt(isize)) saveWin(wn, &line, out);
+    }
     var i = msg(usize, order, "count", .{});
     while (i > 0) {
         i -= 1;
         const w = msg(Id, order, "objectAtIndex:", .{i});
-        for (wins.items) |wn| if (wn.window == w) {
-            line.clearRetainingCapacity();
-            line.appendSlice(gpa, objc.utf8(msg(Id, w, "stringWithSavedFrame", .{}))) catch continue;
-            const kept = saveLayout(wn, wn.cards, &line) catch continue;
-            if (kept > 0) msg(void, out, "addObject:", .{objc.str(line.items)});
-        };
+        for (wins.items) |wn| if (wn.window == w) saveWin(wn, &line, out);
     }
     msg(void, defaults(), "setObject:forKey:", .{ out, objc.str("session") });
     if (root) |r| {
         msg(void, defaults(), "setObject:forKey:", .{ objc.str(r), objc.str("root") });
     } else msg(void, defaults(), "removeObjectForKey:", .{objc.str("root")});
+}
+
+/// One window's session line.
+fn saveWin(wn: *Win, line: *std.ArrayList(u8), out: Id) void {
+    line.clearRetainingCapacity();
+    line.appendSlice(gpa, objc.utf8(msg(Id, wn.window, "stringWithSavedFrame", .{}))) catch return;
+    const kept = saveLayout(wn, wn.cards, line) catch return;
+    if (kept > 0) msg(void, out, "addObject:", .{objc.str(line.items)});
 }
 
 /// Writes `n`'s part of the session line. Returns how many files it kept.
@@ -2741,9 +2768,7 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
         pg.fresh = false;
         d.pages.append(gpa, pg) catch {
             // A draft that can't open stays on disk for `adoptDrafts`.
-            if (pg.draft) |s| gpa.free(s);
-            pg.draft = null;
-            pg.deinit();
+            pg.deinitKeepDraft();
             continue;
         };
         if (i == head[1] or d.pages.items.len == 1) on = d.pages.items.len - 1;
@@ -2866,15 +2891,9 @@ pub fn adoptDrafts() void {
         const abs = std.fmt.bufPrintSentinel(&pb, "{s}/{s}", .{ dir, name }, 0) catch continue;
         if (draftHeld(abs)) continue;
         var pg = loadDraft(abs) orelse continue;
-        const d = keyDoc() orelse (if (docs.items.len > 0) docs.items[0] else newDoc()) orelse {
-            if (pg.draft) |s| gpa.free(s);
-            pg.draft = null;
-            return pg.deinit();
-        };
+        const d = keyDoc() orelse (if (docs.items.len > 0) docs.items[0] else newDoc()) orelse return pg.deinitKeepDraft();
         if (!park(d, true)) {
-            if (pg.draft) |s| gpa.free(s);
-            pg.draft = null;
-            pg.deinit();
+            pg.deinitKeepDraft();
             continue;
         }
         install(d, pg);
@@ -2933,6 +2952,14 @@ fn askReload(d: *Doc) bool {
     var buf: [300]u8 = undefined;
     const title = std.fmt.bufPrint(&buf, "{s} changed in another app.", .{d.name()}) catch "This file changed in another app.";
     return askAlert(title, "Reloading it loses your unsaved changes here.", &.{ "Keep Mine", "Reload" }) == 1001;
+}
+
+/// Saving over a file another app changed since Zag read or saved it.
+fn askOverwrite(d: *Doc) bool {
+    if (background) return true;
+    var buf: [300]u8 = undefined;
+    const title = std.fmt.bufPrint(&buf, "{s} changed in another app.", .{d.name()}) catch "This file changed in another app.";
+    return askAlert(title, "Saving replaces that version with yours.", &.{ "Save Anyway", "Cancel" }) == 1000;
 }
 
 // ---- settings ----
@@ -3549,7 +3576,7 @@ fn layout(d: *Doc) void {
 }
 
 fn totalRows(d: *const Doc) usize {
-    return if (wrapping()) d.vfirst.items[d.vfirst.items.len - 1] else d.ed.buf.lines();
+    return if (wrapping() and d.vfirst.items.len > 0) d.vfirst.items[d.vfirst.items.len - 1] else d.ed.buf.lines();
 }
 
 fn rowOfLine(d: *const Doc, i: usize) usize {
@@ -3659,6 +3686,8 @@ const past_end = 3;
 /// The scroll's top and bottom. Typewriter mode lets the first and last
 /// rows reach the middle, so the top can be negative.
 fn scrollRange(d: *Doc) [2]f64 {
+    // A scroll can come before the draw that lays out a tab just shown.
+    layout(d);
     const lo = if (conf.typewriter) (lh - textH(d)) / 2 else 0;
     const hi = if (conf.typewriter) lo + f(totalRows(d) -| 1) * lh else f(totalRows(d) + past_end) * lh - textH(d);
     return .{ lo, @max(lo, hi) };
@@ -7625,6 +7654,8 @@ fn cut(d: *Doc) void {
 
 fn paste(d: *Doc) void {
     const s = objc.utf8(msg(Id, pasteboard(), "stringForType:", .{NSPasteboardTypeString}));
+    // An image or file on the clipboard has no text: the selection stays.
+    if (s.len == 0) return;
     if (d.mode != .edit) return promptType(d, s);
     const at = d.ed.sel()[0];
     d.ed.insert(gpa, s) catch {};

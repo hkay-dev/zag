@@ -5,6 +5,9 @@ const c = std.c;
 const Allocator = std.mem.Allocator;
 
 extern "c" fn mkstemp(template: [*:0]u8) c_int;
+extern "c" fn copyfile(from: [*:0]const u8, to: [*:0]const u8, state: ?*anyopaque, flags: u32) c_int;
+const copy_acl = 1 << 0;
+const copy_xattr = 1 << 2;
 
 pub const max_size = 1 << 30;
 
@@ -28,7 +31,8 @@ pub fn read(gpa: Allocator, path: [:0]const u8) ![]u8 {
 }
 
 /// Writes a temp file beside `path`, syncs it, then renames it over `path`,
-/// so a crash mid-save leaves the old file whole. Keeps the file's mode.
+/// so a crash mid-save leaves the old file whole. Keeps the file's mode,
+/// extended attributes (Finder tags among them) and ACL.
 pub fn write(path: [:0]const u8, data: []const u8) !void {
     var tmp_buf: [c.PATH_MAX + 16]u8 = undefined;
     const tmp = try std.fmt.bufPrintSentinel(&tmp_buf, "{s}.ze-XXXXXX", .{path}, 0);
@@ -44,7 +48,9 @@ pub fn write(path: [:0]const u8, data: []const u8) !void {
             n += @intCast(r);
         }
         var st: c.Stat = undefined;
-        const mode: c.mode_t = if (c.stat(path, &st) == 0) st.mode & 0o7777 else 0o644;
+        const old = c.stat(path, &st) == 0;
+        const mode: c.mode_t = if (old) st.mode & 0o7777 else 0o644;
+        if (old) _ = copyfile(path, tmp.ptr, null, copy_acl | copy_xattr);
         if (c.fchmod(fd, mode) != 0 or c.fsync(fd) != 0) return error.WriteFailed;
     }
     if (c.rename(tmp.ptr, path) != 0) return error.WriteFailed;
@@ -116,7 +122,10 @@ fn entries(dir: [:0]const u8) usize {
     return n;
 }
 
-test "save replaces the text, keeps the file's mode and leaves no temp file" {
+extern "c" fn setxattr(path: [*:0]const u8, name: [*:0]const u8, value: *const anyopaque, size: usize, position: u32, options: c_int) c_int;
+extern "c" fn getxattr(path: [*:0]const u8, name: [*:0]const u8, value: ?*anyopaque, size: usize, position: u32, options: c_int) isize;
+
+test "save replaces the text, keeps the file's mode and tags and leaves no temp file" {
     var tmpl = "/tmp/ze-test-XXXXXX".*;
     const dir = std.mem.span(mkdtemp(&tmpl).?);
     defer _ = c.rmdir(dir);
@@ -128,7 +137,11 @@ test "save replaces the text, keeps the file's mode and leaves no temp file" {
     try write(path, "old");
     try t.expectEqual(@as(c.mode_t, 0o644), modeOf(path));
     _ = c.chmod(path, 0o755);
+    try t.expectEqual(@as(c_int, 0), setxattr(path, "dev.hkay.zag.test", "red", 3, 0, 0));
     try write(path, "new text");
+    var tag: [8]u8 = undefined;
+    const n = getxattr(path, "dev.hkay.zag.test", &tag, tag.len, 0, 0);
+    try t.expectEqualStrings("red", tag[0..@intCast(@max(n, 0))]);
 
     const got = try read(t.allocator, path);
     defer t.allocator.free(got);
