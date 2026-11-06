@@ -2772,7 +2772,12 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
         for (&head) |*v| v.* = std.fmt.parseInt(usize, nums.next() orelse "0", 10) catch 0;
     }
     const d = newPane(w) orelse return null;
-    w.focus = d;
+    // The window's focus is read while installing (the sidebar's scroll to
+    // the file): the first card made holds it until `restoreWindow` picks
+    // the lit one.
+    if (for (docs.items) |o| {
+        if (o.win == w and o != d) break false;
+    } else true) w.focus = d;
     // The tabs wait as parked pages; only the lit one is installed, once.
     var on: usize = 0;
     for (0..head[0]) |i| {

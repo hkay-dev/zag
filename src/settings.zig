@@ -591,6 +591,9 @@ test "settings read colors, flags and numbers and skip what they don't know" {
         \\sidebar-width = 900
         \\light.comment = #102030
         \\dark.text = 0A0B0C
+        \\dark.header = #010203
+        \\light.selection = #040506
+        \\light.type = #070809
         \\dark.bogus = #FFFFFF
         \\nonsense line
     );
@@ -607,6 +610,9 @@ test "settings read colors, flags and numbers and skip what they don't know" {
     try t.expectEqual(@as(f64, 0x10) / 255, s.light.kinds[3][0]);
     try t.expectEqual(@as(f64, 0x0C) / 255, s.dark.fg[2]);
     try t.expectEqual(s.dark.fg, s.dark.kinds[0]);
+    try t.expectEqual(@as(f64, 0x03) / 255, s.dark.header[2]);
+    try t.expectEqual(@as(f64, 0x06) / 255, s.light.sel[2]);
+    try t.expectEqual(@as(f64, 0x09) / 255, s.light.kinds[6][2]);
     try t.expectEqual(widen(ayu_dark).bg, s.dark.bg);
 }
 
@@ -617,6 +623,9 @@ test "a written file reads back as the same settings" {
     const text = try render(t.allocator, &s);
     defer t.allocator.free(text);
     const back = parse(text);
+    try t.expect(std.mem.indexOf(u8, text, "\nsize = 16\n") != null);
+    try t.expect(std.mem.indexOf(u8, text, "font = \"Menlo-Regular\"\n") != null);
+    try t.expect(std.mem.indexOf(u8, text, "dark.caret = \"#FF0000\"\n") != null);
     try t.expectEqualStrings("Menlo-Regular", back.font());
     try t.expectEqual(s.size, back.size);
     try t.expectEqual(s.spacing, back.spacing);
