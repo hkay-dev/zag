@@ -559,7 +559,7 @@ pub fn prepare(gpa: Allocator, p: [:0]const u8) void {
     files.write(p, next) catch {};
 }
 
-/// Rewrites one line of the file, creating the file from `s` first if needed.
+/// Rewrites one line of the file, creating it as `ensure` does first if needed.
 pub fn store(gpa: Allocator, p: [:0]const u8, s: *const Settings, key: []const u8, value: []const u8) !void {
     try ensure(gpa, p, s);
     const text = try files.read(gpa, p);
