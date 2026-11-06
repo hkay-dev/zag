@@ -927,12 +927,17 @@ fn pull(pos: *f64, o: *f64, delta: f64, lo: f64, hi: f64, dim: f64) void {
     }
 }
 
+/// Redraws the window's sidebar strip alone.
+fn redrawSide(w: *Win) void {
+    msg(void, w.view, "setNeedsDisplayInRect:", .{Rect{ .w = side_w, .h = msg(Rect, w.view, "bounds", .{}).h }});
+}
+
 /// Display link callback: redraws while the scenery moves, otherwise just
 /// moves the carets, and pauses once everything has settled.
 fn tick(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
     if (w.busy) {
-        if (w.part) return msg(void, self, "setNeedsDisplayInRect:", .{Rect{ .w = side_w, .h = msg(Rect, self, "bounds", .{}).h }});
+        if (w.part) return redrawSide(w);
         return msg(void, self, "setNeedsDisplay:", .{true});
     }
     const now = CACurrentMediaTime();
@@ -4528,7 +4533,7 @@ fn sideClick(w: *Win, p: Point, flags: usize) void {
         w.side_t.snap(w.side_y);
         w.side_y = f(i) * side_h;
         w.side_t.aim(w.side_y, CACurrentMediaTime());
-        return refresh(w.focus);
+        return redrawSide(w);
     }
     const row = tree.rows.items[i];
     if (row.dir) {
@@ -4608,13 +4613,14 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     const many = w.cards.pane == null;
     for (&w.hot_t, 1..) |*t, i| t.aim(if (w.hot == i) 1 else 0, now);
     w.key_a.aim(if (key) 1 else 0, now);
-    // The sidebar's own motion (its picked and hovered rows, the + button)
-    // redraws only its strip; anything else redraws the window.
-    var busy = w.side_t.moving(now) or w.side_a.moving(now) or foldsBusy(now) or cardsMoving(w.cards) or
+    // The sidebar's own motion (its picked and hovered rows, the + button,
+    // its scroll and folding folders) redraws only its strip; anything else
+    // redraws the window.
+    var busy = w.side_a.moving(now) or cardsMoving(w.cards) or
         w.hot_t[0].moving(now) or
         w.pv_a.moving(now) or w.ghost_a.moving(now) or w.menu_a.moving(now) or w.fly != null or
         !w.lift.settled() or w.key_a.moving(now) or !side_stretch.settled() or !w.z.settled();
-    const side_busy = !w.sel.settled() or w.sel_a.moving(now) or w.hot_t[1].moving(now) or !w.hov.settled() or w.hov_a.moving(now);
+    const side_busy = w.side_t.moving(now) or foldsBusy(now) or !w.sel.settled() or w.sel_a.moving(now) or w.hot_t[1].moving(now) or !w.hov.settled() or w.hov_a.moving(now);
     for (w.pv) |s| busy = busy or !s.settled();
     busy = busy or w.press_t.moving(now);
     const down = w.press_t.at(now);
@@ -4623,9 +4629,11 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
         // A card springing in or folding away fades with its size.
         const grown = std.math.clamp(@min((d.size.x - 2 * gap) / 160, (d.size.y - 2 * gap) / 100), 0, 1);
         if (grown <= 0.01) continue;
-        // A strip redraw that doesn't reach this card leaves it be.
-        const card_rect: Rect = .{ .x = d.org.x + gap - 2, .y = d.org.y, .w = d.size.x - gap + 2, .h = d.size.y };
-        if (!hits(dirty, card_rect)) {
+        // A strip redraw that doesn't reach this card leaves it be, and one
+        // that reaches only its shadow draws just that.
+        const body: Rect = .{ .x = d.org.x + gap, .y = d.org.y, .w = d.size.x - gap, .h = d.size.y };
+        const shade: Rect = .{ .x = body.x - shadow_m, .y = body.y, .w = body.w - gap + 2 * shadow_m, .h = body.h };
+        if (!hits(dirty, shade)) {
             busy = busy or d.busy;
             gliding = gliding or d.cx.moving(now) or d.cy.moving(now);
             continue;
@@ -4638,7 +4646,9 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
             objc.CGContextSetAlpha(ctx, grown);
             objc.CGContextBeginTransparencyLayer(ctx, null);
         }
-        drawPane(d, ctx, th, dark, key, many, now);
+        if (hits(dirty, body)) drawPane(d, ctx, th, dark, key, many, now) else if (!conf.zen) {
+            cardShadow(ctx, dark, 0.5 + 0.5 * w.key_a.at(now), gap, gap, d.size.x - 2 * gap, d.size.y - 2 * gap);
+        }
         if (grown < 1) objc.CGContextEndTransparencyLayer(ctx);
         objc.CGContextRestoreGState(ctx);
         busy = busy or d.busy or (shaking >= 0 and shaking < 1);
@@ -6177,7 +6187,7 @@ fn mouseMoved(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const hot: u8 = if (tool) |t| (if (t == .sidebar) 1 else 2) else 0;
     if (hot != w.hot) {
         w.hot = hot;
-        refresh(w.focus);
+        msg(void, w.view, "setNeedsDisplay:", .{true});
     }
     const over = if (tool == null) paneAt(w, p) else null;
     for (docs.items) |d| if (d.win == w) {
@@ -6202,7 +6212,7 @@ fn sideHover(w: *Win, p: Point) void {
     if (row == w.hov_row and w.hov_gen == tree_gen) return;
     w.hov_row = row;
     w.hov_gen = tree_gen;
-    refresh(w.focus);
+    redrawSide(w);
 }
 
 fn setHover(d: *Doc, id: u32, shut: bool, plus: bool) void {
@@ -6210,19 +6220,19 @@ fn setHover(d: *Doc, id: u32, shut: bool, plus: bool) void {
     d.hover = id;
     d.hover_x = shut;
     d.plus_on = plus;
-    refresh(d);
+    msg(void, d.view, "setNeedsDisplay:", .{true});
 }
 
 fn mouseExited(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
     if (w.hot != 0) {
         w.hot = 0;
-        refresh(w.focus);
+        msg(void, w.view, "setNeedsDisplay:", .{true});
     }
     for (docs.items) |d| if (d.win == w) setHover(d, 0, false, false);
     if (w.hov_row != null) {
         w.hov_row = null;
-        refresh(w.focus);
+        redrawSide(w);
     }
 }
 
@@ -6303,7 +6313,7 @@ fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
         const dy = msg(f64, ev, "scrollingDeltaY", .{});
         w.side_y -= if (msg(bool, ev, "hasPreciseScrollingDeltas", .{})) dy else dy * lh;
         sideHover(w, at);
-        return refresh(w.focus);
+        return redrawSide(w);
     }
     const d = paneAt(w, at) orelse return;
     var dx = msg(f64, ev, "scrollingDeltaX", .{});

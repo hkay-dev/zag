@@ -78,7 +78,9 @@ an animation acts at once: a closing folder keeps sliding and the click maps thr
   card stops being blank or a prompt opens.
 - Scroll bar: 0.08 s in, 0.25 s out. The 1 s hold is a one-shot timer (`barHold:`), not display
   link frames, so `scenery()` doesn't wait on it. Sidebar-only motion (selection, hover, the +
-  button) redraws only the sidebar strip through the dirty rect; other motion redraws the window.
+  button, the list's scroll glide, folders folding in every window) redraws only the sidebar strip
+  through the dirty rect, and a card the strip reaches only by its shadow draws just that shadow;
+  other motion redraws the window.
 - Palette and quick open (zig-editor#fjkf): the first six rows stagger in 12 ms apart, and rows
   that move while filtering crossfade over 0.08 s.
 - Split share spring k 260 c 30. The gap drag snaps to 1/2, 1/3 and 2/3 within 6 pt, and past a
