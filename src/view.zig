@@ -258,6 +258,8 @@ fn barH() f64 {
 /// Loads the font the settings name, or the system monospace font.
 fn setFont() void {
     dropAttrs();
+    for (fallbacks.items) |e| if (e.fb.font != font) objc.CFRelease(e.fb.font.?);
+    fallbacks.clearRetainingCapacity();
     if (font != null) _ = msg(void, font, "release", .{});
     if (bold != null) _ = msg(void, bold, "release", .{});
     const NSFont = objc.class("NSFont");
@@ -304,9 +306,10 @@ fn setFont() void {
     path_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 3, @as(f64, 0) }), "retain", .{});
     path_off = (objc.CTFontGetAscent(path_font) - objc.CTFontGetDescent(path_font)) / 2;
     dropSideLines();
-    for (docs.items) |d| dropHead(d);
-    for (fallbacks.items) |e| if (e.fb.font != font) objc.CFRelease(e.fb.font.?);
-    fallbacks.clearRetainingCapacity();
+    for (docs.items) |d| {
+        dropHead(d);
+        for (d.slots.items) |*s| if (!s.gone) s.drop();
+    }
     msg(void, msg(Id, objc.class("NSFontManager"), "sharedFontManager", .{}), "setSelectedFont:isMultiple:", .{ font, false });
 }
 
@@ -325,10 +328,6 @@ fn utf16(cp: u21, out: *[2]u16) usize {
 /// has it (emoji, CJK).
 fn glyph(cp: u21, heavy: bool) Fallback {
     if (cp >= 0x20 and cp < 0x7f) return .{ .font = if (heavy) bold else font, .glyph = ascii[@intFromBool(heavy)][cp - 0x20] };
-    var units: [2]u16 = undefined;
-    const n = utf16(cp, &units);
-    var g: [2]u16 = .{ 0, 0 };
-    if (objc.CTFontGetGlyphsForCharacters(font, &units, &g, @intCast(n)) and g[0] != 0) return .{ .font = font, .glyph = g[0] };
     var lo: usize = 0;
     var hi = fallbacks.items.len;
     while (lo < hi) {
@@ -337,11 +336,18 @@ fn glyph(cp: u21, heavy: bool) Fallback {
     }
     if (lo < fallbacks.items.len and fallbacks.items[lo].cp == cp) return fallbacks.items[lo].fb;
     fallbacks.ensureUnusedCapacity(gpa, 1) catch return .{ .font = font, .glyph = 0 };
+    var units: [2]u16 = undefined;
+    const n = utf16(cp, &units);
+    var g: [2]u16 = .{ 0, 0 };
     var fb: Fallback = .{ .font = font, .glyph = 0 };
-    const alt = objc.fallbackFont(font, units[0..n]);
-    if (alt != null and objc.CTFontGetGlyphsForCharacters(alt, &units, &g, @intCast(n))) {
-        fb = .{ .font = alt, .glyph = g[0] };
-    } else if (alt != null) objc.CFRelease(alt.?);
+    if (objc.CTFontGetGlyphsForCharacters(font, &units, &g, @intCast(n)) and g[0] != 0) {
+        fb.glyph = g[0];
+    } else {
+        const alt = objc.fallbackFont(font, units[0..n]);
+        if (alt != null and objc.CTFontGetGlyphsForCharacters(alt, &units, &g, @intCast(n))) {
+            fb = .{ .font = alt, .glyph = g[0] };
+        } else if (alt != null) objc.CFRelease(alt.?);
+    }
     fallbacks.insertAssumeCapacity(lo, .{ .cp = cp, .fb = fb });
     return fb;
 }
@@ -393,7 +399,6 @@ const Ink = struct {
             const rel = col - col0;
             if (rel >= skip + max) break;
             if (rel >= skip and s[i] >= 0x20 and s[i] != 0x7f) {
-                const cp: u21 = if (s[i] < 0x80) s[i] else editor.decode(s, i).cp;
                 const kind: syntax.Kind = if (kinds) |ks| ks[i] else .text;
                 var paint = if (kinds != null) th.kinds[@intFromEnum(kind)] else color;
                 if (k.focus) |fo| {
@@ -405,7 +410,7 @@ const Ink = struct {
                         for (&paint, th.bg) |*v, bg| v.* = bg + (v.* - bg) * a;
                     }
                 }
-                k.put(glyph(cp, kind == .keyword), paint, x + f(rel - skip) * cw, y);
+                k.put(glyph(c.cp, kind == .keyword), paint, x + f(rel - skip) * cw, y);
             }
             col += c.w;
             i += c.len;
@@ -556,6 +561,7 @@ fn cardShadow(ctx: Id, dark: bool, alpha: f64, x: f64, y: f64, w: f64, h: f64) v
     // so flip the slices back, once.
     objc.CGContextScaleCTM(ctx, 1, -1);
     for (0..3) |r| for (0..3) |c| {
+        if (r == 1 and c == 1) continue;
         const dw = xs[c + 1] - xs[c];
         const dh = ys[r + 1] - ys[r];
         objc.CGContextDrawImage(ctx, .{ .x = xs[c], .y = -ys[r + 1], .w = dw, .h = dh }, cells[r * 3 + c]);
@@ -699,6 +705,7 @@ const Slot = struct {
     /// while it isn't the active tab, made on first draw.
     line: Id = null,
     thin: Id = null,
+    name_w: f64 = 0,
     /// The names cut short with an ellipsis to `cut_w` and `thin_cut_w`, each
     /// made when its weight draws on a squeezed tab.
     cut: Id = null,
@@ -725,6 +732,7 @@ const Slot = struct {
             objc.CFRelease(l);
             p.* = null;
         };
+        s.name_w = 0;
         s.cut_w = -1;
         s.thin_cut_w = -1;
     }
@@ -785,10 +793,14 @@ fn placeCaret(d: *Doc, now: f64, x: f64, y: f64, in_text: bool, spot: [3]usize, 
     }
     if (moved and d.shown and show and !d.snap) {
         const glide = glideTime(x - d.cx.to, y - d.cy.to);
-        d.cx.dur = glide;
-        d.cy.dur = if (conf.typewriter and in_text) scroll_time else glide;
-        d.cx.aim(x, now);
-        d.cy.aim(y, now);
+        if (x != d.cx.to) {
+            d.cx.dur = glide;
+            d.cx.aim(x, now);
+        }
+        if (y != d.cy.to) {
+            d.cy.dur = if (conf.typewriter and in_text) scroll_time else glide;
+            d.cy.aim(y, now);
+        }
     } else if (moved or !d.shown or !show or d.snap or d.cx.to != x or d.cy.to != y) {
         d.cx.snap(x);
         d.cy.snap(y);
@@ -828,7 +840,9 @@ fn moveCaret(d: *Doc, now: f64) void {
 }
 
 var fade_anim: Id = null;
+var fade_anim_key: Id = null;
 var blink_anim: Id = null;
+var blink_key: Id = null;
 
 /// Fades the layer in from clear over `dur`, as an opacity animation.
 /// The animation is made once; adding it copies it.
@@ -839,9 +853,10 @@ fn fadeIn(layer: Id, dur: f64) void {
         msg(void, a, "setFromValue:", .{msg(Id, num, "numberWithDouble:", .{@as(f64, 0)})});
         msg(void, a, "setToValue:", .{msg(Id, num, "numberWithDouble:", .{@as(f64, 1)})});
         fade_anim = msg(Id, a, "retain", .{});
+        fade_anim_key = msg(Id, objc.str("fade"), "retain", .{});
     }
     msg(void, fade_anim, "setDuration:", .{dur});
-    msg(void, layer, "addAnimation:forKey:", .{ fade_anim, objc.str("fade") });
+    msg(void, layer, "addAnimation:forKey:", .{ fade_anim, fade_anim_key });
 }
 
 /// Holds the caret solid for half a second, then fades it out, rests it
@@ -869,8 +884,9 @@ fn blink(caret: Id) void {
         msg(void, a, "setDuration:", .{@as(f64, 1)});
         msg(void, a, "setRepeatCount:", .{std.math.inf(f32)});
         blink_anim = msg(Id, a, "retain", .{});
+        blink_key = msg(Id, objc.str("blink"), "retain", .{});
     }
-    msg(void, caret, "addAnimation:forKey:", .{ blink_anim, objc.str("blink") });
+    msg(void, caret, "addAnimation:forKey:", .{ blink_anim, blink_key });
 }
 
 const max_flash = 64;
@@ -921,7 +937,7 @@ fn pillOver(k: *Ink, th: *const Theme, dark: bool, l: []const u8, ls: usize, sg:
     if (lo >= hi) return;
     const col = colAt(l, sg.start, sg.col, lo);
     const x0 = ox + (f(col - sg.col) - f(skip)) * cw;
-    const x1 = ox + (f(colAt(l, sg.start, sg.col, hi) - sg.col) - f(skip)) * cw;
+    const x1 = ox + (f(colAt(l, lo, col, hi) - sg.col) - f(skip)) * cw;
     const ctx = k.ctx;
     k.flush();
     objc.CGContextSaveGState(ctx);
@@ -4298,6 +4314,8 @@ const key_cell = 13.0;
 const check_col = 18.0;
 var panel_font: Id = null;
 var panel_small: Id = null;
+var panel_base: f64 = 0;
+var panel_small_base: f64 = 0;
 var check_img: Id = null;
 var check_rgb: Rgb = .{ -1, -1, -1 };
 
@@ -4316,6 +4334,8 @@ fn panelFonts() void {
     if (panel_font != null) return;
     panel_font = msg(Id, msg(Id, objc.class("NSFont"), "systemFontOfSize:", .{@as(f64, 13)}), "retain", .{});
     panel_small = msg(Id, msg(Id, objc.class("NSFont"), "systemFontOfSize:", .{@as(f64, 12)}), "retain", .{});
+    panel_base = rowBase(panel_font);
+    panel_small_base = rowBase(panel_small);
 }
 
 /// The baseline of text in `fnt`, centered in a row's height from its top.
@@ -4328,31 +4348,33 @@ fn rowBase(fnt: Id) f64 {
 fn rowText(ctx: Id, s: []const u8, fnt: Id, c: Rgb, x: f64, y: f64, room: f64) f64 {
     if (room < 4 or s.len == 0) return 0;
     const line = rowLine(s, fnt, room);
-    const base = rowBase(fnt);
-    return drawLine(ctx, line, c, x, y + base);
+    const base = if (fnt == panel_small) panel_small_base else panel_base;
+    paintLine(ctx, line.line, c, 1, x, y + base);
+    return line.w;
 }
 
 /// The lines the palette and quick open drew lately, so an open panel
 /// doesn't lay its rows out again every frame. Keyed by text, font and room;
 /// a full cache lets its oldest line go. Lines take the context's color, so
 /// a theme change doesn't touch them.
-const RowLine = struct { key: u64 = 0, line: Id = null };
+const RowLine = struct { key: u64 = 0, line: Id = null, w: f64 = 0 };
 var row_lines: [128]RowLine = @splat(.{});
 var row_next: usize = 0;
 
 /// `uiLine(s, fnt, room)` from `row_lines`, made on a miss. The cache owns it.
-fn rowLine(s: []const u8, fnt: Id, room: f64) Id {
+fn rowLine(s: []const u8, fnt: Id, room: f64) *const RowLine {
     var h = std.hash.Fnv1a_64.init();
     h.update(std.mem.asBytes(&fnt));
     h.update(std.mem.asBytes(&room));
     h.update(s);
     const key = h.final() | 1;
-    for (row_lines) |e| if (e.key == key) return e.line;
+    for (&row_lines) |*e| if (e.key == key) return e;
     const e = &row_lines[row_next];
     row_next = (row_next + 1) % row_lines.len;
     if (e.line) |l| objc.CFRelease(l);
     e.* = .{ .key = key, .line = uiLine(s, fnt, room) };
-    return e.line;
+    e.w = if (e.line != null) objc.CTLineGetTypographicBounds(e.line, null, null, null) else 0;
+    return e;
 }
 
 /// The caret-colored checkmark symbol, made again when the caret color changes.
@@ -4400,9 +4422,7 @@ fn panelRow(ctx: Id, d: *const Doc, th: *const Theme, p: usize, left: f64, right
         var it = (std.unicode.Utf8View.init(c.keys) catch return).iterator();
         while (it.nextCodepointSlice()) |g| : (at += key_cell) {
             const line = rowLine(g, panel_small, 1e5);
-            const gw = if (line != null) objc.CTLineGetTypographicBounds(line, null, null, null) else 0;
-            const base = rowBase(panel_small);
-            _ = drawLine(ctx, line, dim, at + (key_cell - gw) / 2, y + base);
+            paintLine(ctx, line.line, dim, 1, at + (key_cell - line.w) / 2, y + panel_small_base);
         }
         const room = right - keys_w - (if (cells > 0) @as(f64, 12) else 0) - x;
         const name = cmd_names.items[p];
@@ -4984,13 +5004,12 @@ fn dropSideLines() void {
     side_lines.clearRetainingCapacity();
 }
 
-/// Drops the header's folder and the tabs' names, made again on next draw.
-/// Folding tabs keep theirs, having no file left to make it from.
+/// Drops the header's folder, status and active tab's name.
 fn dropHead(d: *Doc) void {
     if (d.head) |l| objc.CFRelease(l);
     d.head = null;
     d.head_w = -1;
-    for (d.slots.items) |*s| if (!s.gone) s.drop();
+    if (slotOf(d, d.id)) |k| d.slots.items[k].drop();
     if (d.stat) |l| objc.CFRelease(l);
     d.stat = null;
     d.stat_at[0] = std.math.maxInt(u64);
@@ -5143,12 +5162,18 @@ fn drawLine(ctx: Id, line: Id, c: Rgb, x: f64, y: f64) f64 {
 /// `drawLine` at `a` of full strength.
 fn drawLineA(ctx: Id, line: Id, c: Rgb, a: f64, x: f64, y: f64) f64 {
     if (line == null) return 0;
+    paintLine(ctx, line, c, a, x, y);
+    return objc.CTLineGetTypographicBounds(line, null, null, null);
+}
+
+/// Draws a line without measuring it when its width is known or unused.
+fn paintLine(ctx: Id, line: Id, c: Rgb, a: f64, x: f64, y: f64) void {
+    if (line == null) return;
     objc.CGContextSetRGBFillColor(ctx, c[0], c[1], c[2], a);
     objc.CGContextSetTextPosition(ctx, x, y);
     objc.CTLineDraw(line, ctx);
     // The grid's glyph runs read the text matrix's offset too, so put it back.
     objc.flipText(ctx);
-    return objc.CTLineGetTypographicBounds(line, null, null, null);
 }
 
 /// A folder opens or closes; a file shows in the focused card, or with ⌘
@@ -5193,6 +5218,7 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     const dark = isDark(w);
     const th = &themes[@intFromBool(dark)];
     const r = msg(Rect, w.view, "bounds", .{});
+    const resizing = msg(bool, w.view, "inLiveResize", .{});
     dev_px = 1 / @max(1, msg(f64, w.window, "backingScaleFactor", .{}));
     const full = fitTitlebar(w, r);
     // A stretched sidebar edge springs back to its limit.
@@ -5282,7 +5308,7 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
             objc.CGContextSetAlpha(ctx, grown);
             objc.CGContextBeginTransparencyLayer(ctx, null);
         }
-        if (hits(dirty, body)) drawPane(d, ctx, th, dark, key, many, now) else if (w.z.x < 1) {
+        if (hits(dirty, body)) drawPane(d, ctx, th, dark, key, many, now, resizing) else if (w.z.x < 1) {
             cardShadow(ctx, dark, (1 - std.math.clamp(w.z.x, 0, 1)) * (0.5 + 0.5 * w.key_a.at(now)), gap, gap, d.size.x - 2 * gap, d.size.y - 2 * gap);
         }
         if (grown < 1) objc.CGContextEndTransparencyLayer(ctx);
@@ -5320,7 +5346,7 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
 /// Draws a card in its pane's coordinates: the text, the prompt line and
 /// the header. `win_key` says whether its window is key, and `many`
 /// whether the window has other cards, which lights the focused one's ring.
-fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many: bool, now: f64) void {
+fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many: bool, now: f64, resizing: bool) void {
     if (d.dark != dark) {
         d.dark = dark;
         msg(void, d.caret, "setBackgroundColor:", .{msg(Id, nscolor(th.caret), "CGColor", .{})});
@@ -5348,7 +5374,6 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // Jumps glide the scroll. Stepping past the edge a few rows at a time and
     // live resizing snap it (the trackpad snaps in scrollWheel), and the caret
     // and band move with the page so they don't bounce back to the edge.
-    const resizing = msg(bool, d.view, "inLiveResize", .{});
     if (d.sy != d.ys.to) {
         if (resizing or (!conf.typewriter and !d.ys.moving(now) and @abs(d.sy - d.ys.to) <= glide_rows * lh)) {
             const by = d.sy - d.ys.at(now);
@@ -5590,9 +5615,15 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         lexed = std.math.maxInt(usize);
         for (vis[0..nvis], first..) |v, row| {
             const ri = row - first;
-            if (pass == 1 and (reach[ri] == 2 or (reach[ri] == 0 and prev_a <= 0 and cur_m == null))) continue;
+            if (pass == 1 and reach[ri] == 2) continue;
             if (pass >= 2 and reach[ri] != 2) continue;
             const l = b.line(v.line);
+            const ls = b.lineStart(v.line);
+            if (pass == 1 and reach[ri] == 0) {
+                const fading_here = prev_a > 0 and d.prev_m[0] <= ls + l.len and d.prev_m[1] > ls;
+                const current_here = if (cur_m) |m| m[0] <= ls + l.len and m[1] > ls else false;
+                if (!fading_here and !current_here) continue;
+            }
             if (pass == 0) {
                 if (v.line != lexed) {
                     lexed = v.line;
@@ -5600,7 +5631,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
                 }
                 row_kinds[ri] = kinds;
             }
-            k.offset = b.lineStart(v.line);
+            k.offset = ls;
             const row_y = top_h + f(row) * lh - d.vy;
             // Later passes redraw only the last columns, at the x pass 0 gives them.
             const back = @min(cols, 2);
@@ -5781,7 +5812,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     if (stat_a > 0.01) {
         statusLine(d, card.w - 2 * pad_x);
         const sy = card.y + card.h - strip_h / 2 + path_off;
-        _ = drawLineA(ctx, d.stat, th.muted, stat_a * (0.62 + 0.38 * ka), @round(card.x + card.w - pad_x - d.stat_w), @round(sy));
+        paintLine(ctx, d.stat, th.muted, stat_a * (0.62 + 0.38 * ka), @round(card.x + card.w - pad_x - d.stat_w), @round(sy));
     }
 
     // The prompt line: find, replace, go to line, quick open and the palette.
@@ -6052,12 +6083,12 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
                 var nb: [48]u8 = undefined;
                 const nm = tabName(d, j, &nb);
                 s.line = uiLine(nm, tab_bold, 1e5);
+                s.name_w = if (s.line != null) objc.CTLineGetTypographicBounds(s.line, null, null, null) else 0;
                 s.thin = uiLine(nm, tab_font, 1e5);
                 s.icon = iconFor(if (tabPath(d, j) != null) nm else "");
             }
         }
-        const nw = if (s.line != null) objc.CTLineGetTypographicBounds(s.line, null, null, null) else 0;
-        if (s.sized) s.wid.aim(nw, now) else s.wid.snap(nw);
+        if (s.sized) s.wid.aim(s.name_w, now) else s.wid.snap(s.name_w);
         s.sized = true;
         _ = s.wid.step(now);
         const dirty = !s.gone and if (tabIndex(d, s.id)) |j| tabDirty(d, j) else false;
@@ -6174,9 +6205,9 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
         objc.CGContextSaveGState(ctx);
         objc.CGContextSetAlpha(ctx, folder_a);
         const fx = nx + 6 * (1 - folder_a);
-        const fw = drawLine(ctx, d.head, th.muted, fx, @round(hy + path_off));
+        paintLine(ctx, d.head, th.muted, 1, fx, @round(hy + path_off));
         for (d.head_marks[0..d.head_n]) |m| drawIcon(icon(.crumb, dark, th), fx + m - 5, hy - 5, 10);
-        if (fw > 0) nx += fw + 2 * cw;
+        if (d.head_lw > 0) nx += d.head_lw + 2 * cw;
         objc.CGContextRestoreGState(ctx);
     }
     d.plus_x = if (a > 0.5) end + 14 else -100;
@@ -6270,7 +6301,7 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, ka: f64, a:
     }
     tile(s.icon, sx + pad, @round(hy - ts / 2));
     const nx = sx + pad + ts + 7;
-    const nw = if (s.line != null) objc.CTLineGetTypographicBounds(s.line, null, null, null) else 0;
+    const nw = s.name_w;
     // The name stops short of the close button.
     const shut_x = sx + s.w - pad - tab_shut * a;
     objc.CGContextSaveGState(ctx);
@@ -6300,7 +6331,7 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, ka: f64, a:
     // have different widths, so drawing both at once smears the name.
     objc.CGContextSetAlpha(ctx, alpha * ink_a);
     const name = if (squeezed and pick.* != null) pick.* else if (heavy) s.line else s.thin;
-    _ = drawLine(ctx, name, ink, nx, by);
+    paintLine(ctx, name, ink, 1, nx, by);
     objc.CGContextRestoreGState(ctx);
     // The unsaved dot sits after the name with one tab and slides into
     // the close button's place with more; hovering trades it for the ×.

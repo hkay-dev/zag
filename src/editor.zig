@@ -498,12 +498,12 @@ pub fn width(cp: u21) usize {
     };
 }
 
-/// Cells taken by the char at `i` when it starts at column `col`.
-pub fn cells(l: []const u8, i: usize, col: usize) struct { w: usize, len: usize } {
-    if (l[i] == '\t') return .{ .w = tab_width - col % tab_width, .len = 1 };
-    if (l[i] < 0x80) return .{ .w = 1, .len = 1 };
+/// The codepoint, byte length and cells taken at column `col`.
+pub fn cells(l: []const u8, i: usize, col: usize) struct { cp: u21, w: usize, len: usize } {
+    if (l[i] == '\t') return .{ .cp = '\t', .w = tab_width - col % tab_width, .len = 1 };
+    if (l[i] < 0x80) return .{ .cp = l[i], .w = 1, .len = 1 };
     const d = decode(l, i);
-    return .{ .w = width(d.cp), .len = d.len };
+    return .{ .cp = d.cp, .w = width(d.cp), .len = d.len };
 }
 
 /// Display column of byte `n` in line `l`.
@@ -567,6 +567,24 @@ pub fn rowCount(line: []const u8, cols: usize) usize {
 
 const t_ = std.testing;
 const gpa_t = t_.allocator;
+
+test "cells returns the decoded codepoint with its width and byte length" {
+    const cases = .{
+        .{ "a", 0, @as(u21, 'a'), 1, 1 },
+        .{ "\t", 1, @as(u21, '\t'), tab_width - 1, 1 },
+        .{ "ü", 0, @as(u21, 'ü'), 1, 2 },
+        .{ "漢", 0, @as(u21, '漢'), 2, 3 },
+        .{ "😀", 0, @as(u21, 0x1F600), 2, 4 },
+        .{ "\xff", 0, @as(u21, 0xFFFD), 1, 1 },
+        .{ "\xe2\x82", 0, @as(u21, 0xFFFD), 1, 1 },
+    };
+    inline for (cases) |c| {
+        const got = cells(c[0], 0, c[1]);
+        try t_.expectEqual(c[2], got.cp);
+        try t_.expectEqual(@as(usize, c[3]), got.w);
+        try t_.expectEqual(@as(usize, c[4]), got.len);
+    }
+}
 
 test "newline keeps indentation and undo is one step per typing run" {
     var e = try Editor.init(gpa_t, "fn x() {\n    a");
