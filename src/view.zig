@@ -4059,16 +4059,21 @@ fn listTop() f64 {
 const max_stuck = 3;
 
 /// The open folders that hold the first row in view, outermost first, into
-/// `out`. They pin over the rows they cover, so the row they hold is the one
-/// under them: a few passes settle it.
+/// `out`. An open folder pins the moment its row reaches its slot, so it never
+/// slides under the ones above. They pin over the rows they cover, so the row
+/// they hold is the one under them: a few passes settle it.
 fn stuckRows(sy: f64, out: *[max_stuck]usize) usize {
     const rows = tree.rows.items;
     var n: usize = 0;
     for (0..max_stuck + 1) |_| {
         const t = @as(usize, @intFromFloat(@max(@floor(sy / side_h), 0))) + n;
         if (t >= rows.len) break;
-        // Walking back from a row, the first one a level up is its folder.
         var m: usize = 0;
+        if (t + 1 < rows.len and rows[t + 1].depth > rows[t].depth and rows[t].depth < max_stuck) {
+            out[rows[t].depth] = t;
+            m += 1;
+        }
+        // Walking back from a row, the first one a level up is its folder.
         var need = @as(isize, rows[t].depth) - 1;
         var i = t;
         while (need >= 0 and i > 0) {
