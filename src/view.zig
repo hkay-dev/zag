@@ -1126,10 +1126,11 @@ const Doc = struct {
     held_tally: [64]u8 = undefined,
     held_n: usize = 0,
     /// The status strip's line, made again when what it shows changes: what
-    /// it was made for (caret, anchor, changes, doc, length) and its width.
+    /// it was made for (caret, anchor, changes, doc, length, room) and its
+    /// width; it's cut with an ellipsis to the room.
     /// The words counted for (doc, changes, length) and the count.
     stat: Id = null,
-    stat_at: [5]u64 = @splat(std.math.maxInt(u64)),
+    stat_at: [6]u64 = @splat(std.math.maxInt(u64)),
     stat_w: f64 = 0,
     words_at: [3]u64 = @splat(std.math.maxInt(u64)),
     words_n: usize = 0,
@@ -4726,10 +4727,11 @@ fn put(buf: []u8, n: *usize, comptime fmt: []const u8, args: anytype) void {
 /// The status strip's line: the caret's line and column, the selection's
 /// size, and for text and Markdown the words. Made again only when the caret,
 /// the selection or the text changed; the words are counted once per change.
-fn statusLine(d: *Doc) void {
+fn statusLine(d: *Doc, room: f64) void {
     const b = &d.ed.buf;
     const t = d.ed.text();
-    const at = [5]u64{ d.ed.cur, d.ed.anchor, b.changes, d.id, t.len };
+    const avail = @max(room, 0);
+    const at = [6]u64{ d.ed.cur, d.ed.anchor, b.changes, d.id, t.len, @intFromFloat(avail) };
     if (d.stat != null and std.mem.eql(u64, &at, &d.stat_at)) return;
     d.stat_at = at;
     var buf: [160]u8 = undefined;
@@ -4754,7 +4756,7 @@ fn statusLine(d: *Doc) void {
         put(&buf, &n, "  ·  {s} word{s}", .{ grouped(&g, d.words_n), if (d.words_n == 1) "" else "s" });
     }
     if (d.stat) |l| objc.CFRelease(l);
-    d.stat = uiLine(buf[0..n], path_font, 1e9);
+    d.stat = uiLine(buf[0..n], path_font, avail);
     d.stat_w = if (d.stat != null) objc.CTLineGetTypographicBounds(d.stat, null, null, null) else 0;
 }
 
@@ -5088,6 +5090,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     const load = std.math.clamp((now - d.load_t) / loadDur(d), 0, 1);
     const loaded = 1 - (1 - load) * (1 - load) * (1 - load);
     objc.CGContextSaveGState(ctx);
+    // Text stops above the status strip rather than running under it.
+    objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = card.w, .h = card.h - stripH(d) * (1 - d.pbar.at(now)) });
     if (loaded < 1) {
         if (d.rise) {
             objc.CGContextSetAlpha(ctx, loaded);
@@ -5407,7 +5411,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // as it rises and back as it sinks, and away with Zen.
     const strip_a = zen_k * (1 - d.pbar.at(now));
     if (strip_a > 0.01) {
-        statusLine(d);
+        statusLine(d, card.w - 2 * pad_x);
         const sy = card.y + card.h - strip_h / 2 + path_off;
         _ = drawLineA(ctx, d.stat, th.muted, strip_a * (0.62 + 0.38 * ka), @round(card.x + card.w - pad_x - d.stat_w), @round(sy));
     }
