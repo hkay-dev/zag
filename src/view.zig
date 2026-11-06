@@ -4077,7 +4077,9 @@ fn stuckRows(sy: f64, out: *[max_stuck]usize) usize {
         const t = @as(usize, @intFromFloat(@max(@floor(sy / side_h), 0))) + n;
         if (t >= rows.len) break;
         var m: usize = 0;
-        if (t + 1 < rows.len and rows[t + 1].depth > rows[t].depth and rows[t].depth < max_stuck) {
+        // Only once it has moved past its slot: sitting exactly on it, the row draws itself.
+        const past = sy > @as(f64, @floatFromInt(t - n)) * side_h;
+        if (past and t + 1 < rows.len and rows[t + 1].depth > rows[t].depth and rows[t].depth < max_stuck) {
             out[rows[t].depth] = t;
             m += 1;
         }
