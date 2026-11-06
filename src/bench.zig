@@ -94,6 +94,13 @@ fn run(_: Id, _: Sel, _: Id) callconv(.c) void {
     settle();
     memory("mem_key_mb", "peak_key_mb");
 
+    // Column zero avoids auto-indent, so each backspace joins one inserted line.
+    command("moveToBeginningOfParagraph:");
+    settle();
+    for (0..50) |_| step("enter_ms", false, command, .{"insertNewline:"});
+    for (0..50) |_| step("join_ms", false, command, .{"deleteBackward:"});
+    settle();
+
     // Scrolling down and back up with the trackpad.
     for (0..400) |i| step("scroll_ms", false, scroll, .{@as(i32, if (i < 200) -40 else 40)});
     settle();

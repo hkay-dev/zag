@@ -3890,7 +3890,7 @@ fn refresh(d: *Doc) void {
             if (row != null and row.? != d.ed.buf.lineOf(d.ed.cur)) retitle(d) else msg(void, d.view, "performSelector:withObject:afterDelay:", .{ sel, @as(Id, null), @as(f64, 0.6) });
         }
     }
-    preview.update(d, &themes);
+    preview.update(d, &themes, isDark(d.win));
     var edited = false;
     for (docs.items) |o| if (o.win == d.win and o.dirty()) {
         edited = true;
@@ -5446,7 +5446,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     if (d.dark != dark) {
         d.dark = dark;
         msg(void, d.caret, "setBackgroundColor:", .{msg(Id, nscolor(th.caret), "CGColor", .{})});
-        preview.update(d, &themes);
+        preview.update(d, &themes, dark);
     }
     const r = bounds(d);
     const focused = d.win.focus == d;
@@ -7425,7 +7425,7 @@ fn contrastChanged(_: Id, _: Sel, _: Id) callconv(.c) void {
     buildThemes();
     dropIcons();
     for (wins.items) |w| msg(void, w.view, "setNeedsDisplay:", .{true});
-    for (docs.items) |d| preview.update(d, &themes);
+    for (docs.items) |d| preview.update(d, &themes, isDark(d.win));
 }
 
 extern const NSPasteboardTypeFileURL: Id;
@@ -7880,8 +7880,17 @@ fn previousCard(d: *Doc) void {
     stepCard(d, -1);
 }
 
+fn previewText(id: u32) ?[]const u8 {
+    for (docs.items) |d| {
+        if (d.closing) continue;
+        if (d.id == id) return d.ed.text();
+        for (d.pages.items) |*p| if (p.id == id) return p.ed.text();
+    }
+    return null;
+}
+
 fn markdownPreview(d: *Doc) void {
-    preview.toggle(d.window, d.path orelse "", d.ed.text(), &themes[@intFromBool(isDark(d.win))]);
+    preview.toggle(d.window, d.path orelse "", d.id, &previewText, &themes[@intFromBool(isDark(d.win))]);
 }
 
 fn comment(d: *Doc) void {

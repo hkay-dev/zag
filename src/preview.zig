@@ -13,9 +13,11 @@ var source: Id = null;
 var path: Id = null;
 var theme: settings.Theme = undefined;
 var fade = false;
-/// The doc and edit count `source` was last made from; `update` skips the doc until either changes.
+/// The doc and edit count last seen by `update`.
 var seen_id: u32 = std.math.maxInt(u32);
 var seen_changes: u64 = 0;
+var pending: ?u32 = null;
+var text_of: *const fn (u32) ?[]const u8 = undefined;
 /// Fonts and paragraph styles don't depend on the theme, so each is made once and kept.
 /// `fonts[block][traits]`: body, three heading sizes, mono; each with italic and bold added.
 var fonts: [5][4]Id = @splat(@splat(null));
@@ -38,6 +40,7 @@ fn closed(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     window = null;
     text = null;
     fade = false;
+    pending = null;
 }
 pub fn close(w: Id) void {
     if (owner == w) msg(void, window, "close", .{});
@@ -70,26 +73,20 @@ fn resized(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     msg(void, text, "setTextContainerInset:", .{objc.Point{ .x = @max(28, @floor((w - column) / 2)), .y = 24 }});
 }
 /// `themes` are the ones the editor draws with (light, dark): zen's grey and Increase Contrast included.
-pub fn update(d: anytype, themes: *const [2]settings.Theme) void {
+pub fn update(d: anytype, themes: *const [2]settings.Theme, dark: bool) void {
     if (owner != d.window) return;
-    const active = std.mem.eql(u8, objc.utf8(path), d.path orelse "");
-    const appearance = objc.utf8(msg(Id, msg(Id, d.view, "effectiveAppearance", .{}), "name", .{}));
-    const th = &themes[@intFromBool(std.mem.indexOf(u8, appearance, "Dark") != null)];
-    const same_theme = std.meta.eql(theme, th.*);
     // A caret move or scroll changes nothing: `changes` counts every edit, undo and redo.
-    if (same_theme and (!active or (seen_id == d.id and seen_changes == d.ed.buf.changes))) return;
+    const unchanged = seen_id == d.id and seen_changes == d.ed.buf.changes;
+    const th = &themes[@intFromBool(dark)];
+    const same_theme = std.meta.eql(theme, th.*);
+    if (unchanged and same_theme) return;
+    const active = unchanged or std.mem.eql(u8, objc.utf8(path), d.path orelse "");
     var edited = !same_theme;
-    if (active and (seen_id != d.id or seen_changes != d.ed.buf.changes)) {
-        const first = seen_id != d.id;
+    if (active and !unchanged) {
         seen_id = d.id;
         seen_changes = d.ed.buf.changes;
-        const bytes = d.ed.text();
-        // The first look at a doc (the preview just opened, or another tab came back) compares once.
-        if (!first or !std.mem.eql(u8, objc.utf8(source), bytes)) {
-            msg(void, source, "release", .{});
-            source = msg(Id, objc.str(bytes), "retain", .{});
-            edited = true;
-        }
+        pending = d.id;
+        edited = true;
     }
     if (!edited) return;
     fade = fade or !same_theme;
@@ -97,7 +94,7 @@ pub fn update(d: anytype, themes: *const [2]settings.Theme) void {
     msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:", .{target});
     msg(void, target, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("render:"), @as(Id, null), @as(f64, 0.15) });
 }
-pub fn toggle(w: Id, name: []const u8, bytes: []const u8, th: *const settings.Theme) void {
+pub fn toggle(w: Id, name: []const u8, id: u32, getter: *const fn (u32) ?[]const u8, th: *const settings.Theme) void {
     if (window != null) { msg(void, window, "close", .{}); return; }
     if (target == null) {
         const c = objc.ClassBuilder.begin("NSObject", "ZePreview");
@@ -111,7 +108,11 @@ pub fn toggle(w: Id, name: []const u8, bytes: []const u8, th: *const settings.Th
     path = msg(Id, objc.str(name), "mutableCopy", .{});
     seen_id = std.math.maxInt(u32);
     theme = th.*;
-    source = msg(Id, objc.str(bytes), "retain", .{});
+    // A source left from an earlier opening would match and skip the first render.
+    msg(void, source, "release", .{});
+    source = null;
+    pending = id;
+    text_of = getter;
     const frame: objc.Rect = .{ .w = 620, .h = 700 };
     window = msg(Id, msg(Id, objc.class("NSWindow"), "alloc", .{}), "initWithContentRect:styleMask:backing:defer:", .{ frame, @as(usize, 1 | 2 | 4 | 8), @as(usize, 2), false });
     retitle();
@@ -168,6 +169,17 @@ fn style(flags: usize) Id {
     return slot.*;
 }
 fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
+    if (pending) |id| {
+        pending = null;
+        if (text_of(id)) |bytes| {
+            if (source != null and std.mem.eql(u8, objc.utf8(source), bytes)) {
+                if (!fade) return;
+            } else {
+                msg(void, source, "release", .{});
+                source = msg(Id, objc.str(bytes), "retain", .{});
+            }
+        }
+    }
     const options = objc.new("NSAttributedStringMarkdownParsingOptions");
     defer msg(void, options, "release", .{});
     msg(void, options, "setInterpretedSyntax:", .{@as(isize, 0)});

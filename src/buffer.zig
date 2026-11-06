@@ -35,9 +35,16 @@ pub const Buffer = struct {
 
     pub fn init(gpa: Allocator, bytes: []const u8) !Buffer {
         var b: Buffer = .{};
-        try b.text.appendSlice(gpa, bytes);
-        try b.starts.append(gpa, 0);
-        for (bytes, 0..) |c, i| if (c == '\n') try b.starts.append(gpa, @intCast(i + 1));
+        errdefer b.deinit(gpa);
+        try b.text.ensureTotalCapacityPrecise(gpa, bytes.len);
+        b.text.appendSliceAssumeCapacity(bytes);
+        try b.starts.ensureTotalCapacityPrecise(gpa, std.mem.count(u8, bytes, "\n") + 1);
+        b.starts.appendAssumeCapacity(0);
+        var pos: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, bytes, pos, '\n')) |i| {
+            pos = i + 1;
+            b.starts.appendAssumeCapacity(@intCast(pos));
+        }
         return b;
     }
 
@@ -211,6 +218,17 @@ fn expectStarts(b: *const Buffer) !void {
     try want.append(t.allocator, 0);
     for (b.text.items, 0..) |c, i| if (c == '\n') try want.append(t.allocator, @intCast(i + 1));
     try t.expectEqualSlices(u32, want.items, b.starts.items);
+}
+
+test "initial text and line starts have exact capacity" {
+    for ([_][]const u8{ "", "one", "\n", "one\ntwo\n", "one\r\n\r\ntwo" }) |bytes| {
+        var b = try Buffer.init(t.allocator, bytes);
+        defer b.deinit(t.allocator);
+        try t.expectEqualStrings(bytes, b.text.items);
+        try t.expectEqual(bytes.len, b.text.capacity);
+        try t.expectEqual(std.mem.count(u8, bytes, "\n") + 1, b.starts.capacity);
+        try expectStarts(&b);
+    }
 }
 
 test "line starts stay right through random edits, undo and redo" {

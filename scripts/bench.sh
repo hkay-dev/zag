@@ -90,6 +90,10 @@ case ${1:-} in
         open -W -g -j -n "$app" --env HOME="$home" --env ZE_BENCH="$out" --env ZE_BENCH_LAUNCH_ONLY=1 \
           --stdout "$out/log.txt" --stderr "$out/log.txt"
       else
+        if [ "${ZE_BENCH_WRAP:-0}" = 1 ]; then
+          mkdir -p "$home/.config/zag"
+          printf 'wrap = true\n' > "$home/.config/zag/config.toml"
+        fi
         open -W -g -j -n "$app" --env HOME="$home" --env ZE_BENCH="$out" --env ZE_BENCH_HOLD="${ZE_BENCH_HOLD:-0}" \
           --env ZE_BENCH_ROOT="$data" --env ZE_BENCH_QUICKOPEN_ROOT="$homedata" --env ZE_BENCH_FILES="$files" \
           --stdout "$out/log.txt" --stderr "$out/log.txt"
