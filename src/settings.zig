@@ -220,8 +220,7 @@ pub const Settings = struct {
         s.look = .dark;
         s.light_scheme = i;
         s.dark_scheme = i;
-        s.light = black;
-        s.dark = black;
+        s.dark = schemes[i].theme;
     }
 };
 
@@ -383,7 +382,7 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         \\line-numbers = {s}
         \\# Hide the window's chrome and center an 80-column grey page: on or off.
         \\zen = {s}
-        \\# Late-Night Focus turns on zen, typewriter, paragraph focus and the Black theme without changing the settings above: on or off.
+        \\# Late-Night Focus: zen, typewriter, paragraph focus and Black on top of the above: on or off.
         \\late-night = {s}
         \\# Show the folder's files on the left of the window: on or off.
         \\sidebar = {s}
@@ -588,7 +587,6 @@ test "late-night covers the saved look and is written back as a flag" {
     try t.expect(s.late_night and !s.zen and s.look == .light);
     s.lateNight();
     try t.expect(s.zen and s.typewriter and s.focus == .paragraph and s.look == .dark);
-    try t.expectEqual(black, s.light);
     try t.expectEqual(black, s.dark);
     const text = try render(t.allocator, &parse("late-night = on\n"));
     defer t.allocator.free(text);
