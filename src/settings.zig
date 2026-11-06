@@ -164,6 +164,8 @@ pub const Settings = struct {
     pairs: bool = true,
     focus: Focus = .off,
     typewriter: bool = false,
+    /// A column of line numbers beside the text.
+    line_numbers: bool = true,
     /// Hides the window's chrome and centers an 80-column grey page.
     zen: bool = false,
     /// The folder tree on the left of folder windows.
@@ -295,6 +297,8 @@ pub fn parse(text: []const u8) Settings {
             s.focus = std.meta.stringToEnum(Focus, val) orelse s.focus;
         } else if (std.mem.eql(u8, key, "typewriter")) {
             s.typewriter = flag(val) orelse s.typewriter;
+        } else if (std.mem.eql(u8, key, "line-numbers")) {
+            s.line_numbers = flag(val) orelse s.line_numbers;
         } else if (std.mem.eql(u8, key, "zen")) {
             s.zen = flag(val) orelse s.zen;
         } else if (std.mem.eql(u8, key, "sidebar")) {
@@ -339,6 +343,8 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         \\focus = {s}
         \\# Keep the caret's row in the middle as you type: on or off.
         \\typewriter = {s}
+        \\# Number the lines beside the text: on or off.
+        \\line-numbers = {s}
         \\# Hide the window's chrome and center an 80-column grey page: on or off.
         \\zen = {s}
         \\# Show the folder's files on the left of the window: on or off.
@@ -366,6 +372,7 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         if (s.pairs) "on" else "off",
         @tagName(s.focus),
         if (s.typewriter) "on" else "off",
+        if (s.line_numbers) "on" else "off",
         if (s.zen) "on" else "off",
         if (s.sidebar) "on" else "off",
         decimal(&wbuf, s.sidebar_width),
@@ -482,6 +489,7 @@ test "a written file reads back as the same settings" {
     try t.expect(back.wrap);
     try t.expectEqual(s.focus, back.focus);
     try t.expectEqual(s.typewriter, back.typewriter);
+    try t.expect(back.line_numbers);
     try t.expect(back.zen);
     try t.expectEqual(@as(f64, 320), back.sidebar_width);
     try t.expectEqual(Look.dark, back.look);

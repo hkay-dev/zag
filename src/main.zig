@@ -190,6 +190,7 @@ fn buildMenu(delegate: Id) void {
     _ = item(v, "Actual Size", "zoomReset:", "0", cmd);
     separator(v);
     view.wrap_item = item(v, "Soft Wrap", "toggleWrap:", "z", opt);
+    view.lines_item = item(v, "Line Numbers", "toggleLineNumbers:", "l", cmd | shift);
     view.pairs_item = item(v, "Auto-Close Brackets", "togglePairs:", "", 0);
     view.sidebar_item = item(v, "Sidebar", "toggleSidebar:", "\\", cmd);
     view.zen_item = item(v, "Zen Mode", "toggleZen:", "z", ctrl | cmd);
@@ -270,6 +271,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     d.method("applicationWillTerminate:", @ptrCast(act(view.saveSession, .{})), "v@:@");
     d.method("openSettings:", @ptrCast(act(view.openSettings, .{})), "v@:@");
     d.method("toggleWrap:", @ptrCast(act(view.toggleWrap, .{})), "v@:@");
+    d.method("toggleLineNumbers:", @ptrCast(act(view.toggleLineNumbers, .{})), "v@:@");
     d.method("togglePairs:", @ptrCast(act(view.togglePairs, .{})), "v@:@");
     d.method("toggleSidebar:", @ptrCast(act(view.toggleSidebar, .{})), "v@:@");
     d.method("toggleTypewriter:", @ptrCast(act(view.toggleTypewriter, .{})), "v@:@");

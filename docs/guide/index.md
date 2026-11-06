@@ -259,6 +259,14 @@ window. ↑ and ↓ move by screen rows, and ⌘← and ⌘→ go to the start a
 ⌃E still go to the ends of the whole line. Resizing the window rewraps the text. The setting
 applies to every window and is remembered.
 
+## Line numbers
+
+**View > Line Numbers** (⇧⌘L) shows a column of line numbers on the left of the text. The
+caret's line is brighter than the rest. With soft wrap, only the first row of each line has a
+number. The column stays put when a long line scrolls sideways, and clicking in it puts the caret
+at the start of that line. It widens when the file reaches 100 lines, 1,000 lines and so on, and
+Zen mode hides it. It's on by default, applies to every window and is remembered.
+
 ## Focus
 
 **View > Focus** keeps the caret's range bright and fades the rest toward the page color:
@@ -400,6 +408,7 @@ wrap = off
 pairs = on               # auto-close brackets and quotes
 focus = off              # off, line, sentence or paragraph
 typewriter = off         # keep the caret's row in the middle
+line-numbers = on        # number the lines beside the text
 zen = off                # hide the chrome and center an 80-column grey page
 sidebar = on             # the folder's files on the left
 sidebar-width = 250      # in points, from 150 to 500

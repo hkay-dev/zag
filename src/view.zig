@@ -126,7 +126,22 @@ fn rightEdge(d: *const Doc) f64 {
 /// sits in the middle of the card.
 fn padL(d: *const Doc) f64 {
     const z = std.math.clamp(d.win.z.x, 0, 1);
-    return pad_x + (@max(pad_x, (d.size.x - 80 * cw) / 2 - gap) - pad_x) * z;
+    return pad_x + (@max(pad_x, (d.size.x - 80 * cw) / 2 - gap) - pad_x) * z + d.gw;
+}
+
+/// The line numbers' width in columns: the line count's digits, at least
+/// two, and a gap and a half before the text. Zero with them off.
+fn gutCols(d: *const Doc) f64 {
+    if (!conf.line_numbers) return 0;
+    var digits: usize = 2;
+    var n = d.ed.buf.lines();
+    while (n >= 100) : (n /= 10) digits += 1;
+    return f(digits) + 1.5;
+}
+
+/// The gutter's width once it's done easing; zen has none.
+fn gutter(d: *const Doc) f64 {
+    return if (conf.zen) 0 else d.gut.to * cw;
 }
 
 /// Soft wrap is on, or zen wraps at 80 columns.
@@ -175,6 +190,7 @@ var conf_path: ?[:0]u8 = null;
 var conf_stamp: ?files.Stamp = null;
 /// View menu items that show a checkmark, set by the menu builder.
 pub var wrap_item: Id = null;
+pub var lines_item: Id = null;
 pub var pairs_item: Id = null;
 pub var sidebar_item: Id = null;
 pub var focus_items: [4]Id = @splat(null);
@@ -900,6 +916,7 @@ fn loadDur(d: *const Doc) f64 {
 fn scenery(d: *const Doc, now: f64) bool {
     return d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.band_a.moving(now) or now < d.focus_t0 + focus_time or d.focus_a.moving(now) or d.panel.moving(now) or d.lit.moving(now) or
         d.inked.moving(now) or
+        d.gut.moving(now) or
         d.prompt_t.moving(now) or d.pbar.moving(now) or now < d.shake_t0 + shake_time or now < d.card_shake_t0 + shake_time or d.hint.moving(now) or (d.blank_t0 >= 0 and now < d.blank_t0 + hint_delay) or
         d.plus_t.moving(now) or !d.pick_s.settled() or tabsMoving(d, now) or
         (d.pick_live and (now < d.rows_t0 + row_lag * 5 + row_fade or now < d.pick_t0 + xfade_time)) or
@@ -1088,6 +1105,10 @@ const Doc = struct {
     /// How much of the dimming shows: 0 with Focus off, 1 with it on.
     focus_a: Tween = .{ .dur = focus_time },
     focus_on: bool = false,
+    /// The line numbers' width in columns, and in points as drawn (eased, and
+    /// scaled away by zen).
+    gut: Tween = .{ .dur = tab_time },
+    gw: f64 = 0,
     had_sel: bool = false,
     sel_t0: f64 = 0,
     /// The selection as last drawn and the buffer's change count then: when the
@@ -1642,6 +1663,7 @@ fn install(d: *Doc, pg: Page) void {
     d.had_sel = false;
     d.sel_out.snap(0);
     d.snap = true;
+    d.gut.snap(gutCols(d));
     d.load_t = CACurrentMediaTime();
     d.rise = pg.fresh;
     d.caret_fade = true;
@@ -2253,6 +2275,7 @@ fn newPane(w: *Win) ?*Doc {
     const d = gpa.create(Doc) catch return null;
     d.* = .{ .ed = Editor.init(gpa, "") catch return null, .id = newId(), .win = w, .window = w.window, .view = w.view };
     if (conf.focus != .off) d.focus_a.snap(1);
+    d.gut.snap(gutCols(d));
     docs.append(gpa, d) catch return null;
     d.caret = msg(Id, objc.class("CALayer"), "layer", .{});
     msg(void, d.caret, "setCornerRadius:", .{@as(f64, 1)});
@@ -2849,6 +2872,7 @@ pub fn loadSettings() void {
     if (wrap_item != null) msg(void, wrap_item, "setState:", .{@as(isize, @intFromBool(conf.wrap))});
     if (pairs_item != null) msg(void, pairs_item, "setState:", .{@as(isize, @intFromBool(conf.pairs))});
     if (sidebar_item != null) msg(void, sidebar_item, "setState:", .{@as(isize, @intFromBool(conf.sidebar))});
+    if (lines_item != null) msg(void, lines_item, "setState:", .{@as(isize, @intFromBool(conf.line_numbers))});
     if (typewriter_item != null) msg(void, typewriter_item, "setState:", .{@as(isize, @intFromBool(conf.typewriter))});
     for (focus_items, 0..) |it, i| {
         if (it != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(i == @intFromEnum(conf.focus)))});
@@ -2901,6 +2925,10 @@ pub fn openSettings() void {
 
 pub fn toggleWrap() void {
     store("wrap", if (conf.wrap) "off" else "on");
+}
+
+pub fn toggleLineNumbers() void {
+    store("line-numbers", if (conf.line_numbers) "off" else "on");
 }
 
 pub fn togglePairs() void {
@@ -3264,7 +3292,7 @@ const Seg = struct { k: usize = 0, start: usize = 0, col: usize = 0, end: usize 
 /// Rows wrap at the card's width once it's done springing, so a card that
 /// grows or shrinks doesn't rewrap every frame.
 fn wrapCols(d: *const Doc) usize {
-    const cols = @max(@as(usize, @intFromFloat((d.fin.x - 2 * gap - 2 * pad_x) / cw)), 8);
+    const cols = @max(@as(usize, @intFromFloat((d.fin.x - 2 * gap - 2 * pad_x - gutter(d)) / cw)), 8);
     return if (conf.zen) @min(cols, 80) else cols;
 }
 
@@ -3436,7 +3464,7 @@ fn reveal(d: *Doc) void {
     }
     if (!wrapping()) {
         const x = f(c.col) * cw;
-        const tw = rightEdge(d) - gap - 2 * pad_x;
+        const tw = rightEdge(d) - gap - 2 * pad_x - gutter(d);
         if (x < d.sx) d.sx = @max(0, x - 8 * cw);
         if (x > d.sx + tw - cw) d.sx = x - tw + 8 * cw;
     }
@@ -5014,6 +5042,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     d.inked.aim(if (key) 1 else 0, now);
     const ka = d.inked.at(now);
     const b = &d.ed.buf;
+    d.gut.aim(gutCols(d), now);
+    d.gw = d.gut.at(now) * cw * (1 - std.math.clamp(d.win.z.x, 0, 1));
     layout(d);
     if (conf.typewriter and d.center_h != textH(d)) reveal(d);
     d.center_h = textH(d);
@@ -5056,6 +5086,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     const first: usize = @min(@as(usize, @intFromFloat(@max(@floor(d.vy / lh), 0))), last);
     const skip: usize = @intFromFloat(@max(@ceil(d.vx / cw), 0));
     const tx = lx + padL(d);
+    // Sideways-scrolled text stops at the line numbers rather than running under them.
+    const clip_l = card.x + (tx - card.x) * std.math.clamp(d.gw / (3.5 * cw), 0, 1);
     const ox = tx + f(skip) * cw - d.vx;
     // Text stops a whole column inside the same margin on the right as on
     // the left, rather than running into the card's border.
@@ -5107,7 +5139,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     d.band_a.aim(if (band_on) 1 else 0, now);
     const band_alpha = d.band_a.at(now);
     if (band_alpha > 0) fillA(ctx, th.line, band_alpha, lx, top_h + d.band.at(now) - d.vy, card.w, lh);
-    objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = ox + f(cols) * cw - card.x, .h = card.h });
+    objc.CGContextSaveGState(ctx);
+    objc.CGContextClipToRect(ctx, .{ .x = clip_l, .y = card.y, .w = ox + f(cols) * cw - clip_l, .h = card.h });
 
     // A new selection fades in.
     const has_sel = s[0] != s[1];
@@ -5243,7 +5276,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         const x0 = ox + f(cols -| 1) * cw;
         objc.CGContextSaveGState(ctx);
         if (pass == 0) {
-            if (cols > 0) objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = x0 - card.x, .h = card.h });
+            if (cols > 0) objc.CGContextClipToRect(ctx, .{ .x = clip_l, .y = card.y, .w = x0 - clip_l, .h = card.h });
         } else {
             if (!any_reach or cols == 0 or (pass >= 2 and !any_cut)) {
                 objc.CGContextRestoreGState(ctx);
@@ -5288,6 +5321,26 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         }
         k.flush();
         objc.CGContextRestoreGState(ctx);
+    }
+    objc.CGContextRestoreGState(ctx);
+
+    // Line numbers sit right-aligned beside the text, still when it scrolls
+    // sideways, and dim with Focus like their line. The caret's line is the
+    // text color at 0.85, a step above muted (about 0.65 of it); wrapped
+    // rows carry none.
+    const ga = std.math.clamp(d.gw / (3.5 * cw), 0, 1);
+    if (ga > 0) {
+        const at_line = if (d.mode == .edit) lineOfRow(d, here.row) else std.math.maxInt(usize);
+        k.selected = .{ 0, 0 };
+        for (vis[0..nvis], first..) |v, row| {
+            if (v.seg.start != 0) continue;
+            var nb: [20]u8 = undefined;
+            const num = std.fmt.bufPrint(&nb, "{d}", .{v.line + 1}) catch continue;
+            const ink = mixRgb(th.bg, if (v.line == at_line) mixRgb(th.bg, th.fg, 0.85) else th.muted, ga);
+            k.offset = b.lineStart(v.line);
+            _ = k.text(num, null, th, ink, tx - 1.5 * cw - f(num.len) * cw, top_h + f(row) * lh - d.vy + baseline, 0, num.len);
+        }
+        k.flush();
     }
     k.focus = null;
     objc.CGContextRestoreGState(ctx);
@@ -6498,7 +6551,8 @@ fn posAt(d: *Doc, p: Point) usize {
     const i = lineOfRow(d, row);
     const l = b.line(i);
     const s = segN(d, l, row - rowOfLine(d, i));
-    const x = @max((p.x - gap - padL(d) + d.vx) / cw, 0);
+    // A click in the line numbers lands at the start of its row.
+    const x = if (d.gw >= cw and p.x < gap + padL(d)) 0 else @max((p.x - gap - padL(d) + d.vx) / cw, 0);
     return b.lineStart(i) + std.math.clamp(editor.byteAtCol(l, f(s.col) + x), s.start, caretEnd(l, s));
 }
 
