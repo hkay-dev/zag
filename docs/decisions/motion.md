@@ -87,7 +87,7 @@ an animation acts at once: a closing folder keeps sliding and the click maps thr
   limit it rubber-bands at 0.3 of the pull, up to 24 pt, then springs back on mouse-up. A drop
   that splits starts at the previewed half with a kick of 0.3, the preview ring and the new ring
   crossfade over 0.15 s, and the copy flies to the new card's title.
-- Sidebar edge: same rubber band as splits (0.3, 24 pt) with the spring from the split drag, and
+- Sidebar edge: same rubber band as splits (0.3, 24 pt) with its own spring k 380 c 33, and
   dragging below 100 pt collapses it with the normal slide, restoring the saved width after.
 - Zen: a `z` spring k 200 c 28 blends the text padding, header, card rings and the traffic
   lights' alpha. The sidebar material is covered by opaque chrome, not hidden.

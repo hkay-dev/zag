@@ -49,6 +49,12 @@ pub const Tree = struct {
         t.open.append(gpa, z) catch gpa.free(z);
     }
 
+    /// Closes every expanded folder.
+    pub fn closeAll(t: *Tree, gpa: Allocator) void {
+        for (t.open.items) |o| gpa.free(o);
+        t.open.clearRetainingCapacity();
+    }
+
     /// Opens every folder above `rel`, so a file deep down shows. True when
     /// it opened one, so the rows need a rebuild.
     pub fn reveal(t: *Tree, gpa: Allocator, rel: []const u8) bool {
@@ -103,7 +109,7 @@ pub const Tree = struct {
     }
 
     pub fn deinit(t: *Tree, gpa: Allocator) void {
-        for (t.open.items) |o| gpa.free(o);
+        t.closeAll(gpa);
         t.open.deinit(gpa);
         t.arena.deinit();
     }

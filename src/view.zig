@@ -46,8 +46,7 @@ pub fn setRoot(dir: []const u8) void {
     };
     // The header's folder is written relative to the open folder.
     for (docs.items) |d| dropHead(d);
-    for (tree.open.items) |o| gpa.free(o);
-    tree.open.clearRetainingCapacity();
+    tree.closeAll(gpa);
     for (wins.items) |w| w.side_y = 0;
     dropSideLines();
     rebuildTree();
@@ -154,7 +153,7 @@ var side_w: f64 = settings.sidebar_default;
 /// While the sidebar's edge is dragged past a limit it stretches, `side_stretch`
 /// pixels beyond `side_rest`, the width it stretches from; letting go springs
 /// it back. Dragging it in past `side_collapse` shuts the sidebar.
-var side_stretch: Spring = .{ .k = spring_k, .c = spring_c, .eps = 0.05 };
+var side_stretch: Spring = .{ .k = 380, .c = 33, .eps = 0.05 };
 var side_rest: f64 = settings.sidebar_default;
 const side_collapse = 100.0;
 /// The most it stretches, and how much of the mouse's travel it follows.
@@ -306,8 +305,7 @@ fn setFont() void {
     dropAttrs();
     for (fallbacks.items) |e| if (e.fb.font != font) objc.CFRelease(e.fb.font.?);
     fallbacks.clearRetainingCapacity();
-    if (font != null) _ = msg(void, font, "release", .{});
-    if (bold != null) _ = msg(void, bold, "release", .{});
+    for ([_]*Id{ &font, &bold, &side_font, &name_font, &head_font, &tab_font, &tab_bold, &path_font }) |p| if (p.* != null) msg(void, p.*, "release", .{});
     const NSFont = objc.class("NSFont");
     font = null;
     bold = null;
@@ -335,7 +333,6 @@ fn setFont() void {
     const desc = objc.CTFontGetDescent(font);
     lh = @round(conf.size * conf.spacing);
     baseline = @round((lh - asc - desc) / 2 + asc);
-    for ([_]*Id{ &side_font, &name_font, &head_font }) |p| if (p.* != null) msg(void, p.*, "release", .{});
     side_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:", .{conf.size - 1}), "retain", .{});
     name_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 1, @as(f64, 0.3) }), "retain", .{});
     head_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 3, @as(f64, 0.3) }), "retain", .{});
@@ -346,7 +343,6 @@ fn setFont() void {
         objc.CFRelease(l);
         p.* = null;
     };
-    for ([_]*Id{ &tab_font, &tab_bold, &path_font }) |p| if (p.* != null) msg(void, p.*, "release", .{});
     tab_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 1, @as(f64, 0) }), "retain", .{});
     tab_bold = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 1, @as(f64, 0.23) }), "retain", .{});
     path_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 3, @as(f64, 0) }), "retain", .{});
@@ -745,26 +741,6 @@ const Spring = struct {
     }
 };
 
-const Mark = struct {
-    row: ?usize = null,
-    gen: u32 = 0,
-    last: ?usize = null,
-    s: Spring,
-    a: Tween = .{ .dur = fade_time },
-
-    fn follow(m: *Mark, ty: f64, hidden: bool, now: f64) void {
-        if (hidden) m.s.snap(ty) else if (m.last != m.row) m.s.aim(ty, now) else m.s.ride(ty);
-        m.last = m.row;
-        m.a.aim(1, now);
-    }
-
-    fn park(m: *Mark) void {
-        if (!m.s.settled()) m.s.snap(m.s.to);
-    }
-};
-
-const Bold = struct { line: SideLine = .{}, row: usize = 0, gen: u32 = 0 };
-
 /// A tab in the header as drawn. It pops in, and when its file goes it
 /// stays to fold shut.
 const Slot = struct {
@@ -1050,9 +1026,6 @@ fn scenery(d: *const Doc, now: f64) bool {
         now < d.fresh_t0 + fade_time;
 }
 
-const spring_k = 380.0;
-const spring_c = 33.0;
-
 /// Redraws the window's sidebar strip alone.
 fn redrawSide(w: *Win) void {
     msg(void, w.view, "setNeedsDisplayInRect:", .{Rect{ .w = side_w, .h = msg(Rect, w.view, "bounds", .{}).h }});
@@ -1143,6 +1116,16 @@ const Page = struct {
 
     fn name(p: *const Page) []const u8 {
         return if (p.path) |path| std.fs.path.basename(path) else if (p.title_len > 0) p.title[0..p.title_len] else "Untitled";
+    }
+
+    /// Takes the name its text has now; true when it changed.
+    fn rename(p: *Page) bool {
+        var nb: [48]u8 = undefined;
+        const nm = untitledName(&p.ed, &nb);
+        if (std.mem.eql(u8, nm, p.name())) return false;
+        @memcpy(p.title[0..nm.len], nm);
+        p.title_len = nm.len;
+        return true;
     }
 
     /// Untitled files keep drafts, so only named files show an unsaved dot.
@@ -1384,10 +1367,6 @@ const Doc = struct {
     blank_t0: f64 = -1,
     /// The header's folder line and its chevron positions.
     head: Head = .{},
-
-    fn name(d: *const Doc) []const u8 {
-        return d.file.name();
-    }
 
     /// Unsaved changes to a file, on show or in any page. Untitled files
     /// keep themselves as drafts, so they don't count.
@@ -1643,21 +1622,27 @@ pub fn open(path: []const u8, into: ?*Doc) void {
         return;
     }
     defer gpa.free(abs);
-    for (docs.items) |o| {
-        if (o.closing) continue;
-        for (0..tabCount(o)) |j| {
-            const p = tabPage(o, j);
-            if (p.path != null and std.mem.eql(u8, p.path.?, abs)) {
-                showTab(o, j);
-                return front(o);
-            }
-        }
+    if (holder(abs)) |h| {
+        showTab(h.d, h.j);
+        return front(h.d);
     }
     var pg = loadPage(abs) orelse return;
     const d = into orelse newDoc() orelse return pg.deinit();
     putTab(d, pg, d.at + 1);
     noteRecent(abs);
     front(d);
+}
+
+/// The first live card and tab holding `abs`.
+fn holder(abs: []const u8) ?struct { d: *Doc, j: usize } {
+    for (docs.items) |d| {
+        if (d.closing) continue;
+        for (0..tabCount(d)) |j| {
+            const p = tabPage(d, j);
+            if (p.path != null and std.mem.eql(u8, p.path.?, abs)) return .{ .d = d, .j = j };
+        }
+    }
+    return null;
 }
 
 /// Brings `d`'s window forward with `d` as its focused card.
@@ -1733,24 +1718,22 @@ fn replaceable(d: *const Doc) bool {
 }
 
 /// Sets the window's file aside as a page in its tab's place, for
-/// `install` to replace right after, which goes in a new tab to its right
-/// when `after`. A `replaceable` file is dropped instead. False when it
-/// can't.
-fn park(d: *Doc, after: bool) bool {
+/// `install` to replace right after. A `replaceable` file is dropped
+/// instead. False when it can't.
+fn park(d: *Doc) bool {
     if (replaceable(d)) {
-        d.file.ed.deinit(gpa);
-        dropDraft(&d.file.draft);
+        d.file.deinit();
         return true;
     }
-    // Flush its name before the view's pending retitle can see another file.
+    // Flush its name so its tab shows the name its text has now.
     retitle(d);
     d.pages.insert(gpa, d.at, asPage(d)) catch return false;
     rememberPlace(&d.file);
-    if (after) d.at += 1;
     return true;
 }
 
-/// Shows `pg` in the window, which must have just been parked.
+/// Shows `pg` in the window, which must have just been parked, and picks
+/// up a change another app made to it.
 fn install(d: *Doc, pg: Page) void {
     d.file = pg;
     d.center_at = std.math.maxInt(usize);
@@ -1762,6 +1745,7 @@ fn install(d: *Doc, pg: Page) void {
     d.xs.snap(d.file.sx);
     d.band_on = false;
     d.had_sel = false;
+    d.focus_on = false;
     d.sel_out.snap(0);
     d.snap = true;
     d.cur_m = null;
@@ -1784,17 +1768,8 @@ fn install(d: *Doc, pg: Page) void {
     named(d);
     if (!restoring) {
         if (rebuilt) refreshAll() else refreshWin(d.win);
+        checkOutside(d);
     }
-}
-
-/// Shows page `i` of the window. The file it had keeps its tab, even an
-/// empty untitled one: it's set aside while page `i` is still there, so
-/// `park` never drops it.
-fn showPage(d: *Doc, i: usize) void {
-    const tab = if (i < d.at) i else i + 1;
-    if (!park(d, false)) return;
-    swapIn(d, tab);
-    checkOutside(d);
 }
 
 /// Takes page `tab` out of the pages and shows it in the window, whose
@@ -1844,8 +1819,12 @@ fn tabIndex(d: *Doc, id: u32) ?usize {
     return null;
 }
 
+/// Shows tab `j`. The file it had keeps its tab, even an empty untitled
+/// one: with another tab there `park` never drops it.
 fn showTab(d: *Doc, j: usize) void {
-    if (j != d.at) showPage(d, pageOf(d, j));
+    if (j == d.at) return;
+    if (!park(d)) return;
+    swapIn(d, j);
 }
 
 /// ⌃Tab and ⌃⇧Tab: the next or previous tab, around the ends.
@@ -1877,18 +1856,10 @@ fn closeTab(d: *Doc, at: usize) void {
         j = d.at;
         if (!keepOrDrop(d)) return;
     }
-    if (j != d.at) {
-        var pg = dropPage(d, j);
-        pg.deinit();
-        return refreshWin(d.win);
-    }
-    rememberPlace(&d.file);
-    d.file.ed.deinit(gpa);
-    if (d.file.path) |p| gpa.free(p);
-    d.file.path = null;
-    dropDraft(&d.file.draft);
-    swapNext(d);
-    checkOutside(d);
+    const shown = j == d.at;
+    var pg = takeTab(d, j) orelse return;
+    if (shown) rememberPlace(&pg);
+    pg.deinit();
 }
 
 /// Asks whether to save the file on show before it goes. False to keep it.
@@ -1906,7 +1877,7 @@ fn named(d: *Doc) void {
     dropHead(d);
     retitle(d);
     if (d.win.focus != d) return;
-    msg(void, d.win.window, "setTitle:", .{objc.str(d.name())});
+    msg(void, d.win.window, "setTitle:", .{objc.str(d.file.name())});
     // Window menu, Mission Control and the Dock show the title; the card's header shows the name.
     const url = if (d.file.path) |p| msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(p)}) else null;
     msg(void, d.win.window, "setRepresentedURL:", .{url});
@@ -2003,11 +1974,9 @@ fn takeTab(d: *Doc, j: usize) ?Page {
         refreshWin(d.win);
         return pg;
     }
-    var blank: ?Page = null;
-    if (tabCount(d) == 1) blank = blankPage() orelse return null;
     const pg = asPage(d);
-    if (blank) |p| {
-        install(d, p);
+    if (tabCount(d) == 1) {
+        install(d, blankPage() orelse return null);
     } else {
         swapNext(d);
     }
@@ -2015,15 +1984,15 @@ fn takeTab(d: *Doc, j: usize) ?Page {
 }
 
 /// Puts `pg` in card `e` as its tab `k` (or last) and shows it. A blank
-/// untitled file on show in `e` makes way for it.
+/// untitled file on show in `e` makes way for it. A page it can't take keeps
+/// its draft on disk.
 fn putTab(e: *Doc, pg: Page, k: usize) void {
-    if (!park(e, false)) {
+    if (!park(e)) {
         var p = pg;
-        return p.deinit();
+        return p.deinitKeepDraft();
     }
     e.at = @min(k, e.pages.items.len);
     install(e, pg);
-    checkOutside(e);
 }
 
 /// Moves card `d`'s tab `j` to place `k` among its tabs. The other tabs
@@ -2187,11 +2156,17 @@ fn gapAt(n: *Node, p: Point) ?*Node {
     return gapAt(n.kids[0], p) orelse gapAt(n.kids[1], p);
 }
 
+fn gapLimits(n: *const Node) struct { len: f64, lo: f64 } {
+    const len = @max((if (n.down) n.r.h else n.r.w) - 3 * gap, 1);
+    return .{ .len = len, .lo = @min(0.5, (if (n.down) min_card_h else min_card_w) / len) };
+}
+
 /// Moves split `n`'s gap to `p`, keeping each side's card a usable size.
 fn dragGap(w: *Win, n: *Node, p: Point) void {
-    const len = @max((if (n.down) n.r.h else n.r.w) - 3 * gap, 1);
+    const lim = gapLimits(n);
+    const len = lim.len;
     var at = (if (n.down) p.y - n.r.y else p.x - n.r.x) - 1.5 * gap;
-    const lo = @min(0.5, (if (n.down) min_card_h else min_card_w) / len) * len;
+    const lo = lim.lo * len;
     const hi = len - lo;
     // Past a limit the gap stretches with resistance; near 1/2, 1/3 or
     // 2/3 it snaps. Either way the trackpad taps once on arriving.
@@ -2223,9 +2198,8 @@ fn dragGap(w: *Win, n: *Node, p: Point) void {
 
 /// Lets go of a gap dragged past its limit: the share springs back.
 fn releaseGap(n: *Node, now: f64) void {
-    const len = @max((if (n.down) n.r.h else n.r.w) - 3 * gap, 1);
-    const lo = @min(0.5, (if (n.down) min_card_h else min_card_w) / len);
-    n.share.aim(std.math.clamp(n.share.to, lo, 1 - lo), now);
+    const lim = gapLimits(n);
+    n.share.aim(std.math.clamp(n.share.to, lim.lo, 1 - lim.lo), now);
 }
 
 /// The gaps' cursors: left-right between cards side by side, up-down
@@ -2399,7 +2373,7 @@ fn askSave(d: *Doc, n: usize) isize {
     front(d);
     var buf: [300]u8 = undefined;
     const title = if (n == 1)
-        std.fmt.bufPrint(&buf, "Save changes to {s}?", .{d.name()}) catch "Save changes?"
+        std.fmt.bufPrint(&buf, "Save changes to {s}?", .{d.file.name()}) catch "Save changes?"
     else
         std.fmt.bufPrint(&buf, "Save changes to {d} files?", .{n}) catch "Save changes?";
     return askAlert(title, "Your changes are lost if you don't save them.", &.{ if (n == 1) "Save" else "Save All", "Don't Save", "Cancel" });
@@ -2454,7 +2428,7 @@ fn save(d: *Doc, as: bool) bool {
     var fresh: ?[:0]u8 = null;
     if (d.file.path == null or as) {
         const p = msg(Id, objc.class("NSSavePanel"), "savePanel", .{});
-        msg(void, p, "setNameFieldStringValue:", .{objc.str(d.name())});
+        msg(void, p, "setNameFieldStringValue:", .{objc.str(d.file.name())});
         if (root) |r| msg(void, p, "setDirectoryURL:", .{msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(r)})});
         modal = true;
         defer modal = false;
@@ -2529,7 +2503,7 @@ pub fn openPanel() void {
 
 /// File > Open Recent: the last files opened or saved, newest first.
 fn noteRecent(p: []const u8) void {
-    if (conf_path != null and std.mem.eql(u8, p, conf_path.?)) return;
+    if (isConf(p)) return;
     const s = objc.str(p);
     const out = msg(Id, objc.class("NSMutableArray"), "arrayWithObject:", .{s});
     const old = recentFiles();
@@ -2559,24 +2533,23 @@ fn defaults() Id {
 const Place = struct { cur: usize, sy: f64 };
 
 /// Splits a saved "a\tb\tpath" entry.
-fn fields(s: []const u8, comptime n: usize) ?[n + 1][]const u8 {
-    var out: [n + 1][]const u8 = undefined;
+fn fields(s: []const u8) ?[3][]const u8 {
+    var out: [3][]const u8 = undefined;
     var rest = s;
-    for (0..n) |i| {
+    for (0..2) |i| {
         const tab = std.mem.indexOfScalar(u8, rest, '\t') orelse return null;
         out[i] = rest[0..tab];
         rest = rest[tab + 1 ..];
     }
-    out[n] = rest;
+    out[2] = rest;
     return out;
 }
 
 /// Where the caret and scroll were in recent files, newest first, as
-/// "cur\tsy\tpath" lines, at most 100. Read from the defaults on first use
-/// and written back a second after a change (and at quit), so switching
-/// tabs doesn't rewrite the defaults each time.
+/// "cur\tsy\tpath" lines, at most 100. Read from the defaults at setup and
+/// written back a second after a change (and at quit), so switching tabs
+/// doesn't rewrite the defaults each time.
 var places: std.ArrayList([]u8) = .empty;
-var places_read = false;
 var places_due = false;
 
 extern var _dispatch_main_q: anyopaque;
@@ -2584,13 +2557,11 @@ extern fn dispatch_time(when: u64, delta: i64) u64;
 extern fn dispatch_after_f(when: u64, queue: *anyopaque, ctx: ?*anyopaque, work: *const fn (?*anyopaque) callconv(.c) void) void;
 
 fn loadPlaces() void {
-    if (places_read) return;
-    places_read = true;
     const list = msg(Id, defaults(), "stringArrayForKey:", .{objc.str("places")});
     if (list == null) return;
     for (0..msg(usize, list, "count", .{})) |i| {
         const s = objc.utf8(msg(Id, list, "objectAtIndex:", .{i}));
-        if (fields(s, 2) == null) continue;
+        if (fields(s) == null) continue;
         const own = gpa.dupe(u8, s) catch return;
         places.append(gpa, own) catch return gpa.free(own);
     }
@@ -2599,13 +2570,12 @@ fn loadPlaces() void {
 /// Remembers the file's caret and scroll, newest first.
 fn rememberPlace(pg: *const Page) void {
     const p = pg.path orelse return;
-    loadPlaces();
     var buf: [64]u8 = undefined;
     const head = std.fmt.bufPrint(&buf, "{d}\t{d}\t", .{ pg.ed.cur, @as(i64, @intFromFloat(pg.sy)) }) catch return;
     const entry = std.mem.concat(gpa, u8, &.{ head, p }) catch return;
     var i: usize = 0;
     while (i < places.items.len) {
-        if (std.mem.eql(u8, fields(places.items[i], 2).?[2], p)) gpa.free(places.orderedRemove(i)) else i += 1;
+        if (std.mem.eql(u8, fields(places.items[i]).?[2], p)) gpa.free(places.orderedRemove(i)) else i += 1;
     }
     places.insert(gpa, 0, entry) catch return gpa.free(entry);
     while (places.items.len > 100) gpa.free(places.pop().?);
@@ -2623,9 +2593,8 @@ fn writePlaces(_: ?*anyopaque) callconv(.c) void {
 }
 
 fn placeOf(p: []const u8) ?Place {
-    loadPlaces();
     for (places.items) |s| {
-        const fs = fields(s, 2).?;
+        const fs = fields(s).?;
         if (!std.mem.eql(u8, fs[2], p)) continue;
         return .{
             .cur = std.fmt.parseInt(usize, fs[0], 10) catch 0,
@@ -2681,15 +2650,19 @@ fn saveLayout(w: *const Win, n: *const Node, out: *std.ArrayList(u8)) !usize {
     if (n.pane) |d| {
         var kept: usize = 0;
         var on: usize = 0;
-        for (0..tabCount(d)) |j| if (tabPage(d, j).path != null or tabPage(d, j).draft != null) {
-            if (j == d.at) on = kept;
-            kept += 1;
-        };
+        for (0..tabCount(d)) |j| {
+            const p = tabPage(d, j);
+            if (p.path != null or p.draft != null) {
+                if (j == d.at) on = kept;
+                kept += 1;
+            }
+        }
         try out.print(gpa, "\t#{d},{d},{d}", .{ kept, on, @intFromBool(w.focus == d) });
         for (0..tabCount(d)) |j| {
-            if (tabPage(d, j).path) |p| {
+            const pg = tabPage(d, j);
+            if (pg.path) |p| {
                 try out.print(gpa, "\t{s}", .{p});
-            } else if (tabPage(d, j).draft) |p| try out.print(gpa, "\t*{s}", .{p});
+            } else if (pg.draft) |p| try out.print(gpa, "\t*{s}", .{p});
         }
         return kept;
     }
@@ -2750,7 +2723,7 @@ fn restoreWindow(frame: []const u8, it: *std.mem.SplitIterator(u8, .scalar)) voi
 }
 
 /// The cards that `it` describes next, leaving out files that are gone and
-/// cards left with none. A line from before cards is just a file.
+/// cards left with none.
 fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*Node {
     const tok = it.next() orelse return null;
     if (tok.len > 1 and tok[0] == '|') {
@@ -2764,13 +2737,10 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
         b.?.up = n;
         return n;
     }
-    var head: [3]usize = .{ 1, 0, 0 };
-    var first: ?[]const u8 = tok;
-    if (tok.len > 0 and tok[0] == '#') {
-        first = null;
-        var nums = std.mem.splitScalar(u8, tok[1..], ',');
-        for (&head) |*v| v.* = std.fmt.parseInt(usize, nums.next() orelse "0", 10) catch 0;
-    }
+    if (tok.len == 0 or tok[0] != '#') return null;
+    var head: [3]usize = undefined;
+    var nums = std.mem.splitScalar(u8, tok[1..], ',');
+    for (&head) |*v| v.* = std.fmt.parseInt(usize, nums.next() orelse "0", 10) catch 0;
     const d = newPane(w) orelse return null;
     // The window's focus is read while installing (the sidebar's scroll to
     // the file): the first card made holds it until `restoreWindow` picks
@@ -2781,7 +2751,7 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
     // The tabs wait as parked pages; only the lit one is installed, once.
     var on: usize = 0;
     for (0..head[0]) |i| {
-        const p = (if (i == 0) first else null) orelse it.next() orelse break;
+        const p = it.next() orelse break;
         const draft = p.len > 0 and p[0] == '*';
         const z = gpa.dupeSentinel(u8, if (draft) p[1..] else p, 0) catch continue;
         defer gpa.free(z);
@@ -2804,14 +2774,11 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
         return null;
     }
     // Keep open tabs at the front of the 100 places so parked tabs keep theirs.
-    for (d.pages.items) |pg| rememberPlace(&pg);
-    d.file.ed.deinit(gpa);
-    dropDraft(&d.file.draft);
-    var pg = d.pages.orderedRemove(on);
+    for (d.pages.items) |*pg| rememberPlace(pg);
     // The old one-by-one restore rose only the last tab.
-    pg.rise = on == tabs - 1;
-    d.at = on;
-    install(d, pg);
+    d.pages.items[on].rise = on == tabs - 1;
+    d.file.deinit();
+    swapIn(d, on);
     if (head[2] == 1) lit.* = d;
     const n = gpa.create(Node) catch {
         closePane(d);
@@ -2888,10 +2855,7 @@ fn loadDraft(abs: [:0]const u8) ?Page {
         return null;
     };
     var pg: Page = .{ .ed = ed, .id = newId(), .draft = own, .drafted = ed.buf.changes, .rise = true };
-    var buf: [48]u8 = undefined;
-    const nm = untitledName(&pg.ed, &buf);
-    @memcpy(pg.title[0..nm.len], nm);
-    pg.title_len = nm.len;
+    _ = pg.rename();
     return pg;
 }
 
@@ -2911,11 +2875,7 @@ pub fn adoptDrafts() void {
         if (draftHeld(abs)) continue;
         var pg = loadDraft(abs) orelse continue;
         const d = keyDoc() orelse (if (docs.items.len > 0) docs.items[0] else newDoc()) orelse return pg.deinitKeepDraft();
-        if (!park(d, true)) {
-            pg.deinitKeepDraft();
-            continue;
-        }
-        install(d, pg);
+        putTab(d, pg, d.at + 1);
     }
 }
 
@@ -2960,7 +2920,7 @@ fn checkOutside(d: *Doc) void {
 }
 
 fn changedTitle(d: *Doc, buf: *[300]u8) []const u8 {
-    return std.fmt.bufPrint(buf, "{s} changed in another app.", .{d.name()}) catch "This file changed in another app.";
+    return std.fmt.bufPrint(buf, "{s} changed in another app.", .{d.file.name()}) catch "This file changed in another app.";
 }
 
 fn askReload(d: *Doc) bool {
@@ -3771,7 +3731,7 @@ fn untitledChanged(d: *Doc) void {
     // pauses, or at once when the caret leaves that line, as Return
     // does, so its tab doesn't change width with each letter.
     var nb: [48]u8 = undefined;
-    if (!std.mem.eql(u8, untitledName(&d.file.ed, &nb), d.name())) {
+    if (!std.mem.eql(u8, untitledName(&d.file.ed, &nb), d.file.name())) {
         const row = nameRow(&d.file.ed);
         const sel = objc.sel_registerName("retitle:");
         msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:selector:object:", .{ d.win.view, sel, @as(Id, null) });
@@ -3826,7 +3786,9 @@ pub const ax = struct {
         return listPanes(w.cards, out, 0);
     }
 
-    pub const name = Doc.name;
+    pub fn name(d: *const Doc) []const u8 {
+        return d.file.name();
+    }
 
     /// Where the text shows in the card.
     pub fn textRect(d: *const Doc) Rect {
@@ -3870,7 +3832,9 @@ pub const ax = struct {
 
     pub const tabOf = tabIndex;
 
-    pub const tabTitle = tabName;
+    pub fn tabTitle(d: *Doc, j: usize) []const u8 {
+        return tabPage(d, j).name();
+    }
 
     /// Where tab `id` last drew.
     pub fn tabRect(d: *const Doc, id: u32) Rect {
@@ -4039,14 +4003,9 @@ fn untitledName(ed: *const Editor, buf: *[48]u8) []const u8 {
 /// Gives an untitled `d` the name its text has now, in its tab and, when
 /// it's the focused card, the window's title.
 fn retitle(d: *Doc) void {
-    if (d.file.path != null) return;
-    var nb: [48]u8 = undefined;
-    const nm = untitledName(&d.file.ed, &nb);
-    if (std.mem.eql(u8, nm, d.name())) return;
-    @memcpy(d.file.title[0..nm.len], nm);
-    d.file.title_len = nm.len;
+    if (d.file.path != null or !d.file.rename()) return;
     if (slotOf(d, d.file.id)) |k| d.slots.items[k].drop();
-    if (d.win.focus == d) msg(void, d.win.window, "setTitle:", .{objc.str(nm)});
+    if (d.win.focus == d) msg(void, d.win.window, "setTitle:", .{objc.str(d.file.name())});
     msg(void, d.win.view, "setNeedsDisplay:", .{true});
 }
 
@@ -4054,10 +4013,6 @@ fn retitle(d: *Doc) void {
 /// paused.
 fn retitleNow(self: Id, _: Sel, _: Id) callconv(.c) void {
     for (docs.items) |d| if (d.win.view == self) retitle(d);
-}
-
-fn tabName(d: *Doc, j: usize) []const u8 {
-    return tabPage(d, j).name();
 }
 
 // ---- sidebar ----
@@ -4899,6 +4854,26 @@ var side_head: Id = null;
 /// it last had when it's wider than that: a width change remakes only a cut
 /// line.
 const SideLine = struct { full: Id = null, w: f64 = -1, cut: Id = null, cut_room: f64 = -1, icon: Id = null };
+const Mark = struct {
+    row: ?usize = null,
+    gen: u32 = 0,
+    last: ?usize = null,
+    s: Spring,
+    a: Tween = .{ .dur = fade_time },
+
+    fn follow(m: *Mark, ty: f64, hidden: bool, now: f64) void {
+        if (hidden) m.s.snap(ty) else if (m.last != m.row) m.s.aim(ty, now) else m.s.ride(ty);
+        m.last = m.row;
+        m.a.aim(1, now);
+    }
+
+    fn park(m: *Mark) void {
+        if (!m.s.settled()) m.s.snap(m.s.to);
+    }
+};
+
+const Bold = struct { line: SideLine = .{}, row: usize = 0, gen: u32 = 0 };
+
 var side_lines: std.ArrayList(SideLine) = .empty;
 /// The room `side_head` was cut to.
 var side_head_room: f64 = 0;
@@ -6004,11 +5979,12 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
     for (d.slots.items) |*s| {
         if (s.name[0].full == null) {
             if (tabIndex(d, s.id)) |j| {
-                const nm = tabName(d, j);
+                const pg = tabPage(d, j);
+                const nm = pg.name();
                 s.name[0] = .{ .full = uiLine(nm, tab_bold, 1e5) };
                 s.name[0].w = lineW(s.name[0].full);
                 s.name[1] = .{ .full = uiLine(nm, tab_font, 1e5) };
-                s.icon = iconFor(if (tabPage(d, j).path != null) nm else "");
+                s.icon = iconFor(if (pg.path != null) nm else "");
             }
         }
         const nw = @max(s.name[0].w, 0);
@@ -6508,18 +6484,13 @@ fn moveTab(from: *Doc, j: usize, dr: Drop) void {
 /// new card split off an edge. A file a card there already holds moves
 /// there instead, and one open in another window comes forward in it.
 fn placeFile(w: *Win, path: [:0]const u8, dr: Drop) void {
-    for (docs.items) |o| {
-        if (o.closing) continue;
-        const j = for (0..tabCount(o)) |j| {
-            const p = tabPage(o, j);
-            if (p.path != null and std.mem.eql(u8, p.path.?, path)) break j;
-        } else continue;
-        if (o.win != w) return open(path, null);
-        if (o == dr.card and !splitZone(dr.zone)) {
-            showTab(o, j);
-            return focus(o);
+    if (holder(path)) |h| {
+        if (h.d.win != w) return open(path, null);
+        if (h.d == dr.card and !splitZone(dr.zone)) {
+            showTab(h.d, h.j);
+            return focus(h.d);
         }
-        return moveTab(o, j, dr);
+        return moveTab(h.d, h.j, dr);
     }
     var pg = loadPage(path) orelse return;
     const to = landing(dr) orelse return pg.deinit();
@@ -7614,8 +7585,10 @@ fn closeActive(d: *Doc) void {
 fn previewText(id: u32) ?[]const u8 {
     for (docs.items) |d| {
         if (d.closing) continue;
-        if (d.file.id == id) return d.file.ed.text();
-        for (d.pages.items) |*p| if (p.id == id) return p.ed.text();
+        for (0..tabCount(d)) |j| {
+            const p = tabPage(d, j);
+            if (p.id == id) return p.ed.text();
+        }
     }
     return null;
 }
@@ -7661,6 +7634,7 @@ fn changeFont(_: Id, _: Sel, sender: Id) callconv(.c) void {
 /// Registers the view class and loads the font. Call once at launch.
 pub fn setup() void {
     readContrast();
+    loadPlaces();
     conf_path = settings.path(gpa) catch null;
     if (conf_path) |p| settings.prepare(gpa, p);
     loadSettings();
