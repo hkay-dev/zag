@@ -6,6 +6,7 @@
 //! takes focus: the window stays behind every other one and nothing goes
 //! through the HID.
 const std = @import("std");
+const finder = @import("finder.zig");
 const objc = @import("objc.zig");
 const view = @import("view.zig");
 const Id = objc.Id;
@@ -132,6 +133,7 @@ fn run(_: Id, _: Sel, _: Id) callconv(.c) void {
     put("main_cpu_ms", (threadCpu() - main0) * 1000);
     memory("footprint_mb", "peak_mb");
     visible();
+    if (std.c.getenv("ZE_BENCH_QUICKOPEN_ROOT")) |r| quickOpenSteps(std.mem.span(r));
     flush();
     std.c.exit(0);
 }
@@ -279,4 +281,53 @@ fn flush() void {
 fn fail(why: []const u8) noreturn {
     _ = std.c.write(2, why.ptr, why.len);
     std.c.exit(1);
+}
+
+/// Quick open on a home-sized folder (ZE_BENCH_QUICKOPEN_ROOT, made by
+/// bench.sh): open it, type three letters, close it. Runs after the
+/// guards above are recorded, so main_cpu_ms and the memory numbers don't
+/// include it. The root points at the big folder only for this step.
+/// Beside the steps' numbers, the parts of an open step are timed alone on
+/// the same folder, so what's left is drawing: quickopen_walk_ms
+/// (`finder.scan`), quickopen_score0_ms (`finder.best` with the empty query
+/// the open step starts with), quickopen_free_ms (dropping the last list)
+/// and quickopen_score_ms (each typed letter's `finder.best`).
+fn quickOpenSteps(big: []const u8) void {
+    // setRoot frees the old root, so keep a copy to put back.
+    const keep = if (view.root) |r| view.gpa.dupe(u8, r) catch return else null;
+    view.setRoot(view.gpa.dupe(u8, big) catch return);
+    defer if (keep) |k| view.setRoot(k);
+    settle();
+    const letters = [_][]const u8{ "m", "a", "i" };
+    for (0..20) |_| {
+        step("quickopen_ms", false, quickOpen, .{});
+        for (letters) |ch| step("quickopen_ms", false, insert, .{ch});
+        step("quickopen_ms", false, command, .{"cancelOperation:"});
+        settle();
+    }
+    for (0..20) |_| {
+        // Wake up as the open step does, after the settling frames.
+        settle();
+        const t0 = threadCpu();
+        var f = finder.scan(view.gpa, big) catch return;
+        put("quickopen_walk_ms", (threadCpu() - t0) * 1000);
+        put("quickopen_files", @floatFromInt(f.paths.items.len));
+        var picks: [10]usize = undefined;
+        const t2 = threadCpu();
+        _ = finder.best(f.paths.items, "", &picks);
+        put("quickopen_score0_ms", (threadCpu() - t2) * 1000);
+        for (1..letters.len + 1) |n| {
+            const q = "mai"[0..n];
+            const t1 = threadCpu();
+            _ = finder.best(f.paths.items, q, &picks);
+            put("quickopen_score_ms", (threadCpu() - t1) * 1000);
+        }
+        const t3 = threadCpu();
+        f.deinit();
+        put("quickopen_free_ms", (threadCpu() - t3) * 1000);
+    }
+}
+
+fn quickOpen() void {
+    msg(void, v, "quickOpen:", .{@as(Id, null)});
 }
