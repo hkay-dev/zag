@@ -1151,13 +1151,13 @@ const Doc = struct {
     held_which: u1 = 0,
     held_tally: [64]u8 = undefined,
     held_n: usize = 0,
-    /// The status strip's line, made again when what it shows changes: what
-    /// it was made for (caret, anchor, changes, doc, length, room) and its
-    /// width; it's cut with an ellipsis to the room.
-    /// The words counted for (doc, changes, length) and the count.
+    /// The status strip's line, made again when what it shows changes; it's
+    /// cut with an ellipsis to the room.
     stat: Id = null,
+    /// What `stat` was made for (caret, anchor, changes, doc, length, room).
     stat_at: [6]u64 = @splat(std.math.maxInt(u64)),
     stat_w: f64 = 0,
+    /// The words counted for (doc, changes, length) and the count.
     words_at: [3]u64 = @splat(std.math.maxInt(u64)),
     words_n: usize = 0,
     /// Find has no matches, and when its words last shook for it.
@@ -1695,10 +1695,28 @@ fn install(d: *Doc, pg: Page) void {
 fn showPage(d: *Doc, i: usize) void {
     const tab = if (i < d.at) i else i + 1;
     if (!park(d, false)) return;
+    swapIn(d, tab);
+    checkOutside(d);
+}
+
+/// Takes page `tab` out of the pages and shows it in the window, whose
+/// file must have just been parked or gone.
+fn swapIn(d: *Doc, tab: usize) void {
     const pg = d.pages.orderedRemove(tab);
     d.at = tab;
     install(d, pg);
-    checkOutside(d);
+}
+
+/// `swapIn` for the tab right of the one that's going, or the left one at the end.
+fn swapNext(d: *Doc) void {
+    swapIn(d, if (d.at < d.pages.items.len) d.at else d.at - 1);
+}
+
+/// Takes the page of tab `j`, which isn't on show, out of the pages.
+fn dropPage(d: *Doc, j: usize) Page {
+    const pg = d.pages.orderedRemove(pageOf(d, j));
+    if (j < d.at) d.at -= 1;
+    return pg;
 }
 
 // ---- tabs ----
@@ -1789,9 +1807,8 @@ fn closeTab(d: *Doc, at: usize) void {
         if (!keepOrDrop(d)) return;
     }
     if (j != d.at) {
-        var pg = d.pages.orderedRemove(pageOf(d, j));
+        var pg = dropPage(d, j);
         pg.deinit();
-        if (j < d.at) d.at -= 1;
         return refreshAll();
     }
     rememberPlace(d);
@@ -1799,26 +1816,16 @@ fn closeTab(d: *Doc, at: usize) void {
     if (d.path) |p| gpa.free(p);
     d.path = null;
     dropDraft(&d.draft);
-    const next = if (d.at < d.pages.items.len) d.at else d.at - 1;
-    const pg = d.pages.orderedRemove(next);
-    d.at = next;
-    install(d, pg);
+    swapNext(d);
     checkOutside(d);
 }
 
 /// Asks whether to save the file on show before it goes. False to keep it.
 fn keepOrDrop(d: *Doc) bool {
     front(d);
-    const a = objc.new("NSAlert");
     var buf: [300]u8 = undefined;
-    msg(void, a, "setMessageText:", .{objc.str(std.fmt.bufPrint(&buf, "Save changes to {s}?", .{d.name()}) catch "Save changes?")});
-    msg(void, a, "setInformativeText:", .{objc.str("Your changes are lost if you don't save them.")});
-    _ = msg(Id, a, "addButtonWithTitle:", .{objc.str("Save")});
-    _ = msg(Id, a, "addButtonWithTitle:", .{objc.str("Don't Save")});
-    _ = msg(Id, a, "addButtonWithTitle:", .{objc.str("Cancel")});
-    const r = msg(isize, a, "runModal", .{});
-    msg(void, a, "release", .{});
-    return switch (r) {
+    const title = std.fmt.bufPrint(&buf, "Save changes to {s}?", .{d.name()}) catch "Save changes?";
+    return switch (askAlert(title, "Your changes are lost if you don't save them.", &.{ "Save", "Don't Save", "Cancel" })) {
         1000 => save(d, false),
         1001 => true,
         else => false,
@@ -1925,8 +1932,7 @@ fn splitOff(d: *Doc, down: bool, before: bool, dropped: bool) ?*Doc {
 /// a blank untitled file, for the caller to fold away.
 fn takeTab(d: *Doc, j: usize) ?Page {
     if (j != d.at) {
-        const pg = d.pages.orderedRemove(pageOf(d, j));
-        if (j < d.at) d.at -= 1;
+        const pg = dropPage(d, j);
         refreshAll();
         return pg;
     }
@@ -1938,10 +1944,7 @@ fn takeTab(d: *Doc, j: usize) ?Page {
     if (blank) |ed| {
         install(d, .{ .ed = ed, .path = null, .lang = &syntax.plain, .stamp = null, .sx = 0, .sy = 0, .id = newId() });
     } else {
-        const next = if (d.at < d.pages.items.len) d.at else d.at - 1;
-        const other = d.pages.orderedRemove(next);
-        d.at = next;
-        install(d, other);
+        swapNext(d);
     }
     return pg;
 }
@@ -2294,12 +2297,20 @@ fn newPane(w: *Win) ?*Doc {
     return d;
 }
 
-fn alert(text: []const u8, detail: []const u8) void {
+/// Runs a modal alert with `buttons` in order (none gives the default OK)
+/// and returns what it answered: 1000 for the first button, 1001 the next.
+fn askAlert(title: []const u8, info: []const u8, buttons: []const []const u8) isize {
     const a = objc.new("NSAlert");
-    msg(void, a, "setMessageText:", .{objc.str(text)});
-    msg(void, a, "setInformativeText:", .{objc.str(detail)});
-    _ = msg(isize, a, "runModal", .{});
+    msg(void, a, "setMessageText:", .{objc.str(title)});
+    msg(void, a, "setInformativeText:", .{objc.str(info)});
+    for (buttons) |b| _ = msg(Id, a, "addButtonWithTitle:", .{objc.str(b)});
+    const r = msg(isize, a, "runModal", .{});
     msg(void, a, "release", .{});
+    return r;
+}
+
+fn alert(text: []const u8, detail: []const u8) void {
+    _ = askAlert(text, detail, &.{});
 }
 
 /// Asks to save the window's unsaved files: the one on show and its pages.
@@ -2316,20 +2327,12 @@ fn settle(d: *Doc, quit: bool) bool {
     if (n == 0) return true;
     if (n == 1 and !asks(quit, d.path, &d.ed)) showPage(d, page);
     front(d);
-    const a = objc.new("NSAlert");
     var buf: [300]u8 = undefined;
     const title = if (n == 1)
         std.fmt.bufPrint(&buf, "Save changes to {s}?", .{d.name()}) catch "Save changes?"
     else
         std.fmt.bufPrint(&buf, "Save changes to {d} files?", .{n}) catch "Save changes?";
-    msg(void, a, "setMessageText:", .{objc.str(title)});
-    msg(void, a, "setInformativeText:", .{objc.str("Your changes are lost if you don't save them.")});
-    _ = msg(Id, a, "addButtonWithTitle:", .{objc.str(if (n == 1) "Save" else "Save All")});
-    _ = msg(Id, a, "addButtonWithTitle:", .{objc.str("Don't Save")});
-    _ = msg(Id, a, "addButtonWithTitle:", .{objc.str("Cancel")});
-    const r = msg(isize, a, "runModal", .{});
-    msg(void, a, "release", .{});
-    return switch (r) {
+    return switch (askAlert(title, "Your changes are lost if you don't save them.", &.{ if (n == 1) "Save" else "Save All", "Don't Save", "Cancel" })) {
         1000 => saveAll(d, quit),
         1001 => true,
         else => false,
@@ -2817,16 +2820,9 @@ fn askReload(d: *Doc) bool {
     // A Dev build never puts an alert in front of Harsha: it keeps its copy.
     if (background) return false;
     msg(void, d.window, "makeKeyAndOrderFront:", .{@as(Id, null)});
-    const a = objc.new("NSAlert");
     var buf: [300]u8 = undefined;
     const title = std.fmt.bufPrint(&buf, "{s} changed in another app.", .{d.name()}) catch "This file changed in another app.";
-    msg(void, a, "setMessageText:", .{objc.str(title)});
-    msg(void, a, "setInformativeText:", .{objc.str("Reloading it loses your unsaved changes here.")});
-    _ = msg(Id, a, "addButtonWithTitle:", .{objc.str("Keep Mine")});
-    _ = msg(Id, a, "addButtonWithTitle:", .{objc.str("Reload")});
-    const r = msg(isize, a, "runModal", .{});
-    msg(void, a, "release", .{});
-    return r == 1001;
+    return askAlert(title, "Reloading it loses your unsaved changes here.", &.{ "Keep Mine", "Reload" }) == 1001;
 }
 
 // ---- settings ----
@@ -2882,15 +2878,20 @@ pub fn loadSettings() void {
     side_w = conf.sidebar_width;
     conf_stamp = files.stamp(p);
     setFont();
-    if (wrap_item != null) msg(void, wrap_item, "setState:", .{@as(isize, @intFromBool(conf.wrap))});
-    if (pairs_item != null) msg(void, pairs_item, "setState:", .{@as(isize, @intFromBool(conf.pairs))});
-    if (sidebar_item != null) msg(void, sidebar_item, "setState:", .{@as(isize, @intFromBool(conf.sidebar))});
-    if (lines_item != null) msg(void, lines_item, "setState:", .{@as(isize, @intFromBool(conf.line_numbers))});
-    if (typewriter_item != null) msg(void, typewriter_item, "setState:", .{@as(isize, @intFromBool(conf.typewriter))});
+    const checks = [_]struct { Id, bool }{
+        .{ wrap_item, conf.wrap },
+        .{ pairs_item, conf.pairs },
+        .{ sidebar_item, conf.sidebar },
+        .{ lines_item, conf.line_numbers },
+        .{ typewriter_item, conf.typewriter },
+        .{ zen_item, conf.zen },
+        // Late-Night's own checkmark; its other items get theirs from the effective values above.
+        .{ late_item, conf.late_night },
+    };
+    for (checks) |c| if (c[0] != null) msg(void, c[0], "setState:", .{@as(isize, @intFromBool(c[1]))});
     for (focus_items, 0..) |it, i| {
         if (it != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(i == @intFromEnum(conf.focus)))});
     }
-    if (zen_item != null) msg(void, zen_item, "setState:", .{@as(isize, @intFromBool(conf.zen))});
     dropIcons();
     for (scheme_items, 0..) |it, i| {
         if (it != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(i == conf.light_scheme or i == conf.dark_scheme))});
@@ -2898,8 +2899,6 @@ pub fn loadSettings() void {
     for (look_items, 0..) |it, i| {
         if (it != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(i == @intFromEnum(conf.look)))});
     }
-    // Late-Night's own checkmark; its other items get theirs from the effective values above.
-    if (late_item != null) msg(void, late_item, "setState:", .{@as(isize, @intFromBool(conf.late_night))});
     // Auto leaves it to the Mac; Light and Dark pin every window.
     const look: Id = switch (conf.look) {
         .auto => null,
