@@ -5303,7 +5303,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         const n = std.unicode.utf8CountCodepoints(line) catch line.len;
         k.flush();
         objc.CGContextSaveGState(ctx);
-        objc.CGContextSetAlpha(ctx, hint_alpha * hint_a);
+        objc.CGContextSetAlpha(ctx, @as(f64, if (contrast) 1 else hint_alpha) * hint_a);
         _ = k.text(line, null, th, th.muted, @round(card.x + (card.w - f(n) * cw) / 2), @round((top_h + by - lh) / 2) + baseline, 0, 80);
         k.flush();
         objc.CGContextRestoreGState(ctx);
@@ -5535,8 +5535,7 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
     const hx = d.hl[0].step(now);
     const hw = d.hl[1].step(now);
     if (a > 0.01) {
-        pill(ctx, th.fg, (0.05 + 0.03 * ka) * a, hx, hy - 11, hw, 22, 7);
-        ring(ctx, th.fg, (0.06 + 0.04 * ka) * a, hx, hy - 11, hw, 22, 7);
+        tabFill(ctx, th, ka, a, hx, hy - 11, hw);
     }
 
     for (0..2) |pass| {
@@ -5587,6 +5586,14 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
     k.flush();
 }
 
+/// The active tab's pill and ring at (`x`, `y`) and width `w`, as selFill's
+/// stronger fill and ring under Increase Contrast. `ka` is the card's key
+/// fade and `a` how far the header has turned into tabs.
+fn tabFill(ctx: Id, th: *const Theme, ka: f64, a: f64, x: f64, y: f64, w: f64) void {
+    pill(ctx, th.fg, (if (contrast) 0.16 else 0.05 + 0.03 * ka) * a, x, y, w, 22, 7);
+    ring(ctx, th.fg, (if (contrast) 0.4 else 0.06 + 0.04 * ka) * a, x, y, w, 22, 7);
+}
+
 /// One tab of `d`'s header, where it lays out plus its slide; `a` is how
 /// far the header has turned into tabs and `cap` the squeezed tabs' width.
 /// Its name lights up, from regular at 0.62 to medium at full ink, as the
@@ -5610,10 +5617,9 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, ka: f64, a:
     if (alpha < 1) objc.CGContextSetAlpha(ctx, alpha);
     if (lifted) {
         pill(ctx, th.header, 1, sx, hy - 11, s.w, 22, 7);
-        pill(ctx, th.fg, (0.05 + 0.03 * ka) * a, sx, hy - 11, s.w, 22, 7);
-        ring(ctx, th.fg, (0.06 + 0.04 * ka) * a, sx, hy - 11, s.w, 22, 7);
+        tabFill(ctx, th, ka, a, sx, hy - 11, s.w);
     }
-    if (hv > 0.01 and !on) pill(ctx, th.fg, 0.05 * hv, sx, hy - 11, s.w, 22, 7);
+    if (hv > 0.01 and !on) pill(ctx, th.fg, @as(f64, if (contrast) 0.1 else 0.05) * hv, sx, hy - 11, s.w, 22, 7);
     if (d.win.menu_card == d and d.win.menu_tab == s.id) {
         const ma = d.win.menu_a.at(now);
         if (ma > 0.01) menuMark(ctx, th, ma, sx, hy - 11, s.w, 22, 7);
@@ -5672,7 +5678,7 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, ka: f64, a:
     }
     if (cross > 0.01) {
         const xv = s.xhov.at(now) * a;
-        if (xv > 0.01) pill(ctx, th.fg, 0.1 * xv, cx - 8, hy - 8, 16, 16, 5);
+        if (xv > 0.01) pill(ctx, th.fg, @as(f64, if (contrast) 0.2 else 0.1) * xv, cx - 8, hy - 8, 16, 16, 5);
         objc.CGContextSetAlpha(ctx, alpha * cross);
         drawIcon(icon(.close, dark, th), cx - 6, hy - 6, 12);
     }
