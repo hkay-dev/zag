@@ -240,6 +240,7 @@ fn barH() f64 {
 
 /// Loads the font the settings name, or the system monospace font.
 fn setFont() void {
+    dropAttrs();
     if (font != null) _ = msg(void, font, "release", .{});
     if (bold != null) _ = msg(void, bold, "release", .{});
     const NSFont = objc.class("NSFont");
@@ -2386,9 +2387,14 @@ fn save(d: *Doc, as: bool) bool {
     d.note = "saved";
     noteRecent(d.path.?);
     if (conf_path != null and std.mem.eql(u8, d.path.?, conf_path.?)) loadSettings();
-    // A new file shows in the tree, and its dot goes away.
-    rebuildTree();
-    refreshAll();
+    // A new file shows in the tree; every file's dot goes away.
+    if (relOf(d.path.?)) |rel| if (!tree.has(rel)) {
+        rebuildTree();
+        refreshAll();
+        return true;
+    };
+    refresh(d);
+    for (wins.items) |w| redrawSide(w);
     return true;
 }
 
@@ -2867,17 +2873,19 @@ pub fn loadSettings() void {
     const old_lh = lh;
     const old_themes = themes;
     const old_look = conf.look;
+    const old_conf = conf;
     const old_zen = conf.zen;
     const old_late = conf.late_night;
     conf_saved = settings.load(gpa, p);
     conf = conf_saved;
     if (conf.late_night) conf.lateNight();
+    const fonts_changed = old_conf.size != conf.size or old_conf.spacing != conf.spacing or !std.mem.eql(u8, old_conf.font(), conf.font());
     buildThemes();
     // A theme or appearance pick crossfades, and so does Late-Night; zen's own change doesn't.
     const crossfade = conf.late_night != old_late or conf.look != old_look or (conf.zen == old_zen and !std.meta.eql(old_themes, themes));
     side_w = conf.sidebar_width;
     conf_stamp = files.stamp(p);
-    setFont();
+    if (font == null or fonts_changed) setFont();
     const checks = [_]struct { Id, bool }{
         .{ wrap_item, conf.wrap },
         .{ pairs_item, conf.pairs },
@@ -2892,7 +2900,13 @@ pub fn loadSettings() void {
     for (focus_items, 0..) |it, i| {
         if (it != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(i == @intFromEnum(conf.focus)))});
     }
-    dropIcons();
+    // The icons take the size and the caret and muted colors.
+    for (old_themes, themes) |a, b| {
+        if (old_conf.size != conf.size or !std.mem.eql(f64, &a.caret, &b.caret) or !std.mem.eql(f64, &a.muted, &b.muted)) {
+            dropIcons();
+            break;
+        }
+    }
     for (scheme_items, 0..) |it, i| {
         if (it != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(i == conf.light_scheme or i == conf.dark_scheme))});
     }
@@ -3937,6 +3951,22 @@ fn dropIcons() void {
     };
 }
 
+/// A row's name at `room` wide: the whole line when it fits, else the cut one,
+/// made again only when the room changed.
+fn sideFit(sl: *SideLine, room: f64) Id {
+    const l = sl.full orelse return null;
+    if (objc.CTLineGetTypographicBounds(l, null, null, null) <= room) return l;
+    if (sl.cut_room != room) {
+        if (sl.cut) |c| objc.CFRelease(c);
+        sl.cut = null;
+        sl.cut_room = room;
+        const token = ellipsis(side_font);
+        defer if (token) |t| objc.CFRelease(t);
+        sl.cut = objc.CTLineCreateTruncatedLine(l, room, 1, token);
+    }
+    return sl.cut orelse l;
+}
+
 /// The Mac's own icon for a file of `name`'s kind, the same one Finder
 /// shows. Made on first use per extension and kept.
 fn iconFor(name: []const u8) Id {
@@ -4533,11 +4563,12 @@ fn drawRow(w: *Win, ctx: Id, th: *const Theme, dark: bool, i: usize, y: f64, tur
     if (row.dir) drawIcon(icon(.folder, dark, th), x + 10, iy, s) else tileAt(iconFor(row.rel[row.base..]), x + 10, iy, s);
     const nx = x + 10 + s + 8;
     const room = side_w - nx - if (row.dir) @as(f64, 14) else 26;
-    const plain = &side_lines.items[i];
-    if (plain.* == null) plain.* = uiLine(row.rel[row.base..], side_font, room);
+    const sl = &side_lines.items[i];
+    if (sl.full == null) sl.full = uiLine(row.rel[row.base..], side_font, 1e9);
+    const plain = sideFit(sl, room);
     // How far the selection's highlight is on this row, for the bold name.
     const bp: f64 = if (row.dir or w.sel_row == null) 0 else (1 - std.math.clamp(@abs(w.sel.x - f(i) * side_h) / side_h, 0, 1)) * std.math.clamp(w.sel_a.at(now), 0, 1);
-    var nw = drawLineA(ctx, plain.*, th.fg, 1 - bp, nx, y + side_base);
+    var nw = drawLineA(ctx, plain, th.fg, 1 - bp, nx, y + side_base);
     if (bp > 0.001) {
         const selected = w.sel_row == i;
         if (selected and (w.bold == null or w.bold_row != i or w.bold_gen != tree_gen)) {
@@ -4546,13 +4577,16 @@ fn drawRow(w: *Win, ctx: Id, th: *const Theme, dark: bool, i: usize, y: f64, tur
             w.bold_old = w.bold;
             w.bold_old_row = w.bold_row;
             w.bold_old_gen = w.bold_gen;
-            w.bold = uiLine(row.rel[row.base..], name_font, room);
+            w.bold = uiLine(row.rel[row.base..], name_font, 1e9);
             w.bold_row = i;
             w.bold_gen = tree_gen;
         }
-        const kept = if (w.bold != null and w.bold_row == i and w.bold_gen == tree_gen) w.bold else if (w.bold_old != null and w.bold_old_row == i and w.bold_old_gen == tree_gen) w.bold_old else null;
-        const line = kept orelse uiLine(row.rel[row.base..], name_font, room);
-        defer if (kept == null) if (line) |l| objc.CFRelease(l);
+        const whole = if (w.bold != null and w.bold_row == i and w.bold_gen == tree_gen) w.bold else if (w.bold_old != null and w.bold_old_row == i and w.bold_old_gen == tree_gen) w.bold_old else null;
+        const kept = whole != null;
+        const full = whole orelse uiLine(row.rel[row.base..], name_font, 1e9);
+        defer if (!kept) if (full) |l| objc.CFRelease(l);
+        const line = cutLine(full, name_font, room);
+        defer if (line) |l| objc.CFRelease(l);
         const bw = drawLineA(ctx, line, th.fg, bp, nx, y + side_base);
         nw += (bw - nw) * bp;
     }
@@ -4609,11 +4643,15 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
         w.side_t.aim(w.side_y, now);
     } else if (w.side_t.to != w.side_y) w.side_t.snap(w.side_y);
     const sy = if (w.side_t.moving(now)) w.side_t.at(now) else w.side_y;
-    if (side_lines.items.len < rows.len) side_lines.appendNTimes(gpa, null, rows.len - side_lines.items.len) catch return;
+    if (side_lines.items.len < rows.len) side_lines.appendNTimes(gpa, .{}, rows.len - side_lines.items.len) catch return;
 
     objc.CGContextSaveGState(ctx);
     objc.CGContextClipToRect(ctx, .{ .y = top_h - 6, .w = side_w - 2, .h = full_h - top_h + 6 });
-    if (side_head == null) side_head = uiLine(std.fs.path.basename(root.?), name_font, side_w - 32 - 14);
+    if (side_head == null or side_head_room != side_w - 32 - 14) {
+        if (side_head) |l| objc.CFRelease(l);
+        side_head_room = side_w - 32 - 14;
+        side_head = uiLine(std.fs.path.basename(root.?), name_font, side_head_room);
+    }
     const hw = drawLine(ctx, side_head, th.fg, 16, top_h + side_base);
     drawIcon(icon(.parents, dark, th), 16 + hw + 5, top_h + (side_h - 12) / 2, 12);
 
@@ -4775,7 +4813,12 @@ fn fadeList(ctx: Id, bg: Rgb, a: f64, end: f64, h: f64) void {
 /// draw: the folder's name, then one per tree row. Dropped when the tree or
 /// the font changes; drawing one costs no layout.
 var side_head: Id = null;
-var side_lines: std.ArrayList(Id) = .empty;
+/// A row's whole name, made once, and the name cut to the room it last had
+/// when it's wider than that: a width change remakes only a cut line.
+const SideLine = struct { full: Id = null, cut: Id = null, cut_room: f64 = -1 };
+var side_lines: std.ArrayList(SideLine) = .empty;
+/// The room `side_head` was cut to.
+var side_head_room: f64 = 0;
 /// The unsaved dot after a file's name, one line shared by every row.
 var side_dot: Id = null;
 
@@ -4792,7 +4835,10 @@ fn dropSideLines() void {
         objc.CFRelease(l);
         side_head = null;
     }
-    for (side_lines.items) |l| if (l) |p| objc.CFRelease(p);
+    for (side_lines.items) |*l| {
+        if (l.full) |p| objc.CFRelease(p);
+        if (l.cut) |p| objc.CFRelease(p);
+    }
     side_lines.clearRetainingCapacity();
 }
 
@@ -4905,10 +4951,38 @@ fn uiLineCut(s: []const u8, fnt: Id, width: f64, at: u32) Id {
     return short;
 }
 
+/// One attributes dictionary per UI font in use (retained), so a line doesn't
+/// build one; emptied when the fonts are made again.
+const UiAttrs = struct { font: Id, attrs: Id };
+var ui_attrs: [10]UiAttrs = undefined;
+var ui_attrs_n: usize = 0;
+
+fn dropAttrs() void {
+    for (ui_attrs[0..ui_attrs_n]) |a| msg(void, a.attrs, "release", .{});
+    ui_attrs_n = 0;
+}
+
 fn uiAttrs(fnt: Id) Id {
+    for (ui_attrs[0..ui_attrs_n]) |a| if (a.font == fnt) return a.attrs;
+    if (ui_attrs_n == ui_attrs.len) dropAttrs();
     const objs = [2]Id{ fnt, msg(Id, objc.class("NSNumber"), "numberWithBool:", .{true}) };
     const keys = [2]Id{ objc.str("NSFont"), objc.str("CTForegroundColorFromContext") };
-    return msg(Id, objc.class("NSDictionary"), "dictionaryWithObjects:forKeys:count:", .{ &objs, &keys, @as(usize, 2) });
+    const made = msg(Id, msg(Id, objc.class("NSDictionary"), "dictionaryWithObjects:forKeys:count:", .{ &objs, &keys, @as(usize, 2) }), "retain", .{});
+    ui_attrs[ui_attrs_n] = .{ .font = fnt, .attrs = made };
+    ui_attrs_n += 1;
+    return made;
+}
+
+/// `line` (made at any width by `uiLine`) cut to `width` the way `uiLine`
+/// cuts it. Owned: CFRelease it; `line` retained when it fits.
+fn cutLine(line: Id, fnt: Id, width: f64) Id {
+    const l = line orelse return null;
+    if (objc.CTLineGetTypographicBounds(l, null, null, null) > width) {
+        const token = ellipsis(fnt);
+        defer if (token) |t| objc.CFRelease(t);
+        if (objc.CTLineCreateTruncatedLine(l, width, 1, token)) |short| return short;
+    }
+    return objc.CFRetain(l);
 }
 
 /// The ellipsis `uiLine` ends a cut line with, in `fnt`. Owned: CFRelease it.
@@ -4997,11 +5071,7 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     if (side_stretch.x != 0 or side_stretch.v != 0) {
         _ = side_stretch.step(now);
         if (side_stretch.to == 0 and side_stretch.settled()) side_stretch.snap(0);
-        const stretched = @round(side_rest + side_stretch.x);
-        if (stretched != side_w) {
-            side_w = stretched;
-            dropSideLines();
-        }
+        side_w = @round(side_rest + side_stretch.x);
     }
     // A closing folder shuts once its rows have folded away.
     finishFolds(now);
@@ -6832,7 +6902,6 @@ fn resizeSide(w: *Win, x: f64) void {
     const now_w = @round(to + over);
     if (now_w == side_w) return;
     side_w = now_w;
-    dropSideLines();
     refreshAll();
 }
 
