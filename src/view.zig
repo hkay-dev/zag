@@ -6541,6 +6541,9 @@ fn hoverAt(w: *Win, p: Point) void {
 }
 
 /// Runs the hover hit test again from where the mouse sits now, for when
+    if (w.tdrag != null or !msg(bool, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "isActive", .{})) return;
+    const num = msg(isize, w.window, "windowNumber", .{});
+    if (msg(isize, objc.class("NSWindow"), "windowNumberAtPoint:belowWindowWithWindowNumber:", .{ msg(Point, objc.class("NSEvent"), "mouseLocation", .{}), @as(isize, 0) }) != num) return;
 /// rows or tabs have moved under a still mouse. Does nothing while the
 /// mouse is outside the window's view.
 fn hoverNow(w: *Win) void {
