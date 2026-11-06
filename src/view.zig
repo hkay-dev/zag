@@ -4496,7 +4496,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
         w.hov_last = i;
         w.hov_a.aim(1, now);
     } else w.hov_a.aim(0, now);
-    if (hov_a > 0.01) pill(ctx, th.fg, (if (dark) @as(f64, 0.035) else 0.025) * (if (key) @as(f64, 1) else 0.7) * hov_a * fade, side_inset, lt + w.hov.step(now) - sy, side_w - 2 * side_inset - 2, side_h, side_radius);
+    if (hov_a > 0.01) pill(ctx, th.fg, (if (contrast) @as(f64, 0.08) else if (dark) @as(f64, 0.035) else 0.025) * (if (key) @as(f64, 1) else 0.7) * hov_a * fade, side_inset, lt + w.hov.step(now) - sy, side_w - 2 * side_inset - 2, side_h, side_radius);
 
     // The selection hops from row to row with a little bounce, and rides
     // along when folders above it open or close.
@@ -4576,7 +4576,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
     }
     // A hairline under whatever is pinned, once rows pass under it.
     const shade = std.math.clamp(sy / side_h, 0, 1);
-    if (shade > 0) fillA(ctx, th.fg, 0.08 * shade, 12, low - 1, side_w - 24, 1);
+    if (shade > 0) fillA(ctx, th.fg, (if (contrast) @as(f64, 0.2) else 0.08) * shade, 12, low - 1, side_w - 24, 1);
     objc.CGContextRestoreGState(ctx);
 }
 

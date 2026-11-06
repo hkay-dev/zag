@@ -360,8 +360,9 @@ show the mode and the two themes in use. Zag remembers them in the settings file
 Zen Mode turns every theme color grey while it's on, without changing the saved colors.
 Switching themes, or the Mac's light and dark setting, fades over a quarter of a second. Gray
 text in every theme is dark enough to read comfortably. With **Increase contrast** on in System
-Settings > Accessibility > Display, Zag strengthens the card outlines, the sidebar's selection, the tabs' highlights and the
-gray text, and follows the setting the moment you change it.
+Settings > Accessibility > Display, Zag strengthens the card outlines, the sidebar's selection,
+hover highlight and the line under its pinned folders, the tabs' highlights and the gray text,
+and follows the setting the moment you change it.
 
 ## Font and text size
 
