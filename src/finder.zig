@@ -61,11 +61,6 @@ fn isSkipped(name: []const u8) bool {
 /// Scores `path` against `q`: null when `q` isn't a subsequence of it.
 /// Rewards runs, starts of words, and matches in the file name.
 pub fn score(path: []const u8, q: []const u8) ?i32 {
-    return scoreWith(path, q, false);
-}
-
-/// `score`; `lowered` says `q` is already lowercase.
-fn scoreWith(path: []const u8, q: []const u8, comptime lowered: bool) ?i32 {
     if (q.len == 0) return 0;
     const base = if (std.mem.lastIndexOfScalar(u8, path, '/')) |i| i + 1 else 0;
     var s: i32 = 0;
@@ -73,8 +68,7 @@ fn scoreWith(path: []const u8, q: []const u8, comptime lowered: bool) ?i32 {
     var prev: ?usize = null;
     for (path, 0..) |ch, i| {
         if (qi == q.len) break;
-        const want = if (lowered) q[qi] else std.ascii.toLower(q[qi]);
-        if (std.ascii.toLower(ch) != want) continue;
+        if (std.ascii.toLower(ch) != std.ascii.toLower(q[qi])) continue;
         s += 1;
         if (prev != null and prev.? + 1 == i) s += 6;
         if (i == 0 or std.mem.indexOfScalar(u8, "/_-. ", path[i - 1]) != null) s += 8;
@@ -90,12 +84,8 @@ fn scoreWith(path: []const u8, q: []const u8, comptime lowered: bool) ?i32 {
 pub fn best(paths: []const []const u8, q: []const u8, out: []usize) usize {
     var scores: [32]i32 = undefined;
     var n: usize = 0;
-    // The query is lowercased once here, not for every character of every path.
-    var low: [256]u8 = undefined;
-    const fits = q.len <= low.len;
-    const lower = if (fits) std.ascii.lowerString(&low, q) else q;
     for (paths, 0..) |p, i| {
-        const s = (if (fits) scoreWith(p, lower, true) else scoreWith(p, q, false)) orelse continue;
+        const s = score(p, q) orelse continue;
         var at = n;
         while (at > 0 and scores[at - 1] < s) at -= 1;
         if (at >= out.len) continue;
