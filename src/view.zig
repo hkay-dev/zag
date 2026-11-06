@@ -607,6 +607,8 @@ const Slot = struct {
     /// icon and name grow from 0.92 to full size on it.
     grow: Spring = .{ .k = 280, .c = 25 },
     hov: Tween = .{ .dur = fade_time },
+    /// The close button's square, fading in while the mouse is over the ×.
+    xhov: Tween = .{ .dur = fade_time },
     /// The unsaved dot, 0 to 1: it grows in with a little bounce and
     /// shrinks away as it fades.
     dot: Spring = .{ .k = 420, .c = 22 },
@@ -5191,7 +5193,7 @@ fn slotOf(d: *const Doc, id: u32) ?usize {
 fn tabsMoving(d: *const Doc, now: f64) bool {
     if (d.tabbed.moving(now) or d.tab_x.moving(now) or !d.hl[0].settled() or !d.hl[1].settled()) return true;
     if (!d.opening.settled() or d.plus_down.moving(now)) return true;
-    for (d.slots.items) |s| if (s.gone or !s.grow.settled() or !s.shift.settled() or s.hov.moving(now) or !s.dot.settled() or !s.wid.settled()) return true;
+    for (d.slots.items) |s| if (s.gone or !s.grow.settled() or !s.shift.settled() or s.hov.moving(now) or s.xhov.moving(now) or !s.dot.settled() or !s.wid.settled()) return true;
     return false;
 }
 
@@ -5204,11 +5206,8 @@ const tab_space = 4.0;
 /// A tab's width at rest: its padding, tile, name and close button, and
 /// with one tab the unsaved dot after the name. The name's part springs
 /// (`Slot.wid`), so a renamed tab eases to its new width.
-fn tabWidth(d: *const Doc, s: *const Slot, a: f64) f64 {
-    const nw = s.wid.x;
-    const j = tabIndex(d, s.id);
-    const dot: f64 = if (j != null and !s.gone and tabDirty(d, j.?)) 14 * (1 - a) else 0;
-    return 2 * tab_pad * a + tileSize() + 7 + nw + tab_shut * a + dot;
+fn tabWidth(s: *const Slot, a: f64) f64 {
+    return 2 * tab_pad * a + tileSize() + 7 + s.wid.x + tab_shut * a + 14 * (1 - a) * std.math.clamp(s.dot.x, 0, 1);
 }
 
 /// The header's left side, from `x0` to `x1`. With one tab it's the file's
@@ -5238,6 +5237,9 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
         if (s.sized) s.wid.aim(nw, now) else s.wid.snap(nw);
         s.sized = true;
         _ = s.wid.step(now);
+        const dirty = !s.gone and if (tabIndex(d, s.id)) |j| tabDirty(d, j) else false;
+        s.dot.aim(if (dirty) 1 else 0, now);
+        _ = s.dot.step(now);
     }
 
     // Squeeze the tabs to a common cap when they don't all fit, down to
@@ -5251,7 +5253,7 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
             const mid = (lo + hi) / 2;
             var sum: f64 = 0;
             for (d.slots.items) |*s| if (!s.gone) {
-                sum += @min(tabWidth(d, s, a), mid) + tab_space * a;
+                sum += @min(tabWidth(s, a), mid) + tab_space * a;
             };
             if (sum <= room) lo = mid else hi = mid;
         }
@@ -5272,7 +5274,7 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
         }
         const g = @max(s.grow.step(now), 0);
         s.x = x;
-        s.w = @min(tabWidth(d, s, a), cap) * g;
+        s.w = @min(tabWidth(s, a), cap) * g;
         x += s.w + tab_space * a * @min(g, 1);
     }
     if (live <= d.open_at) x += d.open_px;
@@ -5373,6 +5375,7 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, key: bool, 
     const on = j != null and j.? == d.at;
     const hovered = j != null and s.id == d.hover;
     s.hov.aim(if (hovered) 1 else 0, now);
+    s.xhov.aim(if (hovered and d.hover_x) 1 else 0, now);
     const hv = s.hov.at(now) * a;
     const g = std.math.clamp(s.grow.x, 0, 1);
     objc.CGContextSaveGState(ctx);
@@ -5435,9 +5438,7 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, key: bool, 
     // The unsaved dot sits after the name with one tab and slides into
     // the close button's place with more; hovering trades it for the ×.
     const cx = shut_x + tab_shut * a / 2;
-    const dirty = j != null and tabDirty(d, j.?);
-    s.dot.aim(if (dirty) 1 else 0, now);
-    const dv = std.math.clamp(s.dot.step(now), 0, 1.3);
+    const dv = std.math.clamp(s.dot.x, 0, 1.3);
     // On the active tab the × and the dot trade places as the dot comes and goes.
     const cross = a * @max(hv, if (on) 1 - @min(dv, 1) else 0);
     if (dv > 0.01 and cross < 0.5) {
@@ -5446,7 +5447,8 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, key: bool, 
         pill(ctx, th.caret, (1 - 2 * cross) * @min(dv, 1), dx - r, hy - r, 2 * r, 2 * r, r);
     }
     if (cross > 0.01) {
-        if (hovered and d.hover_x) pill(ctx, th.fg, 0.1 * a, cx - 8, hy - 8, 16, 16, 5);
+        const xv = s.xhov.at(now) * a;
+        if (xv > 0.01) pill(ctx, th.fg, 0.1 * xv, cx - 8, hy - 8, 16, 16, 5);
         objc.CGContextSetAlpha(ctx, alpha * cross);
         drawIcon(icon(.close, dark, th), cx - 6, hy - 6, 12);
     }
