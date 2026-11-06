@@ -242,6 +242,10 @@ fn setFont() void {
     side_h = @round((conf.size - 1) * 2.3);
     side_base = @round((side_h - objc.CTFontGetAscent(side_font) - objc.CTFontGetDescent(side_font)) / 2 + objc.CTFontGetAscent(side_font));
     name_off = (objc.CTFontGetAscent(name_font) - objc.CTFontGetDescent(name_font)) / 2;
+    for (&tab_dots) |*p| if (p.*) |l| {
+        objc.CFRelease(l);
+        p.* = null;
+    };
     for ([_]*Id{ &tab_font, &tab_bold, &path_font }) |p| if (p.* != null) msg(void, p.*, "release", .{});
     tab_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 1, @as(f64, 0) }), "retain", .{});
     tab_bold = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 1, @as(f64, 0.23) }), "retain", .{});
@@ -4513,21 +4517,46 @@ fn uiLine(s: []const u8, fnt: Id, width: f64) Id {
 
 /// `uiLine`, with the ellipsis at the start (0), end (1) or middle (2).
 fn uiLineCut(s: []const u8, fnt: Id, width: f64, at: u32) Id {
-    const objs = [2]Id{ fnt, msg(Id, objc.class("NSNumber"), "numberWithBool:", .{true}) };
-    const keys = [2]Id{ objc.str("NSFont"), objc.str("CTForegroundColorFromContext") };
-    const attrs = msg(Id, objc.class("NSDictionary"), "dictionaryWithObjects:forKeys:count:", .{ &objs, &keys, @as(usize, 2) });
+    const attrs = uiAttrs(fnt);
     const text = attributed(s, attrs);
     defer msg(void, text, "release", .{});
     const line = objc.CTLineCreateWithAttributedString(text);
     if (line == null or objc.CTLineGetTypographicBounds(line, null, null, null) <= width) return line;
-    const dots = attributed("…", attrs);
-    defer msg(void, dots, "release", .{});
-    const token = objc.CTLineCreateWithAttributedString(dots);
+    const token = ellipsis(fnt);
     defer if (token) |t| objc.CFRelease(t);
     const short = objc.CTLineCreateTruncatedLine(line, width, at, token);
     if (short == null) return line;
     objc.CFRelease(line.?);
     return short;
+}
+
+fn uiAttrs(fnt: Id) Id {
+    const objs = [2]Id{ fnt, msg(Id, objc.class("NSNumber"), "numberWithBool:", .{true}) };
+    const keys = [2]Id{ objc.str("NSFont"), objc.str("CTForegroundColorFromContext") };
+    return msg(Id, objc.class("NSDictionary"), "dictionaryWithObjects:forKeys:count:", .{ &objs, &keys, @as(usize, 2) });
+}
+
+/// The ellipsis `uiLine` ends a cut line with, in `fnt`. Owned: CFRelease it.
+fn ellipsis(fnt: Id) Id {
+    const dots = attributed("…", uiAttrs(fnt));
+    defer msg(void, dots, "release", .{});
+    return objc.CTLineCreateWithAttributedString(dots);
+}
+
+/// The tab names' ellipses, bold then thin, made on first use and kept until
+/// the fonts change.
+var tab_dots: [2]Id = .{ null, null };
+
+/// `line` (a tab's whole name, made by `uiLine`) cut to `width` the way
+/// `uiLine` cuts it, from the ellipsis kept in `tab_dots[k]` (0 for the bold
+/// name, 1 for the thin). Owned: CFRelease it; `line` retained when it fits.
+fn cutTab(line: Id, k: usize, width: f64) Id {
+    const l = line orelse return null;
+    if (tab_dots[k] == null) tab_dots[k] = ellipsis(if (k == 0) tab_bold else tab_font);
+    if (objc.CTLineGetTypographicBounds(l, null, null, null) > width) {
+        if (objc.CTLineCreateTruncatedLine(l, width, 1, tab_dots[k])) |short| return short;
+    }
+    return objc.CFRetain(l);
 }
 
 fn attributed(s: []const u8, attrs: Id) Id {
@@ -5452,10 +5481,8 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, key: bool, 
     const squeezed = j != null and room_w + 1 < nw;
     if (squeezed and room_w != s.cut_w) {
         for ([_]*Id{ &s.cut, &s.thin_cut }) |l| if (l.*) |old| objc.CFRelease(old);
-        var nb: [48]u8 = undefined;
-        const nm = tabName(d, j.?, &nb);
-        s.cut = uiLine(nm, tab_bold, room_w);
-        s.thin_cut = uiLine(nm, tab_font, room_w);
+        s.cut = cutTab(s.line, 0, room_w);
+        s.thin_cut = cutTab(s.thin, 1, room_w);
         s.cut_w = room_w;
     }
     // How much the highlight covers this tab, so a tab that it only sits
