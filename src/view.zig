@@ -5470,11 +5470,11 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // The status strip along the card's bottom, in the header's small folder
     // ink, dimmer in a card that isn't key. It fades out under the prompt band
     // as it rises and back as it sinks, and away with Zen.
-    const strip_a = zen_k * (1 - d.pbar.at(now));
-    if (strip_a > 0.01) {
+    const stat_a = zen_k * (1 - d.pbar.at(now));
+    if (stat_a > 0.01) {
         statusLine(d, card.w - 2 * pad_x);
         const sy = card.y + card.h - strip_h / 2 + path_off;
-        _ = drawLineA(ctx, d.stat, th.muted, strip_a * (0.62 + 0.38 * ka), @round(card.x + card.w - pad_x - d.stat_w), @round(sy));
+        _ = drawLineA(ctx, d.stat, th.muted, stat_a * (0.62 + 0.38 * ka), @round(card.x + card.w - pad_x - d.stat_w), @round(sy));
     }
 
     // The prompt line: find, replace, go to line, quick open and the palette.
