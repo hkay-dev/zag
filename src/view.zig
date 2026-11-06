@@ -741,40 +741,50 @@ fn moveCaret(d: *Doc, now: f64) void {
     msg(void, t, "commit", .{});
 }
 
+var fade_anim: Id = null;
+var blink_anim: Id = null;
+
 /// Fades the layer in from clear over `dur`, as an opacity animation.
+/// The animation is made once; adding it copies it.
 fn fadeIn(layer: Id, dur: f64) void {
-    const num = objc.class("NSNumber");
-    const a = msg(Id, objc.class("CABasicAnimation"), "animationWithKeyPath:", .{objc.str("opacity")});
-    msg(void, a, "setFromValue:", .{msg(Id, num, "numberWithDouble:", .{@as(f64, 0)})});
-    msg(void, a, "setToValue:", .{msg(Id, num, "numberWithDouble:", .{@as(f64, 1)})});
-    msg(void, a, "setDuration:", .{dur});
-    msg(void, layer, "addAnimation:forKey:", .{ a, objc.str("fade") });
+    if (fade_anim == null) {
+        const num = objc.class("NSNumber");
+        const a = msg(Id, objc.class("CABasicAnimation"), "animationWithKeyPath:", .{objc.str("opacity")});
+        msg(void, a, "setFromValue:", .{msg(Id, num, "numberWithDouble:", .{@as(f64, 0)})});
+        msg(void, a, "setToValue:", .{msg(Id, num, "numberWithDouble:", .{@as(f64, 1)})});
+        fade_anim = msg(Id, a, "retain", .{});
+    }
+    msg(void, fade_anim, "setDuration:", .{dur});
+    msg(void, layer, "addAnimation:forKey:", .{ fade_anim, objc.str("fade") });
 }
 
 /// Holds the caret solid for half a second, then fades it out, rests it
-/// dark, and fades it back in, once a second.
+/// dark, and fades it back in, once a second. The animation is made once.
 fn blink(caret: Id) void {
-    const num = objc.class("NSNumber");
-    const arr = objc.class("NSArray");
-    const levels = [_]f64{ 1, 1, 0, 0, 1 };
-    const times = [_]f64{ 0, 0.5, 0.62, 0.9, 1 };
-    var values: [5]Id = undefined;
-    var stops: [5]Id = undefined;
-    for (levels, times, &values, &stops) |lv, tm, *v, *s| {
-        v.* = msg(Id, num, "numberWithDouble:", .{lv});
-        s.* = msg(Id, num, "numberWithDouble:", .{tm});
+    if (blink_anim == null) {
+        const num = objc.class("NSNumber");
+        const arr = objc.class("NSArray");
+        const levels = [_]f64{ 1, 1, 0, 0, 1 };
+        const times = [_]f64{ 0, 0.5, 0.62, 0.9, 1 };
+        var values: [5]Id = undefined;
+        var stops: [5]Id = undefined;
+        for (levels, times, &values, &stops) |lv, tm, *v, *s| {
+            v.* = msg(Id, num, "numberWithDouble:", .{lv});
+            s.* = msg(Id, num, "numberWithDouble:", .{tm});
+        }
+        const fn_class = objc.class("CAMediaTimingFunction");
+        const eases = [_][:0]const u8{ "linear", "easeIn", "linear", "easeOut" };
+        var curves: [4]Id = undefined;
+        for (eases, &curves) |name, *c| c.* = msg(Id, fn_class, "functionWithName:", .{objc.str(name)});
+        const a = msg(Id, objc.class("CAKeyframeAnimation"), "animationWithKeyPath:", .{objc.str("opacity")});
+        msg(void, a, "setValues:", .{msg(Id, arr, "arrayWithObjects:count:", .{ &values, @as(usize, 5) })});
+        msg(void, a, "setKeyTimes:", .{msg(Id, arr, "arrayWithObjects:count:", .{ &stops, @as(usize, 5) })});
+        msg(void, a, "setTimingFunctions:", .{msg(Id, arr, "arrayWithObjects:count:", .{ &curves, @as(usize, 4) })});
+        msg(void, a, "setDuration:", .{@as(f64, 1)});
+        msg(void, a, "setRepeatCount:", .{std.math.inf(f32)});
+        blink_anim = msg(Id, a, "retain", .{});
     }
-    const fn_class = objc.class("CAMediaTimingFunction");
-    const eases = [_][:0]const u8{ "linear", "easeIn", "linear", "easeOut" };
-    var curves: [4]Id = undefined;
-    for (eases, &curves) |name, *c| c.* = msg(Id, fn_class, "functionWithName:", .{objc.str(name)});
-    const a = msg(Id, objc.class("CAKeyframeAnimation"), "animationWithKeyPath:", .{objc.str("opacity")});
-    msg(void, a, "setValues:", .{msg(Id, arr, "arrayWithObjects:count:", .{ &values, @as(usize, 5) })});
-    msg(void, a, "setKeyTimes:", .{msg(Id, arr, "arrayWithObjects:count:", .{ &stops, @as(usize, 5) })});
-    msg(void, a, "setTimingFunctions:", .{msg(Id, arr, "arrayWithObjects:count:", .{ &curves, @as(usize, 4) })});
-    msg(void, a, "setDuration:", .{@as(f64, 1)});
-    msg(void, a, "setRepeatCount:", .{std.math.inf(f32)});
-    msg(void, caret, "addAnimation:forKey:", .{ a, objc.str("blink") });
+    msg(void, caret, "addAnimation:forKey:", .{ blink_anim, objc.str("blink") });
 }
 
 const max_flash = 64;
