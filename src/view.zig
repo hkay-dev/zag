@@ -5552,7 +5552,7 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
         }
     }
     // The ends have tabs past them while the row is scrolled.
-    tabFade(ctx, th, x0 - pad, 1, off / tab_fade);
+    tabFade(ctx, th, x0 - pad, 1, off / tab_fade * a);
     tabFade(ctx, th, x1, -1, (span - room - off) / tab_fade * a);
     objc.CGContextRestoreGState(ctx);
 
