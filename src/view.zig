@@ -3515,7 +3515,7 @@ fn refresh(d: *Doc) void {
             if (row != null and row.? != d.ed.buf.lineOf(d.ed.cur)) retitle(d) else msg(void, d.view, "performSelector:withObject:afterDelay:", .{ sel, @as(Id, null), @as(f64, 0.6) });
         }
     }
-    preview.update(d, &conf);
+    preview.update(d, &themes);
     var edited = false;
     for (docs.items) |o| if (o.win == d.win and o.dirty()) {
         edited = true;
@@ -4865,7 +4865,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     if (d.dark != dark) {
         d.dark = dark;
         msg(void, d.caret, "setBackgroundColor:", .{msg(Id, nscolor(th.caret), "CGColor", .{})});
-        preview.update(d, &conf);
+        preview.update(d, &themes);
     }
     const r = bounds(d);
     const focused = d.win.focus == d;
@@ -6607,6 +6607,7 @@ fn contrastChanged(_: Id, _: Sel, _: Id) callconv(.c) void {
     contrast = msg(bool, msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{}), "accessibilityDisplayShouldIncreaseContrast", .{});
     buildThemes();
     for (wins.items) |w| msg(void, w.view, "setNeedsDisplay:", .{true});
+    for (docs.items) |d| preview.update(d, &themes);
 }
 
 extern const NSPasteboardTypeFileURL: Id;
@@ -7056,7 +7057,7 @@ fn previousCard(d: *Doc) void {
 }
 
 fn markdownPreview(d: *Doc) void {
-    preview.toggle(d.window, d.path orelse "", d.ed.text(), if (isDark(d.view)) &conf.dark else &conf.light);
+    preview.toggle(d.window, d.path orelse "", d.ed.text(), &themes[@intFromBool(isDark(d.view))]);
 }
 
 fn comment(d: *Doc) void {

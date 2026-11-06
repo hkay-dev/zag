@@ -75,7 +75,8 @@ points at the matching command in its menu. Press Return to run it.
 
 **View > Markdown Preview** (⇧⌘M), also in ⌘K, opens a read-only preview in a separate
 window, titled with the file's name and "Preview", with the file's icon in the title bar. The
-window has the same page color as the editor, and the text sits in a centered column no wider
+window has the same page color as the editor, grey in Zen and stronger with the Mac's Increase
+Contrast setting, and the text sits in a centered column no wider
 than 680 points. Run it again to close it. Keep typing in the editor: the preview updates after a
 short pause without jumping back to the top. It stays with the file it was opened for when you
 switch tabs or cards, and closes with its window. Other text files can be previewed too, using

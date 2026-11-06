@@ -69,11 +69,12 @@ fn resized(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     const w = msg(objc.Rect, text, "frame", .{}).w;
     msg(void, text, "setTextContainerInset:", .{objc.Point{ .x = @max(28, @floor((w - column) / 2)), .y = 24 }});
 }
-pub fn update(d: anytype, conf: *const settings.Settings) void {
+/// `themes` are the ones the editor draws with (light, dark): zen's grey and Increase Contrast included.
+pub fn update(d: anytype, themes: *const [2]settings.Theme) void {
     if (owner != d.window) return;
     const active = std.mem.eql(u8, objc.utf8(path), d.path orelse "");
     const appearance = objc.utf8(msg(Id, msg(Id, d.view, "effectiveAppearance", .{}), "name", .{}));
-    const th = if (std.mem.indexOf(u8, appearance, "Dark") != null) &conf.dark else &conf.light;
+    const th = &themes[@intFromBool(std.mem.indexOf(u8, appearance, "Dark") != null)];
     const same_theme = std.meta.eql(theme, th.*);
     // A caret move or scroll changes nothing: `changes` counts every edit, undo and redo.
     if (same_theme and (!active or (seen_id == d.id and seen_changes == d.ed.buf.changes))) return;
