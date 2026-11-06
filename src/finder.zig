@@ -9,17 +9,21 @@ pub const max_files = 100_000;
 const skip = [_][]const u8{ "node_modules", "zig-out", "target", "build", "dist", "DerivedData", "Pods", "__pycache__", "vendor" };
 
 pub const Files = struct {
+    gpa: Allocator,
+    /// The path strings live in the arena; the list of them grows on `gpa`,
+    /// so an outgrown buffer is freed instead of left behind in the arena.
     arena: std.heap.ArenaAllocator,
     paths: std.ArrayList([]const u8) = .empty,
 
     pub fn deinit(f: *Files) void {
+        f.paths.deinit(f.gpa);
         f.arena.deinit();
     }
 };
 
 /// Lists files under `root`, relative to it.
 pub fn scan(gpa: Allocator, root: []const u8) !Files {
-    var f: Files = .{ .arena = .init(gpa) };
+    var f: Files = .{ .gpa = gpa, .arena = .init(gpa) };
     errdefer f.deinit();
     var path: std.ArrayList(u8) = .empty;
     defer path.deinit(gpa);
@@ -43,7 +47,7 @@ fn walk(f: *Files, gpa: Allocator, path: *std.ArrayList(u8), rel: usize) !void {
         try path.appendSlice(gpa, name);
         switch (ent.type) {
             c.DT.DIR => if (!isSkipped(name)) try walk(f, gpa, path, rel),
-            c.DT.REG, c.DT.LNK => try f.paths.append(f.arena.allocator(), try f.arena.allocator().dupe(u8, path.items[rel..])),
+            c.DT.REG, c.DT.LNK => try f.paths.append(gpa, try f.arena.allocator().dupe(u8, path.items[rel..])),
             else => {},
         }
     }
@@ -57,6 +61,11 @@ fn isSkipped(name: []const u8) bool {
 /// Scores `path` against `q`: null when `q` isn't a subsequence of it.
 /// Rewards runs, starts of words, and matches in the file name.
 pub fn score(path: []const u8, q: []const u8) ?i32 {
+    return scoreWith(path, q, q);
+}
+
+/// `score` with `lower`, the query already lowercased, to match against.
+fn scoreWith(path: []const u8, q: []const u8, lower: []const u8) ?i32 {
     if (q.len == 0) return 0;
     const base = if (std.mem.lastIndexOfScalar(u8, path, '/')) |i| i + 1 else 0;
     var s: i32 = 0;
@@ -64,7 +73,7 @@ pub fn score(path: []const u8, q: []const u8) ?i32 {
     var prev: ?usize = null;
     for (path, 0..) |ch, i| {
         if (qi == q.len) break;
-        if (std.ascii.toLower(ch) != std.ascii.toLower(q[qi])) continue;
+        if (std.ascii.toLower(ch) != lower[qi]) continue;
         s += 1;
         if (prev != null and prev.? + 1 == i) s += 6;
         if (i == 0 or std.mem.indexOfScalar(u8, "/_-. ", path[i - 1]) != null) s += 8;
@@ -80,8 +89,11 @@ pub fn score(path: []const u8, q: []const u8) ?i32 {
 pub fn best(paths: []const []const u8, q: []const u8, out: []usize) usize {
     var scores: [32]i32 = undefined;
     var n: usize = 0;
+    // The query is lowercased once here, not for every character of every path.
+    var low: [256]u8 = undefined;
+    const lower = if (q.len <= low.len) std.ascii.lowerString(&low, q) else q;
     for (paths, 0..) |p, i| {
-        const s = score(p, q) orelse continue;
+        const s = (if (q.len <= low.len) scoreWith(p, q, lower) else score(p, q)) orelse continue;
         var at = n;
         while (at > 0 and scores[at - 1] < s) at -= 1;
         if (at >= out.len) continue;

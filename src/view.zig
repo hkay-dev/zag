@@ -30,6 +30,9 @@ var tree: tree_mod.Tree = .init(gpa);
 pub fn setRoot(dir: []const u8) void {
     if (root) |r| gpa.free(r);
     root = dir;
+    // The quick-open list was read from the old folder.
+    if (quick) |*q| q.deinit();
+    quick = null;
     // The header's folder is written relative to the open folder.
     for (docs.items) |d| dropHead(d);
     for (tree.open.items) |o| gpa.free(o);
@@ -54,6 +57,9 @@ var tree_gen: u32 = 0;
 /// `tree_stale` when the folders need reading again.
 var restoring = false;
 var tree_stale = false;
+
+/// Quick open's file list, one for every card: each open reads it again.
+var quick: ?finder.Files = null;
 
 /// `p` relative to the folder, when it's inside it.
 fn relOf(p: []const u8) ?[]const u8 {
@@ -1245,7 +1251,6 @@ const Doc = struct {
     flash_n: usize = 0,
     flash_t0: f64 = 0,
     found: [2]usize = .{ 0, 0 },
-    list: ?finder.Files = null,
     picks: [10]usize = undefined,
     npicks: usize = 0,
     pick: usize = 0,
@@ -1320,7 +1325,6 @@ const Doc = struct {
         d.ed.deinit(gpa);
         if (d.path) |p| gpa.free(p);
         dropDraft(&d.draft);
-        if (d.list) |*l| l.deinit();
         d.prompt.deinit(gpa);
         d.with.deinit(gpa);
         d.held.deinit(gpa);
@@ -2262,6 +2266,21 @@ pub fn count() usize {
 /// A new window with one card holding an empty untitled file.
 pub fn newDoc() ?*Doc {
     const leaf = gpa.create(Node) catch return null;
+    const w = newWin(leaf) orelse return null;
+    const d = newPane(w) orelse return null;
+    leaf.* = .{ .pane = d };
+    w.focus = d;
+    d.size = .{ .x = 880, .y = 720 };
+    d.fin = d.size;
+    finishWin(w);
+    named(d);
+    showWin(w.window);
+    return d;
+}
+
+/// A window with the layout `leaf` and no card yet. The caller sets the
+/// layout and the focused card, then `finishWin`s it.
+fn newWin(leaf: *Node) ?*Win {
     const w = gpa.create(Win) catch return null;
     wins.append(gpa, w) catch return null;
 
@@ -2281,11 +2300,6 @@ pub fn newDoc() ?*Doc {
     w.link = msg(Id, view, "displayLinkWithTarget:selector:", .{ view, objc.sel_registerName("tick:") });
     msg(void, w.link, "addToRunLoop:forMode:", .{ msg(Id, objc.class("NSRunLoop"), "mainRunLoop", .{}), NSRunLoopCommonModes });
     msg(void, w.link, "setPaused:", .{true});
-    const d = newPane(w) orelse return null;
-    leaf.* = .{ .pane = d };
-    w.focus = d;
-    d.size = .{ .x = frame.w, .y = frame.h };
-    d.fin = d.size;
     msg(void, win, "setTitlebarAppearsTransparent:", .{true});
     msg(void, win, "setTitleVisibility:", .{@as(isize, 1)});
     // An empty toolbar, so AppKit itself centers the traffic lights on the
@@ -2310,6 +2324,14 @@ pub fn newDoc() ?*Doc {
     msg(void, win, "setBackgroundColor:", .{msg(Id, objc.class("NSColor"), "clearColor", .{})});
     setLights(w, if (conf.zen) 0 else 1);
     msg(void, view, "release", .{});
+    return w;
+}
+
+/// Hands `w` its events and puts it where a new window goes, once it has
+/// its cards.
+fn finishWin(w: *Win) void {
+    const win = w.window;
+    const view = w.view;
     msg(void, win, "setDelegate:", .{view});
     msg(void, win, "makeFirstResponder:", .{view});
     if (wins.items.len == 1) {
@@ -2320,9 +2342,6 @@ pub fn newDoc() ?*Doc {
         msg(void, win, "setFrame:display:", .{ fr, false });
         msg(void, win, "setFrameTopLeftPoint:", .{Point{ .x = fr.x + 24, .y = fr.y + fr.h - 24 }});
     }
-    named(d);
-    showWin(win);
-    return d;
 }
 
 /// A card for window `w` with an empty untitled file and its own caret.
@@ -2524,10 +2543,13 @@ fn loadPlaces() void {
 
 /// Remembers where the caret and scroll were in `d`'s file, newest first.
 fn rememberPlace(d: *const Doc) void {
-    const p = d.path orelse return;
+    rememberAt(d.path orelse return, d.ed.cur, d.sy);
+}
+
+fn rememberAt(p: []const u8, cur: usize, sy: f64) void {
     loadPlaces();
     var buf: [64]u8 = undefined;
-    const head = std.fmt.bufPrint(&buf, "{d}\t{d}\t", .{ d.ed.cur, @as(i64, @intFromFloat(d.sy)) }) catch return;
+    const head = std.fmt.bufPrint(&buf, "{d}\t{d}\t", .{ cur, @as(i64, @intFromFloat(sy)) }) catch return;
     const entry = std.mem.concat(gpa, u8, &.{ head, p }) catch return;
     var i: usize = 0;
     while (i < places.items.len) {
@@ -2649,17 +2671,25 @@ pub fn restoreSession() bool {
 
 /// A window from one session line, or none when none of its files are left.
 fn restoreWindow(frame: []const u8, it: *std.mem.SplitIterator(u8, .scalar)) void {
-    const blank = newDoc() orelse return;
-    const w = blank.win;
+    const leaf = gpa.create(Node) catch return;
+    const w = newWin(leaf) orelse return;
     var lit: ?*Doc = null;
-    const n = restoreNode(w, it, &lit) orelse return msg(void, w.window, "close", .{});
-    // The restored cards take the place of the blank one the window came with.
-    closePane(blank);
-    freeNodes(w.cards);
+    const n = restoreNode(w, it, &lit) orelse {
+        // Nothing of the line is left: the window closes, holding a card for its layout.
+        const d = newPane(w) orelse return;
+        leaf.* = .{ .pane = d };
+        w.focus = d;
+        finishWin(w);
+        showWin(w.window);
+        return msg(void, w.window, "close", .{});
+    };
+    gpa.destroy(leaf);
     w.cards = n;
     w.focus = lit orelse firstPane(n);
+    finishWin(w);
     named(w.focus);
     msg(void, w.window, "setFrameFromString:", .{objc.str(frame)});
+    showWin(w.window);
 }
 
 /// The cards that `it` describes next, leaving out files that are gone and
@@ -2685,7 +2715,8 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
         for (&head) |*v| v.* = std.fmt.parseInt(usize, nums.next() orelse "0", 10) catch 0;
     }
     const d = newPane(w) orelse return null;
-    var on: ?usize = null;
+    // The tabs wait as parked pages; only the lit one is installed, once.
+    var on: usize = 0;
     for (0..head[0]) |i| {
         const p = (if (i == 0) first else null) orelse it.next() orelse break;
         const draft = p.len > 0 and p[0] == '*';
@@ -2693,21 +2724,37 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
         defer gpa.free(z);
         if (!files.exists(z)) continue;
         var pg = (if (draft) loadDraft(z) else loadPage(z)) orelse continue;
-        if (!park(d, true)) {
+        // A parked page isn't rising in.
+        pg.fresh = false;
+        d.pages.append(gpa, pg) catch {
             // A draft that can't open stays on disk for `adoptDrafts`.
             if (pg.draft) |s| gpa.free(s);
             pg.draft = null;
             pg.deinit();
             continue;
-        }
-        install(d, pg);
-        if (i == head[1] or on == null) on = d.at;
+        };
+        if (i == head[1] or d.pages.items.len == 1) on = d.pages.items.len - 1;
+        // The folders its file is in open in the sidebar.
+        if (pg.path) |pp| if (relOf(pp)) |rel| {
+            if (tree.reveal(gpa, rel) or (!tree_stale and !tree.has(rel))) tree_stale = true;
+        };
     }
-    if (on == null) {
+    const tabs = d.pages.items.len;
+    if (tabs == 0) {
         closePane(d);
         return null;
     }
-    showTab(d, on.?);
+    // Opening the tabs one by one remembered each place but the lit last tab's.
+    for (d.pages.items, 0..) |pg, k| {
+        if (k == tabs - 1 and on == tabs - 1) break;
+        if (pg.path) |pp| rememberAt(pp, pg.ed.cur, pg.sy);
+    }
+    d.ed.deinit(gpa);
+    dropDraft(&d.draft);
+    var pg = d.pages.orderedRemove(on);
+    pg.fresh = on == tabs - 1;
+    d.at = on;
+    install(d, pg);
     if (head[2] == 1) lit.* = d;
     const n = gpa.create(Node) catch {
         closePane(d);
@@ -3142,8 +3189,8 @@ fn startPrompt(d: *Doc, m: Mode) void {
             countFound(d);
         },
         .open => {
-            if (d.list) |*l| l.deinit();
-            d.list = null;
+            if (quick) |*l| l.deinit();
+            quick = null;
             // Without a folder, quick open lists the folder of the file on screen.
             const r = root orelse blk: {
                 const p = d.path orelse {
@@ -3154,7 +3201,9 @@ fn startPrompt(d: *Doc, m: Mode) void {
                 setRoot(gpa.dupe(u8, std.fs.path.dirname(p) orelse "/") catch return);
                 break :blk root.?;
             };
-            d.list = finder.scan(gpa, r) catch null;
+            quick = finder.scan(gpa, r) catch null;
+            // Another card showing quick open picks from the new list.
+            for (docs.items) |o| if (o != d and o.mode == .open) pickFiles(o);
             d.palette = false;
             pickFiles(d);
         },
@@ -3176,7 +3225,7 @@ fn startPrompt(d: *Doc, m: Mode) void {
 /// The names quick open or the palette picks from, while it's open.
 fn listing(d: *const Doc) ?[]const []const u8 {
     return switch (d.mode) {
-        .open => if (d.list) |l| l.paths.items else null,
+        .open => if (quick) |l| l.paths.items else null,
         .command => cmd_names.items,
         else => null,
     };
@@ -3335,7 +3384,9 @@ fn accept(d: *Doc) void {
         .open => {
             if (d.npicks == 0) return;
             d.mode = .edit;
-            const rel = d.list.?.paths.items[d.picks[d.pick]];
+            const paths = (quick orelse return).paths.items;
+            if (d.picks[d.pick] >= paths.len) return;
+            const rel = paths[d.picks[d.pick]];
             var buf: [std.c.PATH_MAX]u8 = undefined;
             const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ root.?, rel }) catch return;
             open(path, d);
@@ -4316,7 +4367,7 @@ fn panelRow(ctx: Id, d: *const Doc, th: *const Theme, p: usize, left: f64, right
         } else _ = rowText(ctx, name, panel_font, ink, x, y, room);
         return;
     }
-    const paths = d.list.?.paths.items;
+    const paths = (quick orelse return).paths.items;
     if (p >= paths.len) return;
     const path = paths[p];
     const slash = if (std.mem.lastIndexOfScalar(u8, path, '/')) |j| j + 1 else 0;
@@ -5621,7 +5672,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         d.pick_live = false;
         d.pick_s.snap(d.pick_s.to);
     }
-    if (ph > 0.5 and (d.palette or d.list != null)) {
+    if (ph > 0.5 and (d.palette or quick != null)) {
         const px = card.x + 6;
         const pw = card.w - 12;
         // Nothing of the page shows beside or just above the inset panel.
@@ -5719,7 +5770,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         if (now >= d.pbar_t0 + words_lag) d.prompt_t.aim(1, now);
         var tally: []const u8 = "";
         if (finding) tally = if (d.found[1] == 0) "no matches" else std.fmt.bufPrint(&buf, "{d} of {d}", .{ @min(d.found[0], d.found[1]), d.found[1] }) catch "";
-        if (d.mode == .open and d.list != null) tally = std.fmt.bufPrint(&buf, "{d} files", .{d.list.?.paths.items.len}) catch "";
+        if (d.mode == .open and quick != null) tally = std.fmt.bufPrint(&buf, "{d} files", .{quick.?.paths.items.len}) catch "";
         if (d.mode == .command) tally = std.fmt.bufPrint(&buf, "{d} commands", .{cmds.items.len}) catch "";
         d.held_n = @min(tally.len, d.held_tally.len);
         @memcpy(d.held_tally[0..d.held_n], tally[0..d.held_n]);
