@@ -1109,6 +1109,8 @@ const Doc = struct {
     rows_t0: f64 = 0,
     prev_picks: [10]usize = undefined,
     prev_n: usize = 0,
+    /// Whether those last picks were none, so "No matches" was on show.
+    prev_none: bool = false,
     pick_t0: f64 = -1,
     /// The prompt line's words, rising in as it opens.
     prompt_t: Tween = .{ .dur = panel_time },
@@ -2928,6 +2930,8 @@ fn startPrompt(d: *Doc, m: Mode) void {
     d.mode = m;
     d.prompt.clearRetainingCapacity();
     d.fresh = false;
+    d.fresh_shown = false;
+    d.fresh_w = 0;
     d.note = "";
     const was_palette = d.palette;
     switch (m) {
@@ -2966,7 +2970,10 @@ fn startPrompt(d: *Doc, m: Mode) void {
         else => {},
     }
     // The old picks index the other list, so the new one fades in fresh.
-    if (d.palette != was_palette) d.prev_n = 0;
+    if (d.palette != was_palette) {
+        d.prev_n = 0;
+        d.prev_none = false;
+    }
     refresh(d);
 }
 
@@ -2984,6 +2991,7 @@ fn pickFiles(d: *Doc) void {
     // Rows that change under the typing crossfade from the last picks.
     d.prev_picks = d.picks;
     d.prev_n = if (d.pick_live) d.npicks else 0;
+    d.prev_none = d.pick_live and d.npicks == 0;
     d.pick_t0 = CACurrentMediaTime();
     d.npicks = finder.best(names, d.prompt.items, &d.picks);
     d.pick = 0;
@@ -5138,8 +5146,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         }
         // No match leaves one dim row, so the panel keeps a row's height. It
         // fades in as the rows it replaces fade out, and out as rows return.
-        if (d.npicks == 0 or (crossing and d.prev_n == 0)) {
-            const lone: f64 = if (d.npicks > 0) 1 - swap else if (crossing and d.prev_n > 0) swap else 1;
+        if (d.npicks == 0 or (crossing and d.prev_none)) {
+            const lone: f64 = if (d.npicks > 0) 1 - swap else if (crossing and !d.prev_none) swap else 1;
             const t = std.math.clamp((now - d.rows_t0) / row_fade, 0, 1);
             const a = t * t * (3 - 2 * t);
             panelNone(ctx, th, px + 14, by - ph + ppad, a * lone, (1 - a) * 2);
