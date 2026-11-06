@@ -4078,7 +4078,7 @@ fn stuckRows(sy: f64, out: *[max_stuck]usize) usize {
         if (t >= rows.len) break;
         var m: usize = 0;
         // Only once it has moved past its slot: sitting exactly on it, the row draws itself.
-        const past = sy > @as(f64, @floatFromInt(t - n)) * side_h;
+        const past = rows[t].depth >= n and sy > @as(f64, @floatFromInt(t - n)) * side_h;
         if (past and t + 1 < rows.len and rows[t + 1].depth > rows[t].depth and rows[t].depth < max_stuck) {
             out[rows[t].depth] = t;
             m += 1;
@@ -4471,7 +4471,11 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
         w.stuck_y[j] = y;
         objc.CGContextClearRect(ctx, .{ .y = y, .w = side_w, .h = side_h });
         fillA(ctx, bg, chromeAlpha(dark), 0, y, side_w, side_h);
-        drawRow(w, ctx, th, k, dark, a, y, null);
+        var turn: ?f64 = null;
+        for (vs[0..vn]) |v| if (v.at == a) {
+            turn = v.p;
+        };
+        drawRow(w, ctx, th, k, dark, a, y, turn);
         low = @max(low, y + side_h);
     }
     k.flush();
