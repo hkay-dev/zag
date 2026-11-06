@@ -28,7 +28,7 @@ pub const Rect = extern struct { x: f64 = 0, y: f64 = 0, w: f64 = 0, h: f64 = 0 
 const Range = extern struct { loc: isize, len: isize };
 const Transform = extern struct { a: f64, b: f64, c: f64, d: f64, tx: f64, ty: f64 };
 
-pub extern fn objc_getClass(name: [*:0]const u8) Id;
+extern fn objc_getClass(name: [*:0]const u8) Id;
 pub extern fn sel_registerName(name: [*:0]const u8) Sel;
 pub extern fn sel_getName(sel: Sel) [*:0]const u8;
 extern fn objc_allocateClassPair(super: Id, name: [*:0]const u8, extra: usize) Id;

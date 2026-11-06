@@ -153,12 +153,10 @@ var side_w: f64 = settings.sidebar_default;
 /// While the sidebar's edge is dragged past a limit it stretches, `side_stretch`
 /// pixels beyond `side_rest`, the width it stretches from; letting go springs
 /// it back. Dragging it in past `side_collapse` shuts the sidebar.
+/// It uses the split gap's stretch and pull, with its own spring.
 var side_stretch: Spring = .{ .k = 380, .c = 33, .eps = 0.05 };
 var side_rest: f64 = settings.sidebar_default;
 const side_collapse = 100.0;
-/// The most it stretches, and how much of the mouse's travel it follows.
-const side_stretch_max = 24.0;
-const side_stretch_pull = 0.3;
 /// How far either side of the sidebar's edge grabs it.
 const edge_grab = 4.0;
 /// The sidebar's selection sits this far in from its edges, with rounded corners.
@@ -2112,10 +2110,7 @@ fn closePane(d: *Doc) void {
     rememberPlace(&d.file);
     msg(void, d.caret, "removeFromSuperlayer", .{});
     access.drop(d);
-    for (docs.items, 0..) |x, i| if (x == d) {
-        _ = docs.orderedRemove(i);
-        break;
-    };
+    if (std.mem.indexOfScalar(*Doc, docs.items, d)) |i| _ = docs.orderedRemove(i);
     d.deinit();
     gpa.destroy(d);
 }
@@ -3147,7 +3142,7 @@ pub fn toggleSidebar() void {
 }
 
 /// What the menu's validation says: Late-Night greys the items it has set.
-pub fn allowed(it: Id) bool {
+pub fn allowed(_: Id, _: Sel, it: Id) callconv(.c) bool {
     if (!conf.late_night) return true;
     const name = std.mem.span(objc.sel_getName(msg(Sel, it, "action", .{})));
     for ([_][]const u8{ "toggleTypewriter:", "toggleZen:", "pickFocus:", "pickScheme:", "pickAppearance:" }) |n| if (std.mem.eql(u8, name, n)) return false;
@@ -5851,9 +5846,7 @@ fn drawHeader(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, 
         const mono_y = @round(hy - lh / 2 + baseline);
         const right = card.x + card.w - 10;
         objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = @max(right - card.x, 0), .h = head_h });
-        // The traffic lights and the sidebar button sit on a card at the window's top left.
-        const lights_end: f64 = if (root != null) toggle_x + 22 else tabs_from;
-        drawTabs(d, ctx, th, k, dark, ka, @max(card.x + 14, if (d.org.y < 1) lights_end - d.org.x else 0), right, mono_y, now);
+        drawTabs(d, ctx, th, k, dark, ka, tabsX(card.x + d.org.x, d.org.y < 1) - d.org.x, right, mono_y, now);
         k.flush();
         if (zt > 0.001) objc.CGContextEndTransparencyLayer(ctx);
     }
@@ -6276,6 +6269,14 @@ fn titleTab(d: *const Doc, p: Point) ?TabHit {
 
 // ---- dragging tabs ----
 
+fn tabsLeftOf(d: *const Doc, x: f64, skip: u32) usize {
+    var k: usize = 0;
+    for (d.slots.items) |o| if (!o.gone and o.id != skip and o.x + o.w / 2 < x) {
+        k += 1;
+    };
+    return k;
+}
+
 /// Follows a tab drag to `p` in the view. Along its own row the tab
 /// trades places with the tabs it passes; anywhere else, and for a file
 /// from the sidebar, it shows where it would drop.
@@ -6307,10 +6308,7 @@ fn dragTab(w: *Win, p: Point) void {
             // It trades places with a tab once its middle passes that tab's.
             const s = d.slots.items[slotOf(d, t.id).?];
             const mid = lp.x - t.grab + s.w / 2;
-            var k: usize = 0;
-            for (d.slots.items) |o| if (!o.gone and o.id != t.id and o.x + o.w / 2 < mid) {
-                k += 1;
-            };
+            const k = tabsLeftOf(d, mid, t.id);
             if (k != j) haptic(.alignment);
             reorderTab(d, j, k);
         };
@@ -6346,11 +6344,7 @@ fn dropAt(w: *Win, t: *const TabDrag, p: Point) ?Drop {
     const lp = inPane(c, p);
     if (lp.y < top_h) {
         if (own) return null;
-        var k: usize = 0;
-        for (c.slots.items) |o| if (!o.gone and o.x + o.w / 2 < lp.x) {
-            k += 1;
-        };
-        return .{ .card = c, .zone = .tabs, .k = k };
+        return .{ .card = c, .zone = .tabs, .k = tabsLeftOf(c, lp.x, 0) };
     }
     const u = (lp.x - gap) / @max(c.size.x - 2 * gap, 1);
     const v = (lp.y - gap) / @max(c.size.y - 2 * gap, 1);
@@ -6394,14 +6388,22 @@ fn dropRect(dr: Drop, gw: f64) Rect {
     };
 }
 
+/// Where a card's tabs start in the view, past the traffic lights at the top.
+fn tabsX(x: f64, top: bool) f64 {
+    const lights_end: f64 = if (root != null) toggle_x + 22 else tabs_from;
+    return if (top) @max(x + 14, lights_end) else x + 14;
+}
+
 /// Where the dragged copy's tab pill lands when `dr` splits off a new card:
 /// the title spot of the half the card will take, in the view.
 fn titleSpot(dr: Drop) Point {
     const r = dropRect(dr, 0);
-    // A card at the window's top left clears the traffic lights.
-    const lights_end: f64 = if (root != null) toggle_x + 22 else tabs_from;
-    const x = if (r.y < gap + 1) @max(r.x + 14, lights_end) else r.x + 14;
+    const x = tabsX(r.x, r.y < gap + 1);
     return .{ .x = x, .y = r.y + head_h / 2 - 11 };
+}
+
+fn dragHeld(w: *const Win) bool {
+    return if (w.tdrag) |t| t.live and t.out else false;
 }
 
 /// Springs the drop preview to where the drag would land, opens a gap in
@@ -6412,7 +6414,7 @@ fn aimPreview(w: *Win, now: f64) void {
     const t = if (w.tdrag) |*p| p else null;
     const dr: ?Drop = if (t) |x| x.drop else null;
     const gw = if (t) |x| x.w else 0;
-    w.ghost_a.aim(if (t != null and t.?.live and t.?.out) 1 else 0, now);
+    w.ghost_a.aim(if (dragHeld(w)) 1 else 0, now);
     if (dr) |x| {
         const r = dropRect(x, gw);
         const to = [4]f64{ r.x, r.y, r.w, r.h };
@@ -6504,8 +6506,7 @@ fn placeFile(w: *Win, path: [:0]const u8, dr: Drop) void {
 fn drawDrag(w: *Win, ctx: Id, th: *const Theme, now: f64) void {
     var r: [4]f64 = undefined;
     // Picked up, the copy lifts to 1.04; once it lets go it settles to 1.
-    const held = if (w.tdrag) |td| td.live and td.out else false;
-    w.lift.aim(if (held) 1.04 else 1, now);
+    w.lift.aim(if (dragHeld(w)) 1.04 else 1, now);
     const lift = w.lift.step(now);
     for (&w.pv, &r) |*s, *v| v.* = s.step(now);
     const pa = w.pv_a.at(now);
@@ -6527,12 +6528,12 @@ fn drawDrag(w: *Win, ctx: Id, th: *const Theme, now: f64) void {
     if (!t.live) return;
     const ga = w.ghost_a.at(now);
     if (ga < 0.01) return;
-    const at = ghostAt(t);
+    const at = ghostAt(t, t.at);
     ghost(ctx, th, t.icon, t.name, t.w, at.x, at.y, ga, lift);
 }
 
-fn ghostAt(t: TabDrag) Point {
-    return .{ .x = t.at.x - std.math.clamp(t.grab, 10, t.w - 10), .y = t.at.y - 11 };
+fn ghostAt(t: TabDrag, p: Point) Point {
+    return .{ .x = p.x - std.math.clamp(t.grab, 10, t.w - 10), .y = p.y - 11 };
 }
 
 /// A tab's copy lifted off the page, `gw` wide with its top left at `x`, `y`,
@@ -6569,7 +6570,7 @@ fn startFly(w: *Win, t: TabDrag) void {
     if (!t.live or !t.out) return;
     const line = t.name orelse return;
     const gw = t.w;
-    const at = ghostAt(t);
+    const at = ghostAt(t, t.at);
     var fl: Fly = .{ .line = objc.CFRetain(line), .icon = t.icon, .w = gw, .from = at, .to = at, .t0 = CACurrentMediaTime(), .row = t.row };
     if (t.drop) |dr| {
         if (dr.zone == .tabs) {
@@ -6585,7 +6586,7 @@ fn startFly(w: *Win, t: TabDrag) void {
             fl.card = d;
             fl.id = t.id;
         } else fl.fade = true;
-    } else fl.to = .{ .x = t.down.x - std.math.clamp(t.grab, 10, gw - 10), .y = t.down.y - 11 };
+    } else fl.to = ghostAt(t, t.down);
     w.fly = fl;
 }
 
@@ -6740,20 +6741,9 @@ fn doCommand(self: Id, _: Sel, sel: Sel) callconv(.c) void {
 /// Runs a key command. Returns whether the caret should be scrolled to.
 fn edit(d: *Doc, name: []const u8, extend: bool) !bool {
     const e = &d.file.ed;
-    if (is(name, "moveUp")) {
-        vmove(d, -1, extend);
-        return true;
-    }
-    if (is(name, "moveDown")) {
-        vmove(d, 1, extend);
-        return true;
-    }
-    if (is(name, "pageUp")) {
-        vmove(d, -@as(isize, @intCast(pageLines(d))), extend);
-        return true;
-    }
-    if (is(name, "pageDown")) {
-        vmove(d, @intCast(pageLines(d)), extend);
+    const by: ?isize = if (is(name, "moveUp")) -1 else if (is(name, "moveDown")) 1 else if (is(name, "pageUp")) -@as(isize, @intCast(pageLines(d))) else if (is(name, "pageDown")) @as(isize, @intCast(pageLines(d))) else null;
+    if (by) |b| {
+        vmove(d, b, extend);
         return true;
     }
     for (moves) |m| if (std.mem.eql(u8, m[0], name)) {
@@ -6941,9 +6931,9 @@ fn resizeSide(w: *Win, x: f64) void {
     const hi = @max(lo, @min(settings.sidebar_max, room));
     const to = @round(std.math.clamp(x, lo, hi));
     const over: f64 = if (x < lo)
-        -@min(side_stretch_max, (lo - x) * side_stretch_pull)
+        -@min(grab_stretch, (lo - x) * grab_pull)
     else if (x > hi)
-        @min(@max(0, @min(side_stretch_max, room - hi)), (x - hi) * side_stretch_pull)
+        @min(@max(0, @min(grab_stretch, room - hi)), (x - hi) * grab_pull)
     else
         0;
     const lim: i8 = if (x <= lo) -1 else if (x >= hi) 1 else 0;
@@ -6952,9 +6942,7 @@ fn resizeSide(w: *Win, x: f64) void {
         if (lim != 0) haptic(.alignment);
     }
     // At a limit the edge can only go one way.
-    const NSCursor = objc.class("NSCursor");
-    const cursor = if (lim < 0) msg(Id, NSCursor, "resizeRightCursor", .{}) else if (lim > 0) msg(Id, NSCursor, "resizeLeftCursor", .{}) else msg(Id, NSCursor, "resizeLeftRightCursor", .{});
-    msg(void, cursor, "set", .{});
+    msg(void, if (lim == 0) resizeCursor(false) else limitCursor(false, lim < 0), "set", .{});
     side_rest = to;
     side_stretch.snap(over);
     const now_w = @round(to + over);
@@ -7157,7 +7145,7 @@ fn resetCursorRects(self: Id, _: Sel) callconv(.c) void {
     };
     gapCursors(self, w.cards);
     if (sideShown(w)) {
-        msg(void, self, "addCursorRect:cursor:", .{ Rect{ .x = side_w - edge_grab, .y = top_h, .w = 2 * edge_grab, .h = r.h - top_h }, msg(Id, objc.class("NSCursor"), "resizeLeftRightCursor", .{}) });
+        msg(void, self, "addCursorRect:cursor:", .{ Rect{ .x = side_w - edge_grab, .y = top_h, .w = 2 * edge_grab, .h = r.h - top_h }, resizeCursor(false) });
     }
     // The two buttons by the traffic lights get their menu items' names;
     // `toolTip` answers nil where zen hides them.
@@ -7409,7 +7397,7 @@ fn tabMenu(self: Id, w: *Win, d: *Doc, lp: Point) Id {
 fn menuTab() ?struct { d: *Doc, j: usize } {
     const w = menu_win orelse return null;
     const d = w.menu_card orelse return null;
-    if (std.mem.indexOfScalar(*Doc, docs.items, d) == null or d.closing) return null;
+    if (!ax.alive(d)) return null;
     return .{ .d = d, .j = tabIndex(d, w.menu_tab) orelse return null };
 }
 
@@ -7447,9 +7435,14 @@ fn closeAround(d: *Doc, at: usize, left: bool) void {
     showTab(d, tabIndex(d, id) orelse return);
 }
 
-fn openInNewTab(_: Id, _: Sel, _: Id) callconv(.c) void {
+fn openFromMenu(zone: Zone) void {
     const w = menu_win orelse return;
-    placeFile(w, menuFile(), .{ .card = w.focus, .zone = .tabs, .k = w.focus.at + 1 });
+    const c = w.focus;
+    placeFile(w, menuFile(), .{ .card = c, .zone = zone, .k = c.at + 1 });
+}
+
+fn openInNewTab(_: Id, _: Sel, _: Id) callconv(.c) void {
+    openFromMenu(.tabs);
 }
 
 /// Splits the focused card right, or down when it's too narrow, or opens a
@@ -7458,7 +7451,7 @@ fn openInNewSplit(_: Id, _: Sel, _: Id) callconv(.c) void {
     const w = menu_win orelse return;
     const c = w.focus;
     const zone: Zone = if (roomFor(c, false)) .right else if (roomFor(c, true)) .bottom else .tabs;
-    placeFile(w, menuFile(), .{ .card = c, .zone = zone, .k = c.at + 1 });
+    openFromMenu(zone);
 }
 
 fn openInNewWindow(_: Id, _: Sel, _: Id) callconv(.c) void {
@@ -7499,10 +7492,7 @@ fn windowWillClose(self: Id, _: Sel, _: Id) callconv(.c) void {
     }
     freeNodes(w.cards);
     for (&w.bold) |*b| freeSideLine(&b.line);
-    for (wins.items, 0..) |x, j| if (x == w) {
-        _ = wins.orderedRemove(j);
-        break;
-    };
+    if (std.mem.indexOfScalar(*Win, wins.items, w)) |j| _ = wins.orderedRemove(j);
     gpa.destroy(w);
 }
 
@@ -7564,17 +7554,10 @@ fn selectAll(d: *Doc) void {
     if (d.mode == .edit) d.file.ed.selectAll();
 }
 
-fn undo(d: *Doc) void {
+fn stepHistory(d: *Doc, forward: bool) void {
     d.mode = .edit;
     flashStart(d);
-    if (d.file.ed.undo(gpa) catch null) |span| flashAdd(d, span[0], span[1]);
-    reveal(d);
-}
-
-fn redo(d: *Doc) void {
-    d.mode = .edit;
-    flashStart(d);
-    if (d.file.ed.redo(gpa) catch null) |span| flashAdd(d, span[0], span[1]);
+    if ((if (forward) d.file.ed.redo(gpa) else d.file.ed.undo(gpa)) catch null) |span| flashAdd(d, span[0], span[1]);
     reveal(d);
 }
 
@@ -7602,22 +7585,10 @@ fn comment(d: *Doc) void {
     d.file.ed.toggleComment(gpa, d.file.lang.line_comment) catch {};
 }
 
-fn zoom(by: f64) void {
+fn zoom(_: *Doc, by: f64) void {
     const size = if (by == 0) settings.default_size else std.math.clamp(conf.size + by, settings.size_min, settings.size_max);
     var buf: [24]u8 = undefined;
     store("size", settings.decimal(&buf, size));
-}
-
-fn zoomIn(_: *Doc) void {
-    zoom(1);
-}
-
-fn zoomOut(_: *Doc) void {
-    zoom(-1);
-}
-
-fn zoomReset(_: *Doc) void {
-    zoom(0);
 }
 
 /// The Font panel's choice, saved to the settings file.
@@ -7693,8 +7664,8 @@ pub fn setup() void {
         .{ "cut:", cut, .{} },
         .{ "paste:", paste, .{} },
         .{ "selectAll:", selectAll, .{} },
-        .{ "undo:", undo, .{} },
-        .{ "redo:", redo, .{} },
+        .{ "undo:", stepHistory, .{false} },
+        .{ "redo:", stepHistory, .{true} },
         .{ "saveDocument:", save, .{false} },
         .{ "saveDocumentAs:", save, .{true} },
         .{ "findText:", startPrompt, .{Mode.find} },
@@ -7703,9 +7674,9 @@ pub fn setup() void {
         .{ "gotoLine:", startPrompt, .{Mode.line} },
         .{ "quickOpen:", startPrompt, .{Mode.open} },
         .{ "toggleComment:", comment, .{} },
-        .{ "zoomIn:", zoomIn, .{} },
-        .{ "zoomOut:", zoomOut, .{} },
-        .{ "zoomReset:", zoomReset, .{} },
+        .{ "zoomIn:", zoom, .{1} },
+        .{ "zoomOut:", zoom, .{-1} },
+        .{ "zoomReset:", zoom, .{0} },
         .{ "findAndReplace:", startPrompt, .{Mode.replace} },
         .{ "commandPalette:", startPrompt, .{Mode.command} },
         .{ "newTab:", newTab, .{} },

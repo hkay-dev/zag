@@ -621,8 +621,7 @@ fn outlineFrame(self: Id, _: Sel) callconv(.c) Rect {
     return screen(w.view, ax.sideRect(w));
 }
 
-fn outlineLabel(self: Id, _: Sel) callconv(.c) Id {
-    _ = self;
+fn outlineLabel(_: Id, _: Sel) callconv(.c) Id {
     return objc.str(std.fs.path.basename(view.root orelse ""));
 }
 

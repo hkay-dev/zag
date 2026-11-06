@@ -9,7 +9,7 @@ extern "c" fn copyfile(from: [*:0]const u8, to: [*:0]const u8, state: ?*anyopaqu
 const copy_acl = 1 << 0;
 const copy_xattr = 1 << 2;
 
-pub const max_size = 1 << 30;
+const max_size = 1 << 30;
 
 /// The whole file. error.FileNotFound when it doesn't exist yet.
 pub fn read(gpa: Allocator, path: [:0]const u8) ![]u8 {

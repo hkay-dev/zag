@@ -69,26 +69,21 @@ fn becameActive(_: Id, _: Sel, _: Id) callconv(.c) void {
 }
 
 /// A menu action thunk: calls `f` with `a` and drops its result.
-fn act(comptime f: anytype, comptime a: anytype) *const fn (Id, Sel, Id) callconv(.c) void {
-    return &struct {
+fn act(comptime f: anytype, comptime a: anytype) *const anyopaque {
+    return @ptrCast(&struct {
         fn thunk(_: Id, _: Sel, _: Id) callconv(.c) void {
             _ = @call(.auto, f, a);
         }
-    }.thunk;
+    }.thunk);
 }
 
 /// A menu action thunk for items that carry their index in `tag`.
-fn tagged(comptime f: fn (usize) void) *const fn (Id, Sel, Id) callconv(.c) void {
-    return &struct {
+fn tagged(comptime f: fn (usize) void) *const anyopaque {
+    return @ptrCast(&struct {
         fn thunk(_: Id, _: Sel, sender: Id) callconv(.c) void {
             f(@intCast(msg(isize, sender, "tag", .{})));
         }
-    }.thunk;
-}
-
-/// Late-Night greys the Zen, Typewriter, Focus and Theme items.
-fn validate(_: Id, _: Sel, it: Id) callconv(.c) bool {
-    return view.allowed(it);
+    }.thunk);
 }
 
 /// Fills File > Open Recent each time it opens.
@@ -250,27 +245,27 @@ pub fn main(init: std.process.Init.Minimal) void {
     d.method("applicationShouldTerminateAfterLastWindowClosed:", @ptrCast(&objc.yes), "c@:@");
     d.method("applicationShouldTerminate:", @ptrCast(&shouldTerminate), "Q@:@");
     d.method("applicationShouldHandleReopen:hasVisibleWindows:", @ptrCast(&reopen), "c@:@c");
-    d.method("newDocument:", @ptrCast(act(view.newDoc, .{})), "v@:@");
-    d.method("openDocument:", @ptrCast(act(view.openPanel, .{})), "v@:@");
+    d.method("newDocument:", act(view.newDoc, .{}), "v@:@");
+    d.method("openDocument:", act(view.openPanel, .{}), "v@:@");
     d.method("applicationDidBecomeActive:", @ptrCast(&becameActive), "v@:@");
-    d.method("applicationWillTerminate:", @ptrCast(act(view.saveSession, .{})), "v@:@");
-    d.method("openSettings:", @ptrCast(act(view.openSettings, .{})), "v@:@");
-    d.method("toggleWrap:", @ptrCast(act(view.toggleWrap, .{})), "v@:@");
-    d.method("toggleLineNumbers:", @ptrCast(act(view.toggleLineNumbers, .{})), "v@:@");
-    d.method("togglePairs:", @ptrCast(act(view.togglePairs, .{})), "v@:@");
-    d.method("toggleSidebar:", @ptrCast(act(view.toggleSidebar, .{})), "v@:@");
-    d.method("toggleTypewriter:", @ptrCast(act(view.toggleTypewriter, .{})), "v@:@");
-    d.method("toggleLateNight:", @ptrCast(act(view.toggleLateNight, .{})), "v@:@");
-    d.method("validateMenuItem:", @ptrCast(&validate), "c@:@");
-    d.method("toggleZen:", @ptrCast(act(view.toggleZen, .{})), "v@:@");
-    d.method("nextTab:", @ptrCast(act(view.stepTab, .{1})), "v@:@");
-    d.method("previousTab:", @ptrCast(act(view.stepTab, .{-1})), "v@:@");
-    d.method("pickScheme:", @ptrCast(tagged(view.pickScheme)), "v@:@");
-    d.method("pickAppearance:", @ptrCast(tagged(view.pickLook)), "v@:@");
-    d.method("pickFocus:", @ptrCast(tagged(view.pickFocus)), "v@:@");
+    d.method("applicationWillTerminate:", act(view.saveSession, .{}), "v@:@");
+    d.method("openSettings:", act(view.openSettings, .{}), "v@:@");
+    d.method("toggleWrap:", act(view.toggleWrap, .{}), "v@:@");
+    d.method("toggleLineNumbers:", act(view.toggleLineNumbers, .{}), "v@:@");
+    d.method("togglePairs:", act(view.togglePairs, .{}), "v@:@");
+    d.method("toggleSidebar:", act(view.toggleSidebar, .{}), "v@:@");
+    d.method("toggleTypewriter:", act(view.toggleTypewriter, .{}), "v@:@");
+    d.method("toggleLateNight:", act(view.toggleLateNight, .{}), "v@:@");
+    d.method("validateMenuItem:", @ptrCast(&view.allowed), "c@:@");
+    d.method("toggleZen:", act(view.toggleZen, .{}), "v@:@");
+    d.method("nextTab:", act(view.stepTab, .{1}), "v@:@");
+    d.method("previousTab:", act(view.stepTab, .{-1}), "v@:@");
+    d.method("pickScheme:", tagged(view.pickScheme), "v@:@");
+    d.method("pickAppearance:", tagged(view.pickLook), "v@:@");
+    d.method("pickFocus:", tagged(view.pickFocus), "v@:@");
     d.method("menuNeedsUpdate:", @ptrCast(&fillRecent), "v@:@");
     d.method("openRecent:", @ptrCast(&openRecent), "v@:@");
-    d.method("clearRecent:", @ptrCast(act(view.clearRecent, .{})), "v@:@");
+    d.method("clearRecent:", act(view.clearRecent, .{}), "v@:@");
     d.method("contrastChanged:", @ptrCast(&view.contrastChanged), "v@:@");
     const cls = d.finish();
     const delegate = msg(Id, msg(Id, cls, "alloc", .{}), "init", .{});

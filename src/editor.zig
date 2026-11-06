@@ -118,7 +118,7 @@ pub const Editor = struct {
             e.anchor = switch (unit) {
                 .char => e.target(.left),
                 .word => e.target(.word_left),
-                .line => if (e.cur != ls) ls else if (row > 0) e.buf.lineEnd(row - 1) else ls,
+                .line => if (e.cur != ls) ls else e.target(.left),
             };
         }
         try e.cut(gpa, unit == .char);
@@ -131,7 +131,7 @@ pub const Editor = struct {
             e.anchor = switch (unit) {
                 .char => e.target(.right),
                 .word => e.target(.word_right),
-                .line => if (e.cur != le) le else if (row + 1 < e.buf.lines()) e.buf.lineStart(row + 1) else le,
+                .line => if (e.cur != le) le else e.target(.right),
             };
         }
         try e.cut(gpa, unit == .char);
@@ -155,7 +155,8 @@ pub const Editor = struct {
         const r = e.sel();
         if (e.buf.lineOf(r[0]) == e.buf.lineOf(r[1])) {
             if (e.indent[0] == '\t') return e.insert(gpa, "\t");
-            const col = colOf(e.buf.line(e.buf.lineOf(e.cur)), 0, 0, e.cur - e.buf.lineStart(e.buf.lineOf(e.cur)));
+            const row = e.buf.lineOf(e.cur);
+            const col = colOf(e.buf.line(row), 0, 0, e.cur - e.buf.lineStart(row));
             return e.insert(gpa, "    "[0 .. tab_width - col % tab_width]);
         }
         try e.eachLine(gpa, .indent);
