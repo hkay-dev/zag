@@ -1359,11 +1359,11 @@ const Win = struct {
     sel_row: ?usize = null,
     /// The selected row's name in bold, made for row `bold_row` of tree
     /// `bold_gen`. Owned: CFRelease it.
-    bold: Id = null,
+    bold: SideLine = .{},
     bold_row: usize = 0,
     bold_gen: u32 = 0,
     /// The name the selection just left, kept while its highlight fades off it.
-    bold_old: Id = null,
+    bold_old: SideLine = .{},
     bold_old_row: usize = 0,
     bold_old_gen: u32 = 0,
     sel_was: ?usize = null,
@@ -3951,20 +3951,26 @@ fn dropIcons() void {
     };
 }
 
-/// A row's name at `room` wide: the whole line when it fits, else the cut one,
-/// made again only when the room changed.
-fn sideFit(sl: *SideLine, room: f64) Id {
+/// A row's name at `room` wide in `fnt`: the whole line when it fits, else
+/// the cut one, made again only when the room changed.
+fn sideFit(sl: *SideLine, fnt: Id, room: f64) Id {
     const l = sl.full orelse return null;
     if (objc.CTLineGetTypographicBounds(l, null, null, null) <= room) return l;
     if (sl.cut_room != room) {
         if (sl.cut) |c| objc.CFRelease(c);
         sl.cut = null;
         sl.cut_room = room;
-        const token = ellipsis(side_font);
+        const token = ellipsis(fnt);
         defer if (token) |t| objc.CFRelease(t);
         sl.cut = objc.CTLineCreateTruncatedLine(l, room, 1, token);
     }
     return sl.cut orelse l;
+}
+
+fn freeSideLine(sl: *SideLine) void {
+    if (sl.full) |p| objc.CFRelease(p);
+    if (sl.cut) |p| objc.CFRelease(p);
+    sl.* = .{};
 }
 
 /// The Mac's own icon for a file of `name`'s kind, the same one Finder
@@ -4565,28 +4571,25 @@ fn drawRow(w: *Win, ctx: Id, th: *const Theme, dark: bool, i: usize, y: f64, tur
     const room = side_w - nx - if (row.dir) @as(f64, 14) else 26;
     const sl = &side_lines.items[i];
     if (sl.full == null) sl.full = uiLine(row.rel[row.base..], side_font, 1e9);
-    const plain = sideFit(sl, room);
+    const plain = sideFit(sl, side_font, room);
     // How far the selection's highlight is on this row, for the bold name.
     const bp: f64 = if (row.dir or w.sel_row == null) 0 else (1 - std.math.clamp(@abs(w.sel.x - f(i) * side_h) / side_h, 0, 1)) * std.math.clamp(w.sel_a.at(now), 0, 1);
     var nw = drawLineA(ctx, plain, th.fg, 1 - bp, nx, y + side_base);
     if (bp > 0.001) {
         const selected = w.sel_row == i;
-        if (selected and (w.bold == null or w.bold_row != i or w.bold_gen != tree_gen)) {
+        if (selected and (w.bold.full == null or w.bold_row != i or w.bold_gen != tree_gen)) {
             // The row it leaves keeps its bold name for the length of the hop.
-            if (w.bold_old) |l| objc.CFRelease(l);
+            freeSideLine(&w.bold_old);
             w.bold_old = w.bold;
             w.bold_old_row = w.bold_row;
             w.bold_old_gen = w.bold_gen;
-            w.bold = uiLine(row.rel[row.base..], name_font, 1e9);
+            w.bold = .{ .full = uiLine(row.rel[row.base..], name_font, 1e9) };
             w.bold_row = i;
             w.bold_gen = tree_gen;
         }
-        const whole = if (w.bold != null and w.bold_row == i and w.bold_gen == tree_gen) w.bold else if (w.bold_old != null and w.bold_old_row == i and w.bold_old_gen == tree_gen) w.bold_old else null;
-        const kept = whole != null;
-        const full = whole orelse uiLine(row.rel[row.base..], name_font, 1e9);
-        defer if (!kept) if (full) |l| objc.CFRelease(l);
-        const line = cutLine(full, name_font, room);
-        defer if (line) |l| objc.CFRelease(l);
+        const kept: ?*SideLine = if (w.bold.full != null and w.bold_row == i and w.bold_gen == tree_gen) &w.bold else if (w.bold_old.full != null and w.bold_old_row == i and w.bold_old_gen == tree_gen) &w.bold_old else null;
+        const line = if (kept) |k| sideFit(k, name_font, room) else uiLine(row.rel[row.base..], name_font, room);
+        defer if (kept == null) if (line) |l| objc.CFRelease(l);
         const bw = drawLineA(ctx, line, th.fg, bp, nx, y + side_base);
         nw += (bw - nw) * bp;
     }
@@ -4826,10 +4829,8 @@ fn dropSideLines() void {
     if (side_dot) |l| objc.CFRelease(l);
     side_dot = null;
     for (wins.items) |w| {
-        if (w.bold) |l| objc.CFRelease(l);
-        if (w.bold_old) |l| objc.CFRelease(l);
-        w.bold = null;
-        w.bold_old = null;
+        freeSideLine(&w.bold);
+        freeSideLine(&w.bold_old);
     }
     if (side_head) |l| {
         objc.CFRelease(l);
@@ -4971,18 +4972,6 @@ fn uiAttrs(fnt: Id) Id {
     ui_attrs[ui_attrs_n] = .{ .font = fnt, .attrs = made };
     ui_attrs_n += 1;
     return made;
-}
-
-/// `line` (made at any width by `uiLine`) cut to `width` the way `uiLine`
-/// cuts it. Owned: CFRelease it; `line` retained when it fits.
-fn cutLine(line: Id, fnt: Id, width: f64) Id {
-    const l = line orelse return null;
-    if (objc.CTLineGetTypographicBounds(l, null, null, null) > width) {
-        const token = ellipsis(fnt);
-        defer if (token) |t| objc.CFRelease(t);
-        if (objc.CTLineCreateTruncatedLine(l, width, 1, token)) |short| return short;
-    }
-    return objc.CFRetain(l);
 }
 
 /// The ellipsis `uiLine` ends a cut line with, in `fnt`. Owned: CFRelease it.
@@ -7137,6 +7126,7 @@ extern const NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification: Id;
 fn contrastChanged(_: Id, _: Sel, _: Id) callconv(.c) void {
     contrast = msg(bool, msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{}), "accessibilityDisplayShouldIncreaseContrast", .{});
     buildThemes();
+    dropIcons();
     for (wins.items) |w| msg(void, w.view, "setNeedsDisplay:", .{true});
     for (docs.items) |d| preview.update(d, &themes);
 }
@@ -7451,8 +7441,8 @@ fn windowWillClose(self: Id, _: Sel, _: Id) callconv(.c) void {
         if (docs.items[i].win == w) closePane(docs.items[i]);
     }
     freeNodes(w.cards);
-    if (w.bold) |l| objc.CFRelease(l);
-    if (w.bold_old) |l| objc.CFRelease(l);
+    freeSideLine(&w.bold);
+    freeSideLine(&w.bold_old);
     for (wins.items, 0..) |x, j| if (x == w) {
         _ = wins.orderedRemove(j);
         break;
