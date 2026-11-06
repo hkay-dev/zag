@@ -4172,8 +4172,8 @@ const Head = struct {
 /// `room`: relative to the open folder inside it, with the home folder as
 /// ~ outside it, and a gap between folders whose middle it notes in
 /// the returned marks for a chevron. Too long a path loses its first folders
-/// to an ellipsis, keeping the ones nearest the file. Null for an untitled
-/// file or one at the top of the open folder.
+/// to an ellipsis, keeping the ones nearest the file. No line for an
+/// untitled file or one at the top of the open folder.
 fn headLine(d: *const Doc, room: f64) Head {
     var head: Head = .{ .room = room };
     const p = d.file.path orelse return head;
@@ -5648,7 +5648,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
 
     const zt = std.math.clamp(d.win.z.x, 0, 1);
     drawHeader(d, ctx, th, &k, dark, ka, card, zt, now);
-
+    // Ends the card clip that drawPane set at its top.
+    objc.CGContextRestoreGState(ctx);
     drawRing(d, ctx, th, dark, card, zt, now);
     d.busy = scenery(d, now);
     // The scroll bar's hold has no frames to draw: a one-shot timer redraws
@@ -5855,7 +5856,7 @@ fn drawHint(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, by: f64, no
     }
 }
 
-// The header, over text scrolled under it. Zen blends it into a plain margin.
+/// The header, over text scrolled under it. Zen blends it into a plain margin.
 fn drawHeader(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, card: Rect, zt: f64, now: f64) void {
     fill(ctx, th.bg, card.x, card.y, card.w, top_h - gap);
     if (zt < 0.999) {
@@ -5876,7 +5877,6 @@ fn drawHeader(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, 
         k.flush();
         if (zt > 0.001) objc.CGContextEndTransparencyLayer(ctx);
     }
-    objc.CGContextRestoreGState(ctx);
 }
 
 fn drawRing(d: *Doc, ctx: Id, th: *const Theme, dark: bool, card: Rect, zt: f64, now: f64) void {
@@ -5897,7 +5897,6 @@ fn drawRing(d: *Doc, ctx: Id, th: *const Theme, dark: bool, card: Rect, zt: f64,
         const lit = d.lit.at(now);
         if (lit > 0.01) ring(ctx, th.caret, 0.55 * lit * calm, card.x, card.y, card.w, card.h, card_radius);
     }
-
 }
 
 /// A one-shot redraw of `view` after `delay`, replacing `key`'s earlier one.
@@ -6007,7 +6006,8 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
                 s.icon = iconFor(if (tabPage(d, j).path != null) nm else "");
             }
         }
-        if (s.sized) s.wid.aim(s.name[0].w, now) else s.wid.snap(s.name[0].w);
+        const nw = @max(s.name[0].w, 0);
+        if (s.sized) s.wid.aim(nw, now) else s.wid.snap(nw);
         s.sized = true;
         _ = s.wid.step(now);
         const dirty = !s.gone and if (tabIndex(d, s.id)) |j| tabPage(d, j).edited() else false;

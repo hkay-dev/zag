@@ -76,7 +76,7 @@ an animation acts at once: a closing folder keeps sliding and the click maps thr
   with it. Only a file freshly read from disk keeps the fade and rise.
 - Empty-window shortcut hint: fades in over 0.3 s after a 0.4 s delay, out over 0.12 s when the
   card stops being blank or a prompt opens.
-- Scroll bar: 0.08 s in, 0.25 s out. The 1 s hold is a one-shot timer (`barHold:`), not display
+- Scroll bar: 0.08 s in, 0.25 s out. The 1 s hold is a one-shot timer (`holdRedraw:`), not display
   link frames, so `scenery()` doesn't wait on it. Sidebar-only motion (selection, hover, the +
   button, the list's scroll glide, folders folding in every window) redraws only the sidebar strip
   through the dirty rect, and a card the strip reaches only by its shadow draws just that shadow;
