@@ -936,11 +936,14 @@ fn redrawSide(w: *Win) void {
 /// moves the carets, and pauses once everything has settled.
 fn tick(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
+    const now = CACurrentMediaTime();
     if (w.busy) {
-        if (w.part) return redrawSide(w);
+        if (w.part) {
+            for (docs.items) |d| if (d.win == w) moveCaret(d, now);
+            return redrawSide(w);
+        }
         return msg(void, self, "setNeedsDisplay:", .{true});
     }
-    const now = CACurrentMediaTime();
     var gliding = false;
     for (docs.items) |d| if (d.win == w) {
         moveCaret(d, now);
