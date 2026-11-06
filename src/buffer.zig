@@ -22,8 +22,9 @@ pub const Buffer = struct {
     /// the whole suffix instead. Both reset when the syntax cache catches up.
     touched_end: usize = 0,
     lines_shifted: bool = true,
-    /// Runs of non-white-space bytes, maintained at the splice boundaries.
-    words: usize = 0,
+    /// Runs of non-white-space bytes, counted on first `wordCount` and then
+    /// maintained at the splice boundaries; null until something asks.
+    words: ?usize = null,
     /// Screen rows of each line for soft wrap, kept by the view; empty while
     /// wrap is off. An edit zeroes the lines it touches, and `wraps_from` is
     /// the first line zeroed since the view last caught up.
@@ -31,7 +32,7 @@ pub const Buffer = struct {
     wraps_from: usize = std.math.maxInt(usize),
 
     pub fn init(gpa: Allocator, bytes: []const u8) !Buffer {
-        var b: Buffer = .{ .words = wordStarts(bytes, 0, bytes.len) };
+        var b: Buffer = .{};
         try b.text.appendSlice(gpa, bytes);
         try b.starts.append(gpa, 0);
         for (bytes, 0..) |c, i| if (c == '\n') try b.starts.append(gpa, @intCast(i + 1));
@@ -147,9 +148,9 @@ pub const Buffer = struct {
     fn splice(b: *Buffer, gpa: Allocator, start: usize, end: usize, new: []const u8) !void {
         const first = b.lineOf(start);
         const last = b.lineOf(end);
-        const removed_words = wordStarts(b.text.items, start, @min(end + 1, b.text.items.len));
+        const removed_words = if (b.words != null) wordStarts(b.text.items, start, @min(end + 1, b.text.items.len)) else 0;
         try b.text.replaceRange(gpa, start, end - start, new);
-        b.words = b.words - removed_words + wordStarts(b.text.items, start, @min(start + new.len + 1, b.text.items.len));
+        if (b.words) |*w| w.* = w.* - removed_words + wordStarts(b.text.items, start, @min(start + new.len + 1, b.text.items.len));
         b.changes += 1;
 
         var added: std.ArrayList(u32) = .empty;
@@ -168,6 +169,11 @@ pub const Buffer = struct {
         b.touched = @min(b.touched, first);
         b.touched_end = @max(b.touched_end, first + added.items.len + 1);
         b.lines_shifted = b.lines_shifted or last - first != added.items.len;
+    }
+
+    pub fn wordCount(b: *Buffer) usize {
+        if (b.words == null) b.words = wordStarts(b.text.items, 0, b.text.items.len);
+        return b.words.?;
     }
 
     fn free(gpa: Allocator, e: Edit) void {
@@ -225,7 +231,7 @@ test "line starts stay right through random edits, undo and redo" {
         var words = std.mem.tokenizeAny(u8, b.text.items, " \t\n\r\x0b\x0c");
         var count: usize = 0;
         while (words.next() != null) count += 1;
-        try t.expectEqual(count, b.words);
+        try t.expectEqual(count, b.wordCount());
         try t.expectEqual(b.lines(), b.wraps.items.len);
     }
 }
@@ -284,15 +290,15 @@ test "joined typing and both deletion directions undo and redo whole runs" {
 test "word count tracks splitting and joining words at either boundary" {
     var b = try Buffer.init(t.allocator, "one two");
     defer b.deinit(t.allocator);
-    try t.expectEqual(@as(usize, 2), b.words);
+    try t.expectEqual(@as(usize, 2), b.wordCount());
     try b.replace(t.allocator, 3, 4, "", 3, false);
-    try t.expectEqual(@as(usize, 1), b.words);
+    try t.expectEqual(@as(?usize, 1), b.words);
     try b.replace(t.allocator, 2, 2, "\t", 2, false);
-    try t.expectEqual(@as(usize, 2), b.words);
+    try t.expectEqual(@as(?usize, 2), b.words);
     try b.replace(t.allocator, 0, b.text.items.len, "", 0, false);
-    try t.expectEqual(@as(usize, 0), b.words);
+    try t.expectEqual(@as(?usize, 0), b.words);
     _ = try b.undo(t.allocator);
-    try t.expectEqual(@as(usize, 2), b.words);
+    try t.expectEqual(@as(?usize, 2), b.words);
     _ = try b.redo(t.allocator);
-    try t.expectEqual(@as(usize, 0), b.words);
+    try t.expectEqual(@as(?usize, 0), b.words);
 }

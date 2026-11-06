@@ -294,7 +294,7 @@ fn setFont() void {
     side_h = @round((conf.size - 1) * 2.3);
     side_base = @round((side_h - objc.CTFontGetAscent(side_font) - objc.CTFontGetDescent(side_font)) / 2 + objc.CTFontGetAscent(side_font));
     name_off = (objc.CTFontGetAscent(name_font) - objc.CTFontGetDescent(name_font)) / 2;
-    for (&tab_dots) |*p| if (p.*) |l| {
+    for (&cut_dots) |*p| if (p.*) |l| {
         objc.CFRelease(l);
         p.* = null;
     };
@@ -1202,9 +1202,6 @@ const Doc = struct {
     /// What `stat` was made for (caret, anchor, changes, doc, length, room).
     stat_at: [6]u64 = @splat(std.math.maxInt(u64)),
     stat_w: f64 = 0,
-    /// The words counted for (doc, changes, length) and the count.
-    words_at: [3]u64 = @splat(std.math.maxInt(u64)),
-    words_n: usize = 0,
     /// Find has no matches, and when its words last shook for it.
     nomatch: bool = false,
     shake_t0: f64 = -1,
@@ -2453,8 +2450,9 @@ fn save(d: *Doc, as: bool) bool {
     d.note = "saved";
     noteRecent(d.path.?);
     if (conf_path != null and std.mem.eql(u8, d.path.?, conf_path.?)) loadSettings();
-    // A new file shows in the tree; every file's dot goes away.
-    if (relOf(d.path.?)) |rel| if (!tree.has(rel)) {
+    // A new file shows in the tree when its folder's rows are listed; every
+    // file's dot goes away.
+    if (relOf(d.path.?)) |rel| if (!tree.has(rel) and listed(std.fs.path.dirname(rel))) {
         rebuildTree();
         refreshAll();
         return true;
@@ -2462,6 +2460,12 @@ fn save(d: *Doc, as: bool) bool {
     refresh(d);
     for (wins.items) |w| redrawSide(w);
     return true;
+}
+
+/// Whether the rows of folder `rel` (null for the root) are on the tree's list.
+fn listed(rel: ?[]const u8) bool {
+    const r = rel orelse return true;
+    return tree.isOpen(r) and tree.has(r);
 }
 
 pub fn openPanel() void {
@@ -2685,7 +2689,6 @@ fn restoreWindow(frame: []const u8, it: *std.mem.SplitIterator(u8, .scalar)) voi
         leaf.* = .{ .pane = d };
         w.focus = d;
         finishWin(w);
-        showWin(w.window);
         return msg(void, w.window, "close", .{});
     };
     gpa.destroy(leaf);
@@ -2755,6 +2758,8 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
         return null;
     }
     // Opening the tabs one by one remembered each place but the lit last tab's.
+    // Doing it again keeps the open tabs at the front of the 100 places kept,
+    // so a tab that stays parked for many launches doesn't lose its place.
     for (d.pages.items, 0..) |pg, k| {
         if (k == tabs - 1 and on == tabs - 1) break;
         if (pg.path) |pp| rememberAt(pp, pg.ed.cur, pg.sy);
@@ -4054,18 +4059,16 @@ fn dropIcons() void {
     };
 }
 
-/// A row's name at `room` wide in `fnt`: the whole line when it fits, else
-/// the cut one, made again only when the room changed.
-fn sideFit(sl: *SideLine, fnt: Id, room: f64) Id {
+/// A row's name at `room` wide: the whole line when it fits, else the cut one
+/// (ending in `dotsFor(k)`), made again only when the room changed.
+fn sideFit(sl: *SideLine, k: usize, room: f64) Id {
     const l = sl.full orelse return null;
-    if (objc.CTLineGetTypographicBounds(l, null, null, null) <= room) return l;
+    if (sl.w < 0) sl.w = objc.CTLineGetTypographicBounds(l, null, null, null);
+    if (sl.w <= room) return l;
     if (sl.cut_room != room) {
         if (sl.cut) |c| objc.CFRelease(c);
-        sl.cut = null;
         sl.cut_room = room;
-        const token = ellipsis(fnt);
-        defer if (token) |t| objc.CFRelease(t);
-        sl.cut = objc.CTLineCreateTruncatedLine(l, room, 1, token);
+        sl.cut = objc.CTLineCreateTruncatedLine(l, room, 1, dotsFor(k));
     }
     return sl.cut orelse l;
 }
@@ -4676,7 +4679,7 @@ fn drawRow(w: *Win, ctx: Id, th: *const Theme, dark: bool, i: usize, y: f64, tur
     const room = side_w - nx - if (row.dir) @as(f64, 14) else 26;
     const sl = &side_lines.items[i];
     if (sl.full == null) sl.full = uiLine(row.rel[row.base..], side_font, 1e9);
-    const plain = sideFit(sl, side_font, room);
+    const plain = sideFit(sl, 2, room);
     // How far the selection's highlight is on this row, for the bold name.
     const bp: f64 = if (row.dir or w.sel_row == null) 0 else (1 - std.math.clamp(@abs(w.sel.x - f(i) * side_h) / side_h, 0, 1)) * std.math.clamp(w.sel_a.at(now), 0, 1);
     var nw = drawLineA(ctx, plain, th.fg, 1 - bp, nx, y + side_base);
@@ -4693,7 +4696,7 @@ fn drawRow(w: *Win, ctx: Id, th: *const Theme, dark: bool, i: usize, y: f64, tur
             w.bold_gen = tree_gen;
         }
         const kept: ?*SideLine = if (w.bold.full != null and w.bold_row == i and w.bold_gen == tree_gen) &w.bold else if (w.bold_old.full != null and w.bold_old_row == i and w.bold_old_gen == tree_gen) &w.bold_old else null;
-        const line = if (kept) |k| sideFit(k, name_font, room) else uiLine(row.rel[row.base..], name_font, room);
+        const line = if (kept) |k| sideFit(k, 3, room) else uiLine(row.rel[row.base..], name_font, room);
         defer if (kept == null) if (line) |l| objc.CFRelease(l);
         const bw = drawLineA(ctx, line, th.fg, bp, nx, y + side_base);
         nw += (bw - nw) * bp;
@@ -4921,9 +4924,10 @@ fn fadeList(ctx: Id, bg: Rgb, a: f64, end: f64, h: f64) void {
 /// draw: the folder's name, then one per tree row. Dropped when the tree or
 /// the font changes; drawing one costs no layout.
 var side_head: Id = null;
-/// A row's whole name, made once, and the name cut to the room it last had
-/// when it's wider than that: a width change remakes only a cut line.
-const SideLine = struct { full: Id = null, cut: Id = null, cut_room: f64 = -1 };
+/// A row's whole name and its width, made once, and the name cut to the room
+/// it last had when it's wider than that: a width change remakes only a cut
+/// line.
+const SideLine = struct { full: Id = null, w: f64 = -1, cut: Id = null, cut_room: f64 = -1 };
 var side_lines: std.ArrayList(SideLine) = .empty;
 /// The room `side_head` was cut to.
 var side_head_room: f64 = 0;
@@ -5012,12 +5016,8 @@ fn statusLine(d: *Doc, room: f64) void {
         put(&buf, &n, "  ·  {s} character{s}, {d} line{s}", .{ grouped(&g, chars), if (chars == 1) "" else "s", lines, if (lines == 1) "" else "s" });
     }
     if (d.lang == &syntax.plain or d.lang.markdown) {
-        const key = [3]u64{ d.id, b.changes, t.len };
-        if (!std.mem.eql(u64, &key, &d.words_at)) {
-            d.words_at = key;
-            d.words_n = b.words;
-        }
-        put(&buf, &n, "  ·  {s} word{s}", .{ grouped(&g, d.words_n), if (d.words_n == 1) "" else "s" });
+        const words = b.wordCount();
+        put(&buf, &n, "  ·  {s} word{s}", .{ grouped(&g, words), if (words == 1) "" else "s" });
     }
     if (d.stat) |l| objc.CFRelease(l);
     d.stat = uiLine(buf[0..n], path_font, avail);
@@ -5074,18 +5074,27 @@ fn ellipsis(fnt: Id) Id {
     return objc.CTLineCreateWithAttributedString(dots);
 }
 
-/// The tab names' ellipses, bold then thin, made on first use and kept until
-/// the fonts change.
-var tab_dots: [2]Id = .{ null, null };
+/// The ellipses that cut lines end with, made on first use and kept until the
+/// fonts change: tab names bold then thin, then sidebar rows plain then bold.
+var cut_dots: [4]Id = @splat(null);
+
+fn dotsFor(k: usize) Id {
+    if (cut_dots[k] == null) cut_dots[k] = ellipsis(switch (k) {
+        0 => tab_bold,
+        1 => tab_font,
+        2 => side_font,
+        else => name_font,
+    });
+    return cut_dots[k];
+}
 
 /// `line` (a tab's whole name, made by `uiLine`) cut to `width` the way
-/// `uiLine` cuts it, from the ellipsis kept in `tab_dots[k]` (0 for the bold
-/// name, 1 for the thin). Owned: CFRelease it; `line` retained when it fits.
+/// `uiLine` cuts it, from the ellipsis `dotsFor(k)` (0 for the bold name, 1 for
+/// the thin). Owned: CFRelease it; `line` retained when it fits.
 fn cutTab(line: Id, k: usize, width: f64) Id {
     const l = line orelse return null;
-    if (tab_dots[k] == null) tab_dots[k] = ellipsis(if (k == 0) tab_bold else tab_font);
     if (objc.CTLineGetTypographicBounds(l, null, null, null) > width) {
-        if (objc.CTLineCreateTruncatedLine(l, width, 1, tab_dots[k])) |short| return short;
+        if (objc.CTLineCreateTruncatedLine(l, width, 1, dotsFor(k))) |short| return short;
     }
     return objc.CFRetain(l);
 }
