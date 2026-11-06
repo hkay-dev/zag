@@ -5034,18 +5034,31 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             if (!d.pick_live) d.rows_t0 = now;
             d.pick_live = true;
         }
-        if (d.npicks > 0) pill(ctx, th.fg, 0.10, px + 6, by - ph + ppad + d.pick_s.step(now), pw - 12, prow, 6);
         // The first rows fade in a step apart; rows that changed under the
-        // typing crossfade from what was there.
+        // typing crossfade from what was there, and rows that came or went
+        // fade in or out in place. A fresh open starts its rows after the
+        // picks were made, so it never crosses.
         const swap = std.math.clamp((now - d.pick_t0) / xfade_time, 0, 1);
-        const crossing = swap < 1;
-        for (d.picks[0..d.npicks], 0..) |p, i| {
+        const crossing = swap < 1 and d.rows_t0 < d.pick_t0;
+        if (d.npicks > 0 or (crossing and d.prev_n > 0)) {
+            const pa: f64 = if (d.npicks > 0) 0.10 else 0.10 * (1 - swap);
+            pill(ctx, th.fg, pa, px + 6, by - ph + ppad + d.pick_s.step(now), pw - 12, prow, 6);
+        }
+        const shown = if (crossing) @max(d.npicks, d.prev_n) else d.npicks;
+        for (0..shown) |i| {
             const y = by - ph + ppad + f(i) * prow;
             const lag = row_lag * f(@min(i, 5));
             const t = std.math.clamp((now - d.rows_t0 - lag) / row_fade, 0, 1);
             const a = t * t * (3 - 2 * t);
             const rise = (1 - a) * 2;
-            if (crossing and i < d.prev_n and d.prev_picks[i] != p) {
+            if (i >= d.npicks) {
+                panelRow(ctx, d, th, d.prev_picks[i], px + 14, px + pw - 14, y, a * (1 - swap), rise);
+                continue;
+            }
+            const p = d.picks[i];
+            if (crossing and i >= d.prev_n) {
+                panelRow(ctx, d, th, p, px + 14, px + pw - 14, y, a * swap, rise);
+            } else if (crossing and d.prev_picks[i] != p) {
                 panelRow(ctx, d, th, d.prev_picks[i], px + 14, px + pw - 14, y, a * (1 - swap), rise);
                 panelRow(ctx, d, th, p, px + 14, px + pw - 14, y, a * swap, rise);
             } else panelRow(ctx, d, th, p, px + 14, px + pw - 14, y, a, rise);
