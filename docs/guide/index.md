@@ -422,10 +422,6 @@ file, so a change you save elsewhere applies right away, even while Zag is in th
 you never switch to it. Every setting is in the file: the first time Zag starts with a file that
 lacks one, it adds that line at the end with its note, and it leaves your own lines and notes alone.
 
-If you used an older Zag, its settings were in `~/.config/ze/settings`. The first time this Zag
-starts without a `config.toml`, it reads that file once and writes the same settings to the new
-one. The old file stays where it is, untouched.
-
 ```text
 # A font's PostScript name, like Menlo-Regular, or system for SF Mono.
 font = "system"
