@@ -7713,6 +7713,7 @@ pub fn setup() void {
     c.method("viewDidChangeEffectiveAppearance", @ptrCast(&lookChanged), "v@:");
     c.method("windowDidBecomeKey:", @ptrCast(&appearanceChanged), "v@:@");
     c.method("windowDidResignKey:", @ptrCast(&appearanceChanged), "v@:@");
+    c.method("windowDidExitFullScreen:", @ptrCast(&appearanceChanged), "v@:@");
     c.method("draggingEntered:", @ptrCast(&draggingEntered), "Q@:@");
     c.method("performDragOperation:", @ptrCast(&performDrag), "c@:@");
     c.method("windowShouldClose:", @ptrCast(&windowShouldClose), "c@:@");
