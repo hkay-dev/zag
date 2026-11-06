@@ -2123,7 +2123,9 @@ fn dragGap(w: *Win, n: *Node, p: Point) void {
     // The share eases into and out of a snap point, and tracks the mouse 1:1 otherwise.
     if (hit != w.grab_hit and (hit >= 3 or w.grab_hit >= 3)) w.grab_ease = now + snap_ease;
     w.grab_hit = hit;
-    if (now < w.grab_ease) n.share.aim(at / len, now) else n.share.snap(at / len);
+    const to = at / len;
+    if (now >= w.grab_ease) n.share.x += to - n.share.to;
+    n.share.aim(to, now);
     msg(void, if (hit == 1 or hit == 2) limitCursor(n.down, hit == 1) else resizeCursor(n.down), "set", .{});
     msg(void, w.view, "setNeedsDisplay:", .{true});
 }
@@ -4757,6 +4759,7 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     } else {
         w.side_a.snap(want);
         w.z.snap(zen_to);
+        w.focus.inked.snap(if (msg(bool, w.window, "isKeyWindow", .{})) 1 else 0);
     }
     w.side_seen = true;
     // Zen eases in: the lights follow it, the margin and header in drawPane.
@@ -4869,7 +4872,10 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // The caret only shows in the key window's focused card.
     const key = win_key and focused and !d.closing;
     d.lit.aim(if (focused and many and win_key) 1 else 0, now);
-    if (!d.lit.moving(now)) d.lit.dur = tab_time;
+    if (d.lit.dur != tab_time and !d.lit.moving(now)) {
+        d.lit.snap(d.lit.to);
+        d.lit.dur = tab_time;
+    }
     d.inked.aim(if (key) 1 else 0, now);
     const ka = d.inked.at(now);
     const b = &d.ed.buf;
@@ -6303,6 +6309,7 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     if (gapAt(w.cards, p)) |n| {
         w.grab = n;
         w.grab_hit = 0;
+        w.grab_ease = 0;
         return;
     }
     const d = paneAt(w, p) orelse return titleStrip(w, ev);
