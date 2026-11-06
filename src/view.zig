@@ -2457,7 +2457,9 @@ fn saveLayout(w: *const Win, n: *const Node, out: *std.ArrayList(u8)) !usize {
     }
     // A card folding away is already gone.
     if (n.going) |g| return saveLayout(w, n.kids[1 - g], out);
-    try out.print(gpa, "\t|{c}{d:.3}", .{ @as(u8, if (n.down) 'd' else 'r'), n.share.to });
+    // Thousandths in integers: std's float printer is about 16 KB of Zag.
+    const m: u32 = @intFromFloat(@round(std.math.clamp(n.share.to, 0, 1) * 1000));
+    try out.print(gpa, "\t|{c}{d}.{d:0>3}", .{ @as(u8, if (n.down) 'd' else 'r'), m / 1000, m % 1000 });
     return try saveLayout(w, n.kids[0], out) + try saveLayout(w, n.kids[1], out);
 }
 
@@ -2515,7 +2517,7 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
         if (a == null or b == null) return a orelse b;
         const n = gpa.create(Node) catch return a;
         n.* = .{ .down = tok[1] == 'd', .kids = .{ a.?, b.? } };
-        n.share.snap(std.math.clamp(std.fmt.parseFloat(f64, tok[2..]) catch 0.5, 0.05, 0.95));
+        n.share.snap(std.math.clamp(settings.number(tok[2..]) orelse 0.5, 0.05, 0.95));
         a.?.up = n;
         b.?.up = n;
         return n;

@@ -38,7 +38,9 @@ Ghostty's terminal core. ze drops all three.
   position has to follow the scroll as it eases, so it moved to the same tweens.
 - **No float parsing or printing from std.** The settings file only needs numbers like `14` and
   `1.75`, and `std.fmt`'s float code was 16 KB of the binary, so `settings.zig` has a few lines of
-  its own.
+  its own. The session's split shares came back in later through `{d:.3}` and `parseFloat`;
+  writing thousandths as integers and reading them with `settings.number` took the file from
+  349,552 to 332,224 bytes (zag#pg9f). Grep for both before adding a float to any text.
 - **`headerpad_size = 0`.** The binary's size moves in 16 KB pages. Zig's default padding after
   the load commands was enough to push `__TEXT` past 64 KB when the caret code went in
   (107 KB to 123 KB on disk for 2.6 KB of code). Check `size -m` when the file jumps by a page.

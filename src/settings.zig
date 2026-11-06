@@ -225,7 +225,7 @@ fn flag(s: []const u8) ?bool {
 
 /// A plain decimal like 14 or 1.75. std's float parser and printer would
 /// add about 16 KB to Zag, and settings only need these.
-fn number(s: []const u8) ?f64 {
+pub fn number(s: []const u8) ?f64 {
     var v: f64 = 0;
     var scale: f64 = 0;
     if (s.len == 0) return null;
