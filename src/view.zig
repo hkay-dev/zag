@@ -148,6 +148,11 @@ fn chrome(th: *const Theme, dark: bool, z: f64) Rgb {
     return .{ th.bg[0] * m, th.bg[1] * m, th.bg[2] * m };
 }
 
+/// `a` toward `b` by `t`.
+fn mixRgb(a: Rgb, b: Rgb, t: f64) Rgb {
+    return .{ a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t };
+}
+
 /// How much of the chrome color paints over the sidebar material: the rest
 /// shows through. Zen covers the material completely. (The material can't
 /// be hidden: Zag's view lives inside it.)
@@ -886,6 +891,7 @@ fn loadDur(d: *const Doc) f64 {
 fn scenery(d: *const Doc, now: f64) bool {
     const stretched = d.relax and (d.ov[0] != 0 or d.ov[1] != 0);
     return stretched or d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.band_a.moving(now) or now < d.focus_t0 + focus_time or d.focus_a.moving(now) or d.panel.moving(now) or d.lit.moving(now) or
+        d.inked.moving(now) or
         d.prompt_t.moving(now) or d.pbar.moving(now) or now < d.shake_t0 + shake_time or now < d.card_shake_t0 + shake_time or d.hint.moving(now) or (d.blank_t0 >= 0 and now < d.blank_t0 + hint_delay) or
         d.plus_t.moving(now) or !d.pick_s.settled() or tabsMoving(d, now) or
         (d.pick_live and (now < d.rows_t0 + row_lag * 5 + row_fade or now < d.pick_t0 + xfade_time)) or
@@ -1074,6 +1080,8 @@ const Doc = struct {
     fin: Point = .{},
     /// 1 while the card takes typing in a window with others, for its ring.
     lit: Tween = .{ .dur = tab_time },
+    /// 1 while the card is the key window's focus, for its header and prompt ink.
+    inked: Tween = .{ .dur = tab_time },
     /// Folding away after its last tab closed.
     closing: bool = false,
     /// When a refused split last shook this card.
@@ -1312,6 +1320,8 @@ const Win = struct {
     /// Which snap point or limit the dragged gap sits on, 0 for none, so the
     /// trackpad taps once on arriving.
     grab_hit: u8 = 0,
+    /// Until when the dragged gap eases instead of tracking the mouse.
+    grab_ease: f64 = 0,
     /// Scroll the sidebar to the focused card's file on the next draw.
     side_find: bool = false,
     /// The open folders pinned under the folder's name, and where each drew.
@@ -1419,6 +1429,8 @@ const fly_time = 0.3;
 const grab_pull = 0.3;
 const grab_stretch = 24.0;
 const snap_reach = 6.0;
+/// How long the gap eases after entering or leaving a snap point.
+const snap_ease = 0.15;
 
 /// Where a dragged tab lands: among a card's tabs, on the card itself, or
 /// in a new card split off one of its edges.
@@ -1545,11 +1557,13 @@ fn showWin(win: Id) void {
 fn focus(d: *Doc) void {
     const w = d.win;
     if (w.focus == d) return;
+    const old = w.focus;
     w.focus = d;
     access.focused(d);
     w.side_find = true;
     named(d);
-    refreshAll();
+    refresh(old);
+    refresh(d);
 }
 
 /// Reads a file into a page, at the caret and scroll it had last time.
@@ -2105,8 +2119,11 @@ fn dragGap(w: *Win, n: *Node, p: Point) void {
         }
     }
     if (hit != 0 and hit != w.grab_hit) haptic(.alignment);
+    const now = CACurrentMediaTime();
+    // The share eases into and out of a snap point, and tracks the mouse 1:1 otherwise.
+    if (hit != w.grab_hit and (hit >= 3 or w.grab_hit >= 3)) w.grab_ease = now + snap_ease;
     w.grab_hit = hit;
-    n.share.snap(at / len);
+    if (now < w.grab_ease) n.share.aim(at / len, now) else n.share.snap(at / len);
     msg(void, if (hit == 1 or hit == 2) limitCursor(n.down, hit == 1) else resizeCursor(n.down), "set", .{});
     msg(void, w.view, "setNeedsDisplay:", .{true});
 }
@@ -4852,6 +4869,9 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // The caret only shows in the key window's focused card.
     const key = win_key and focused and !d.closing;
     d.lit.aim(if (focused and many and win_key) 1 else 0, now);
+    if (!d.lit.moving(now)) d.lit.dur = tab_time;
+    d.inked.aim(if (key) 1 else 0, now);
+    const ka = d.inked.at(now);
     const b = &d.ed.buf;
     layout(d);
     if (conf.typewriter and d.center_h != textH(d)) reveal(d);
@@ -5187,7 +5207,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // already uses the final `bottom()`.
     var buf: [64]u8 = undefined;
     // A window that isn't key dims its header and prompt a step.
-    const ink = if (key) th.fg else th.muted;
+    const ink = mixRgb(th.muted, th.fg, ka);
     const prompting = d.mode != .edit;
     const nomatch = prompting and finding and d.found[1] == 0;
     if (nomatch and !d.nomatch) d.shake_t0 = now;
@@ -5323,7 +5343,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = @max(right - card.x, 0), .h = head_h });
         // The traffic lights and the sidebar button sit on a card at the window's top left.
         const lights_end: f64 = if (root != null) toggle_x + 22 else tabs_from;
-        drawTabs(d, ctx, th, &k, dark, key, @max(card.x + 14, if (d.org.y < 1) lights_end - d.org.x else 0), right, mono_y, now);
+        drawTabs(d, ctx, th, &k, dark, ka, @max(card.x + 14, if (d.org.y < 1) lights_end - d.org.x else 0), right, mono_y, now);
         k.flush();
         if (zt > 0.001) objc.CGContextEndTransparencyLayer(ctx);
     }
@@ -5428,7 +5448,7 @@ fn tabWidth(s: *const Slot, a: f64) f64 {
 /// name, unsaved dot and folder; with more, a row of tabs and a + after
 /// them, which the one tab grows into. The active tab's highlight springs
 /// from tab to tab, and the row scrolls to keep it in view.
-fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, x0: f64, x1: f64, mono_y: f64, now: f64) void {
+fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0: f64, x1: f64, mono_y: f64, now: f64) void {
     const n = tabCount(d);
     const want: f64 = if (n > 1) 1 else 0;
     if (d.slots_seen) d.tabbed.aim(want, now) else d.tabbed.snap(want);
@@ -5525,15 +5545,15 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
     const hx = d.hl[0].step(now);
     const hw = d.hl[1].step(now);
     if (a > 0.01) {
-        pill(ctx, th.fg, (if (key) @as(f64, 0.08) else 0.05) * a, hx, hy - 11, hw, 22, 7);
-        ring(ctx, th.fg, (if (key) @as(f64, 0.1) else 0.06) * a, hx, hy - 11, hw, 22, 7);
+        pill(ctx, th.fg, (0.05 + 0.03 * ka) * a, hx, hy - 11, hw, 22, 7);
+        ring(ctx, th.fg, (0.06 + 0.04 * ka) * a, hx, hy - 11, hw, 22, 7);
     }
 
     for (0..2) |pass| {
         for (d.slots.items) |*s| {
             if ((s.id == top_id) != (pass == 1)) continue;
             const back = if (d.win.fly) |fl| fl.card == d and fl.id == s.id else false;
-            drawTab(d, s, ctx, th, dark, key, a, cap, x0, x1, now, back or (dragged != null and dragged.?.out and s.id == dragged.?.id), pass == 1);
+            drawTab(d, s, ctx, th, dark, ka, a, cap, x0, x1, now, back or (dragged != null and dragged.?.out and s.id == dragged.?.id), pass == 1);
         }
     }
 
@@ -5581,7 +5601,7 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
 /// far the header has turned into tabs and `cap` the squeezed tabs' width.
 /// Its name lights up, from regular at 0.62 to medium at full ink, as the
 /// active tab's highlight lands on it, and its contents grow in with it.
-fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, key: bool, a: f64, cap: f64, x0: f64, x1: f64, now: f64, faint: bool, lifted: bool) void {
+fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, ka: f64, a: f64, cap: f64, x0: f64, x1: f64, now: f64, faint: bool, lifted: bool) void {
     const hy = gap + head_h / 2;
     const ts = tileSize();
     const pad = tab_pad * a;
@@ -5600,8 +5620,8 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, key: bool, 
     if (alpha < 1) objc.CGContextSetAlpha(ctx, alpha);
     if (lifted) {
         pill(ctx, th.header, 1, sx, hy - 11, s.w, 22, 7);
-        pill(ctx, th.fg, (if (key) @as(f64, 0.08) else 0.05) * a, sx, hy - 11, s.w, 22, 7);
-        ring(ctx, th.fg, (if (key) @as(f64, 0.1) else 0.06) * a, sx, hy - 11, s.w, 22, 7);
+        pill(ctx, th.fg, (0.05 + 0.03 * ka) * a, sx, hy - 11, s.w, 22, 7);
+        ring(ctx, th.fg, (0.06 + 0.04 * ka) * a, sx, hy - 11, s.w, 22, 7);
     }
     if (hv > 0.01 and !on) pill(ctx, th.fg, 0.05 * hv, sx, hy - 11, s.w, 22, 7);
     if (d.win.menu_card == d and d.win.menu_tab == s.id) {
@@ -5637,8 +5657,8 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, key: bool, 
     // next to stays unlit; a lone tab is the window's title.
     const cover = @min(d.hl[0].x + d.hl[1].x, sx + s.w) - @max(d.hl[0].x, sx);
     const lit = if (a < 0.5) 1 else std.math.clamp(cover / @max(s.w, d.hl[1].x, 1), 0, 1);
-    const ink_a = if (key) 0.62 + 0.38 * @max(lit, hv) else 1;
-    const ink = if (key) th.fg else th.muted;
+    const ink_a = 1 + (0.62 + 0.38 * @max(lit, hv) - 1) * ka;
+    const ink = mixRgb(th.muted, th.fg, ka);
     const by = @round(hy + name_off);
     // The weight switches halfway while the ink brightens: the two weights
     // have different widths, so drawing both at once smears the name.
