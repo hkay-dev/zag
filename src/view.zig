@@ -6548,13 +6548,11 @@ fn freeDrag(t: TabDrag) void {
     if (t.name) |l| objc.CFRelease(l);
 }
 
-/// Where a tab dragged off its row to `p` would land: among another
-/// card's tabs, in a new card off the nearest edge of the card under it
-/// when `p` is within a quarter of that edge and there's room, or else
-/// on that card. Null over the sidebar, the gaps, or its own card's
-/// middle, and its own card's edges when it's that card's only tab. A
-/// file from the sidebar splits off the nearest edge from anywhere over
-/// the text, and lands on the card only when there's no room.
+/// Where a tab or sidebar file dragged to `p` would land: among another
+/// card's tabs, or from anywhere over a card's text in a new card off its
+/// nearest edge that has room to split, or on that card when none has.
+/// Null over the sidebar, the gaps, its own card's tab row, and its own
+/// card's text when it's that card's only tab or the card can't split.
 fn dropAt(w: *Win, t: *const TabDrag, p: Point) ?Drop {
     if (sideShown(w) and p.x < side_w) return null;
     const c = paneAt(w, p) orelse return null;
@@ -6573,10 +6571,10 @@ fn dropAt(w: *Win, t: *const TabDrag, p: Point) ?Drop {
     const near = [4]f64{ u, 1 - u, v, 1 - v };
     const edges = [4]Zone{ .left, .right, .top, .bottom };
     var best: ?usize = null;
-    for (near, 0..) |x, i| if ((t.from == null or x < 0.25) and (best == null or x < near[best.?])) {
+    if (!own or tabCount(c) > 1) for (near, 0..) |x, i| if (roomFor(c, i >= 2) and (best == null or x < near[best.?])) {
         best = i;
     };
-    if (best) |i| if ((!own or tabCount(c) > 1) and roomFor(c, i >= 2)) return .{ .card = c, .zone = edges[i] };
+    if (best) |i| return .{ .card = c, .zone = edges[i] };
     if (own) return null;
     return .{ .card = c, .zone = .whole, .k = c.at + 1 };
 }

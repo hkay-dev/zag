@@ -149,12 +149,12 @@ others hide their caret and dim their header.
   a tap on a trackpad. Pull past a limit and the gap stretches a little, then springs back when
   you let go. ⌘D shakes the card and beeps when the focused card has no room to split.
 - Closing a card's last tab folds the card away, and its neighbor springs over to fill the room.
-- Drag a tab to another card to move it there. Over the other card's tabs, they slide apart to
-  show where it goes; over the card itself, it joins that card's tabs. Near a card's left, right,
-  top or bottom edge, a preview of half the card shows, and dropping there splits the card and
-  puts the tab in the new half. That works on the tab's own card too, when it has other tabs.
-  With more than one card, a card's lone file name drags the same way, and its card folds away
-  once the file leaves.
+- Drag a tab onto another card's tabs to move it there: they slide apart to show where it goes.
+  Drag it over any card's text, its own included when it has other tabs, and a preview of half
+  the card shows on the side nearest the mouse; dropping there splits the card and puts the tab
+  in the new half. A card with no room to split takes the tab as a new tab instead. With more
+  than one card, a card's lone file name drags the same way, and its card folds away once the
+  file leaves.
 
 ## Sidebar
 
@@ -186,9 +186,9 @@ points fade out.
 - ⌘-click a file to open it in a new window.
 - Drag a file onto a card's tabs to open it there as a new tab: the tabs slide apart to show
   where it goes. Drag it over a card's text to open it in a new card split off that card's nearest
-  edge, with a preview of the half it takes. A copy of the file's name follows the mouse while its
-  row dims. A file already open in the window moves there instead. Let go where it can't land and
-  the copy slides back to its row.
+  edge that has room, with a preview of the half it takes. A copy of the file's name follows the
+  mouse while its row dims. A file already open in the window moves there instead. Let go where it
+  can't land and the copy slides back to its row.
 - Right-click (or control-click) a file for **Open in New Tab**, **Open in New Split** (beside the
   focused card, or below it when there's no room beside), **Open in New Window**, **Reveal in
   Finder** and **Copy Path**. A folder has the last two. The row keeps a faint tinted outline in
