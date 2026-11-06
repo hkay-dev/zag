@@ -57,9 +57,10 @@ Short and ease-out, so nothing feels like it waits on the animation: 0.12 to 0.2
 folds and the file fade-in, 0.24 s for the sidebar slide, 0.16 s for scroll glides. A click during
 an animation acts at once: a closing folder keeps sliding and the click maps through its rows.
 
-- Caret glide: 0.05 s for a step of one column or less on the same row, else
-  `clamp(0.07 + 0.025 * log2(1 + dist / lineHeight), 0.07, 0.14)`. A move that extends a selection
-  snaps. The glide time is set only when a glide starts, so redraws keep zig-editor#258w fixed.
+- Caret glide: `clamp(0.09 + 0.025 * log2(1 + dist / lineHeight), 0.09, 0.14)`. zig-editor#r6r2 cut a
+  one-column step to 0.05 s, which at 120 Hz is about two visible frames and read as a jump, so
+  Harsha lost the glide while typing (zag#me3c); don't go under 0.09 s. A move that extends a
+  selection snaps. The glide time is set only when a glide starts, so redraws keep zig-editor#258w fixed.
 - Blink: one 1 s keyframe animation, solid until 0.5, fade out to 0.62, dark until 0.9, fade in.
   The solid hold after a move is the first segment (zig-editor#r6r2).
 - Find pill pop: spring k 600 c 22 kicked to v 6, peaks near 1.14, restarts on each jump. The old

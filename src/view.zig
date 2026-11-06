@@ -642,10 +642,9 @@ const Slot = struct {
     }
 };
 
+/// The caret's glide: `caret_time` for a step, longer for a long jump, up
+/// to `caret_max`. Shorter than 0.09 s reads as a jump at 120 Hz (zag#me3c).
 const caret_time = 0.09;
-/// The caret's glide for a step along its row, and the least and most for a longer jump.
-const caret_step = 0.05;
-const caret_min = 0.07;
 const caret_max = 0.14;
 const fade_time = 0.12;
 const panel_time = 0.14;
@@ -713,11 +712,10 @@ fn placeCaret(d: *Doc, now: f64, x: f64, y: f64, in_text: bool, spot: [3]usize, 
     moveCaret(d, now);
 }
 
-/// How long the caret takes to glide by (`dx`, `dy`): a step along its
-/// row is quick, and longer jumps take a little longer so they read as travel.
+/// How long the caret takes to glide by (`dx`, `dy`): longer jumps take a
+/// little longer so they read as travel.
 fn glideTime(dx: f64, dy: f64) f64 {
-    if (@abs(dy) < lh / 2 and @abs(dx) <= cw + 0.5) return caret_step;
-    return std.math.clamp(caret_min + 0.025 * @log2(1 + @sqrt(dx * dx + dy * dy) / lh), caret_min, caret_max);
+    return std.math.clamp(caret_time + 0.025 * @log2(1 + @sqrt(dx * dx + dy * dy) / lh), caret_time, caret_max);
 }
 
 /// Puts the caret layer where its glide is at `now`, hidden outside the text.

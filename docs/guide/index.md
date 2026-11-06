@@ -20,7 +20,7 @@ With more, it shows tabs instead (see Tabs). When you find, replace, jump to a l
 file, a prompt line opens at the bottom of the card.
 
 Zag follows the Mac's light or dark setting unless you pick one, with a theme for each (see Themes). Things move
-a little instead of jumping: the caret glides to each new spot, faster for a step along a line,
+a little instead of jumping: the caret glides to each new spot, a little longer for a long jump,
 and holds solid for a moment before it fades out and back in, the band behind the caret's line
 slides after it, a new selection fades in, the quick open list rises out of the prompt line, and
 the prompt line itself slides up from the bottom of the card, its words a moment behind. The page
