@@ -647,7 +647,7 @@ fn outlineChildren(self: Id, _: Sel) callconv(.c) Id {
 fn outlineSelected(self: Id, _: Sel) callconv(.c) Id {
     const list = array();
     const w = winOf(self) orelse return list;
-    if (w.sel_row) |i| if (i < ax.rows().len) add(list, rowOf(w, i));
+    if (w.sel.row) |i| if (i < ax.rows().len) add(list, rowOf(w, i));
     return list;
 }
 
@@ -694,7 +694,7 @@ fn rowOpen(self: Id, _: Sel) callconv(.c) bool {
 
 fn rowSelected(self: Id, _: Sel) callconv(.c) bool {
     const r = rowAt(self) orelse return false;
-    return if (r.w.sel_row) |s| s == r.i else false;
+    return if (r.w.sel.row) |s| s == r.i else false;
 }
 
 fn rowPress(self: Id, _: Sel) callconv(.c) bool {

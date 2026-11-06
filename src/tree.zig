@@ -69,6 +69,14 @@ pub const Tree = struct {
         return false;
     }
 
+    /// The row after `i` and all of its descendants.
+    pub fn end(t: *const Tree, i: usize) usize {
+        const rows = t.rows.items;
+        var e = i + 1;
+        while (e < rows.len and rows[e].depth > rows[i].depth) e += 1;
+        return e;
+    }
+
     /// Re-reads `root` and every open folder under it.
     pub fn rebuild(t: *Tree, gpa: Allocator, root: []const u8) void {
         _ = t.arena.reset(.retain_capacity);
@@ -171,6 +179,10 @@ test "folders first, names ignore case, hidden files skipped, open folders list 
     for (want, tr.rows.items) |w, row| try t.expectEqualStrings(w, row.rel);
     try t.expectEqual(@as(u16, 1), tr.rows.items[2].depth);
     try t.expectEqualStrings("x.zig", tr.rows.items[2].rel[tr.rows.items[2].base..]);
+    try t.expectEqual(@as(usize, 1), tr.end(0));
+    try t.expectEqual(@as(usize, 3), tr.end(1));
+    try t.expectEqual(@as(usize, 3), tr.end(2));
+    try t.expectEqual(tr.rows.items.len, tr.end(tr.rows.items.len - 1));
 
     // A read folder that changes makes the rows stale; a new open folder too.
     try t.expect(tr.fresh());
