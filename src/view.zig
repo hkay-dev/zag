@@ -5162,21 +5162,22 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // nothing, so their text fades into whatever is under it (page, band or
     // selection) while a row that just fits keeps its last character.
     var reach: [400]u8 = undefined;
-    var any_reach = false;
+    var any_reach = prev_a > 0 or cur_m != null;
+    var any_cut = false;
     for (0..2) |pass| {
         const x0 = ox + f(cols -| 1) * cw;
         if (pass == 1) {
             if (!any_reach or cols == 0) break;
             objc.CGContextSaveGState(ctx);
             objc.CGContextClipToRect(ctx, .{ .x = x0, .y = card.y, .w = cw, .h = card.h });
-            objc.CGContextBeginTransparencyLayer(ctx, null);
+            if (any_cut) objc.CGContextBeginTransparencyLayer(ctx, null);
         } else {
             objc.CGContextSaveGState(ctx);
             if (cols > 0) objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = x0 - card.x, .h = card.h });
         }
         lexed = std.math.maxInt(usize);
         for (vis[0..nvis], first..) |v, row| {
-            if (pass == 1 and reach[row - first] == 0) continue;
+            if (pass == 1 and reach[row - first] == 0 and prev_a <= 0 and cur_m == null) continue;
             const l = b.line(v.line);
             if (v.line != lexed) {
                 lexed = v.line;
@@ -5188,16 +5189,22 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             }
             k.offset = b.lineStart(v.line);
             const row_y = top_h + f(row) * lh - d.vy;
-            const used = k.run(l, v.seg.start, v.seg.end, v.seg.col, kinds, th, th.fg, ox, row_y + baseline, skip, cols + 1);
+            // Pass 1 redraws only the last columns, at the x pass 0 gives them.
+            const back = @min(cols, 2);
+            const used = if (pass == 1)
+                k.run(l, v.seg.start, v.seg.end, v.seg.col, kinds, th, th.fg, ox + f(cols - back) * cw, row_y + baseline, skip + cols - back, back + 1)
+            else
+                k.run(l, v.seg.start, v.seg.end, v.seg.col, kinds, th, th.fg, ox, row_y + baseline, skip, cols + 1);
             if (pass == 0) {
                 reach[row - first] = if (used > cols) 2 else if (used == cols) 1 else 0;
                 any_reach = any_reach or used >= cols;
+                any_cut = any_cut or used > cols;
             }
             if (prev_a > 0) pillOver(&k, th, dark, l, k.offset, v.seg, d.prev_m, ox, skip, row_y, 1, prev_a);
             if (cur_m) |m| pillOver(&k, th, dark, l, k.offset, v.seg, m, ox, skip, row_y, pop, 1);
         }
         k.flush();
-        if (pass == 1) {
+        if (pass == 1 and any_cut) {
             objc.CGContextSetBlendMode(ctx, 22);
             for (vis[0..nvis], first..) |_, row| {
                 if (reach[row - first] != 2) continue;
