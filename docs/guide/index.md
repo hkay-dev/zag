@@ -81,7 +81,7 @@ than 680 points. Run it again to close it. Keep typing in the editor: the previe
 short pause without jumping back to the top. It stays with the file it was opened for when you
 switch tabs or cards, and closes with its window. Other text files can be previewed too, using
 the same Markdown rules. The preview window remembers where you left it and how big it was, and
-opens there next time.
+opens there next time. Links are tinted and underlined.
 
 ## Open files
 

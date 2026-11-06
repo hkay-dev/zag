@@ -176,7 +176,7 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     const out = objc.new("NSMutableAttributedString");
     defer msg(void, out, "release", .{});
     const key_intent, const key_inline, const key_link = .{ objc.str("NSPresentationIntent"), objc.str("NSInlinePresentationIntent"), objc.str("NSLink") };
-    const key_font, const key_color, const key_style, const key_back = .{ objc.str("NSFont"), objc.str("NSColor"), objc.str("NSParagraphStyle"), objc.str("NSBackgroundColor") };
+    const key_font, const key_color, const key_style, const key_back, const key_line = .{ objc.str("NSFont"), objc.str("NSColor"), objc.str("NSParagraphStyle"), objc.str("NSBackgroundColor"), objc.str("NSUnderline") };
     const fg, const link, const muted, const panel = .{ color(theme.fg), color(theme.kinds[5]), color(theme.muted), color(theme.panel) };
     var i: usize = 0;
     var previous: usize = 0;
@@ -217,9 +217,11 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
         }
         const inline_intent = msg(usize, msg(Id, attrs, "objectForKey:", .{key_inline}), "unsignedIntegerValue", .{});
         if (inline_intent & 4 != 0) base = 4;
-        if (msg(Id, attrs, "objectForKey:", .{key_link}) != null) ink = link;
+        const linked = msg(Id, attrs, "objectForKey:", .{key_link}) != null;
+        if (linked) ink = link;
         attr(part, key_font, font(base, inline_intent & 3), all);
         attr(part, key_color, ink, all);
+        if (linked) attr(part, key_line, msg(Id, objc.class("NSNumber"), "numberWithInteger:", .{@as(isize, 1)}), all);
         attr(part, key_style, style(flags), all);
         msg(void, part, "removeAttribute:range:", .{ key_intent, all });
         if (prefix != null) msg(void, part, "replaceCharactersInRange:withString:", .{ Range{ .loc = 0, .len = 0 }, prefix });
