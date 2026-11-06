@@ -5462,6 +5462,7 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
         const dirty = !s.gone and if (tabIndex(d, s.id)) |j| tabDirty(d, j) else false;
         s.dot.aim(if (dirty) 1 else 0, now);
         _ = s.dot.step(now);
+        _ = s.grow.step(now);
     }
 
     // Squeeze the tabs to a common cap when they don't all fit, down to
@@ -5474,9 +5475,10 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
         for (0..24) |_| {
             const mid = (lo + hi) / 2;
             var sum: f64 = 0;
-            for (d.slots.items) |*s| if (!s.gone) {
-                sum += @min(tabWidth(s, a), mid) + tab_space * a;
-            };
+            for (d.slots.items) |*s| {
+                const g = std.math.clamp(s.grow.x, 0, 1);
+                sum += (@min(tabWidth(s, a), mid) + tab_space * a) * g;
+            }
             if (sum <= room) lo = mid else hi = mid;
         }
         cap = lo;
