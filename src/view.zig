@@ -1114,6 +1114,7 @@ const Doc = struct {
     held: std.ArrayList(u8) = .empty,
     held_with: std.ArrayList(u8) = .empty,
     held_mode: Mode = .find,
+    held_id: u32 = 0,
     held_which: u1 = 0,
     held_tally: [64]u8 = undefined,
     held_n: usize = 0,
@@ -4918,7 +4919,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     const flash_a = flashAlpha(d, now);
 
     // The other matches' pills stay while the find bar slides away, fading with it.
-    const closing_find = d.mode == .edit and (d.held_mode == .find or d.held_mode == .replace) and d.pbar.at(now) > 0.002;
+    const closing_find = d.mode == .edit and d.held_id == d.id and (d.held_mode == .find or d.held_mode == .replace) and d.pbar.at(now) > 0.002;
     const pills: []const u8 = if (finding) d.prompt.items else if (closing_find) d.held.items else "";
     const pills_a: f64 = if (finding) 1 else d.pbar.at(now);
 
@@ -5132,6 +5133,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         d.held_n = @min(tally.len, d.held_tally.len);
         @memcpy(d.held_tally[0..d.held_n], tally[0..d.held_n]);
         d.held_mode = d.mode;
+        d.held_id = d.id;
         d.held_which = d.which;
         d.held.clearRetainingCapacity();
         d.held.appendSlice(gpa, d.prompt.items) catch {};
