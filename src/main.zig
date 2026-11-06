@@ -69,66 +69,28 @@ fn reopen(_: Id, _: Sel, _: Id, visible: bool) callconv(.c) bool {
     return true;
 }
 
-fn newDocument(_: Id, _: Sel, _: Id) callconv(.c) void {
-    _ = view.newDoc();
-}
-
-fn openDocument(_: Id, _: Sel, _: Id) callconv(.c) void {
-    view.openPanel();
-}
-
 fn becameActive(_: Id, _: Sel, _: Id) callconv(.c) void {
     // A Dev build hands the keys straight back.
     if (view.background) return msg(void, app(), "deactivate", .{});
     view.recheckAll();
 }
 
-fn willTerminate(_: Id, _: Sel, _: Id) callconv(.c) void {
-    view.saveSession();
+/// A menu action thunk: calls `f` with `a` and drops its result.
+fn act(comptime f: anytype, comptime a: anytype) *const fn (Id, Sel, Id) callconv(.c) void {
+    return &struct {
+        fn thunk(_: Id, _: Sel, _: Id) callconv(.c) void {
+            _ = @call(.auto, f, a);
+        }
+    }.thunk;
 }
 
-fn openSettings(_: Id, _: Sel, _: Id) callconv(.c) void {
-    view.openSettings();
-}
-
-fn toggleWrap(_: Id, _: Sel, _: Id) callconv(.c) void {
-    view.toggleWrap();
-}
-
-fn togglePairs(_: Id, _: Sel, _: Id) callconv(.c) void {
-    view.togglePairs();
-}
-
-fn toggleSidebar(_: Id, _: Sel, _: Id) callconv(.c) void {
-    view.toggleSidebar();
-}
-
-fn toggleTypewriter(_: Id, _: Sel, _: Id) callconv(.c) void {
-    view.toggleTypewriter();
-}
-
-fn toggleZen(_: Id, _: Sel, _: Id) callconv(.c) void {
-    view.toggleZen();
-}
-
-fn nextTab(_: Id, _: Sel, _: Id) callconv(.c) void {
-    view.stepTab(1);
-}
-
-fn previousTab(_: Id, _: Sel, _: Id) callconv(.c) void {
-    view.stepTab(-1);
-}
-
-fn pickAppearance(_: Id, _: Sel, sender: Id) callconv(.c) void {
-    view.pickLook(@intCast(msg(isize, sender, "tag", .{})));
-}
-
-fn pickScheme(_: Id, _: Sel, sender: Id) callconv(.c) void {
-    view.pickScheme(@intCast(msg(isize, sender, "tag", .{})));
-}
-
-fn pickFocus(_: Id, _: Sel, sender: Id) callconv(.c) void {
-    view.pickFocus(@intCast(msg(isize, sender, "tag", .{})));
+/// A menu action thunk for items that carry their index in `tag`.
+fn tagged(comptime f: fn (usize) void) *const fn (Id, Sel, Id) callconv(.c) void {
+    return &struct {
+        fn thunk(_: Id, _: Sel, sender: Id) callconv(.c) void {
+            f(@intCast(msg(isize, sender, "tag", .{})));
+        }
+    }.thunk;
 }
 
 /// Fills File > Open Recent each time it opens.
@@ -148,10 +110,6 @@ fn fillRecent(_: Id, _: Sel, menu: Id) callconv(.c) void {
 
 fn openRecent(_: Id, _: Sel, sender: Id) callconv(.c) void {
     view.open(objc.utf8(msg(Id, sender, "representedObject", .{})), view.blankDoc());
-}
-
-fn clearRecent(_: Id, _: Sel, _: Id) callconv(.c) void {
-    view.clearRecent();
 }
 
 fn item(menu: Id, title: []const u8, action: [:0]const u8, key: []const u8, mods: usize) Id {
@@ -306,24 +264,24 @@ pub fn main(init: std.process.Init.Minimal) void {
     d.method("applicationShouldTerminateAfterLastWindowClosed:", @ptrCast(&yes), "c@:@");
     d.method("applicationShouldTerminate:", @ptrCast(&shouldTerminate), "Q@:@");
     d.method("applicationShouldHandleReopen:hasVisibleWindows:", @ptrCast(&reopen), "c@:@c");
-    d.method("newDocument:", @ptrCast(&newDocument), "v@:@");
-    d.method("openDocument:", @ptrCast(&openDocument), "v@:@");
+    d.method("newDocument:", @ptrCast(act(view.newDoc, .{})), "v@:@");
+    d.method("openDocument:", @ptrCast(act(view.openPanel, .{})), "v@:@");
     d.method("applicationDidBecomeActive:", @ptrCast(&becameActive), "v@:@");
-    d.method("applicationWillTerminate:", @ptrCast(&willTerminate), "v@:@");
-    d.method("openSettings:", @ptrCast(&openSettings), "v@:@");
-    d.method("toggleWrap:", @ptrCast(&toggleWrap), "v@:@");
-    d.method("togglePairs:", @ptrCast(&togglePairs), "v@:@");
-    d.method("toggleSidebar:", @ptrCast(&toggleSidebar), "v@:@");
-    d.method("toggleTypewriter:", @ptrCast(&toggleTypewriter), "v@:@");
-    d.method("toggleZen:", @ptrCast(&toggleZen), "v@:@");
-    d.method("nextTab:", @ptrCast(&nextTab), "v@:@");
-    d.method("previousTab:", @ptrCast(&previousTab), "v@:@");
-    d.method("pickScheme:", @ptrCast(&pickScheme), "v@:@");
-    d.method("pickAppearance:", @ptrCast(&pickAppearance), "v@:@");
-    d.method("pickFocus:", @ptrCast(&pickFocus), "v@:@");
+    d.method("applicationWillTerminate:", @ptrCast(act(view.saveSession, .{})), "v@:@");
+    d.method("openSettings:", @ptrCast(act(view.openSettings, .{})), "v@:@");
+    d.method("toggleWrap:", @ptrCast(act(view.toggleWrap, .{})), "v@:@");
+    d.method("togglePairs:", @ptrCast(act(view.togglePairs, .{})), "v@:@");
+    d.method("toggleSidebar:", @ptrCast(act(view.toggleSidebar, .{})), "v@:@");
+    d.method("toggleTypewriter:", @ptrCast(act(view.toggleTypewriter, .{})), "v@:@");
+    d.method("toggleZen:", @ptrCast(act(view.toggleZen, .{})), "v@:@");
+    d.method("nextTab:", @ptrCast(act(view.stepTab, .{1})), "v@:@");
+    d.method("previousTab:", @ptrCast(act(view.stepTab, .{-1})), "v@:@");
+    d.method("pickScheme:", @ptrCast(tagged(view.pickScheme)), "v@:@");
+    d.method("pickAppearance:", @ptrCast(tagged(view.pickLook)), "v@:@");
+    d.method("pickFocus:", @ptrCast(tagged(view.pickFocus)), "v@:@");
     d.method("menuNeedsUpdate:", @ptrCast(&fillRecent), "v@:@");
     d.method("openRecent:", @ptrCast(&openRecent), "v@:@");
-    d.method("clearRecent:", @ptrCast(&clearRecent), "v@:@");
+    d.method("clearRecent:", @ptrCast(act(view.clearRecent, .{})), "v@:@");
     const cls = d.finish();
     const delegate = msg(Id, msg(Id, cls, "alloc", .{}), "init", .{});
     msg(void, nsapp, "setDelegate:", .{delegate});
