@@ -114,7 +114,12 @@ const side_icon = 16.0;
 /// The sidebar shows when there's a folder, it's turned on, and the window
 /// is wide enough to keep room for the text.
 fn sideShown(w: *const Win) bool {
-    return !conf.zen and conf.sidebar and root != null and msg(Rect, w.view, "bounds", .{}).w >= side_w + 360;
+    return sideShownAt(msg(Rect, w.view, "bounds", .{}).w);
+}
+
+/// `sideShown` for a view width the caller already has.
+fn sideShownAt(width: f64) bool {
+    return !conf.zen and conf.sidebar and root != null and width >= side_w + 360;
 }
 
 /// A card's right edge in its pane, which it sits a gap inside of.
@@ -419,12 +424,33 @@ fn hair() f64 {
     return dev_px;
 }
 
+extern fn CGContextMoveToPoint(ctx: Id, x: f64, y: f64) void;
+extern fn CGContextAddLineToPoint(ctx: Id, x: f64, y: f64) void;
+extern fn CGContextAddCurveToPoint(ctx: Id, c1x: f64, c1y: f64, c2x: f64, c2y: f64, x: f64, y: f64) void;
+extern fn CGContextClosePath(ctx: Id) void;
+
+/// Adds a rounded rectangle to the context's path, with no path object made.
+fn roundPath(ctx: Id, x: f64, y: f64, w: f64, h: f64, radius: f64) void {
+    const r = @max(0, @min(radius, w / 2, h / 2));
+    const o = r * 0.4477152502; // a quarter circle's bezier handle, from the corner
+    const x1 = x + w;
+    const y1 = y + h;
+    CGContextMoveToPoint(ctx, x + r, y);
+    CGContextAddLineToPoint(ctx, x1 - r, y);
+    CGContextAddCurveToPoint(ctx, x1 - o, y, x1, y + o, x1, y + r);
+    CGContextAddLineToPoint(ctx, x1, y1 - r);
+    CGContextAddCurveToPoint(ctx, x1, y1 - o, x1 - o, y1, x1 - r, y1);
+    CGContextAddLineToPoint(ctx, x + r, y1);
+    CGContextAddCurveToPoint(ctx, x + o, y1, x, y1 - o, x, y1 - r);
+    CGContextAddLineToPoint(ctx, x, y + r);
+    CGContextAddCurveToPoint(ctx, x, y + o, x + o, y, x + r, y);
+    CGContextClosePath(ctx);
+}
+
 /// A rounded rectangle: the card, the sidebar's selection, the icon tiles.
 fn pill(ctx: Id, c: Rgb, a: f64, x: f64, y: f64, w: f64, h: f64, radius: f64) void {
-    const path = objc.CGPathCreateWithRoundedRect(.{ .x = x, .y = y, .w = w, .h = h }, radius, radius, null);
-    defer if (path) |p| objc.CFRelease(p);
     objc.CGContextSetRGBFillColor(ctx, c[0], c[1], c[2], a);
-    objc.CGContextAddPath(ctx, path);
+    roundPath(ctx, x, y, w, h, radius);
     objc.CGContextFillPath(ctx);
 }
 
@@ -432,13 +458,9 @@ fn pill(ctx: Id, c: Rgb, a: f64, x: f64, y: f64, w: f64, h: f64, radius: f64) vo
 /// pixel thick.
 fn ring(ctx: Id, c: Rgb, a: f64, x: f64, y: f64, w: f64, h: f64, radius: f64) void {
     const t = hair();
-    const outer = objc.CGPathCreateWithRoundedRect(.{ .x = x, .y = y, .w = w, .h = h }, radius, radius, null);
-    defer if (outer) |p| objc.CFRelease(p);
-    const inner = objc.CGPathCreateWithRoundedRect(.{ .x = x + t, .y = y + t, .w = w - 2 * t, .h = h - 2 * t }, radius - t, radius - t, null);
-    defer if (inner) |p| objc.CFRelease(p);
     objc.CGContextSetRGBFillColor(ctx, c[0], c[1], c[2], a);
-    objc.CGContextAddPath(ctx, outer);
-    objc.CGContextAddPath(ctx, inner);
+    roundPath(ctx, x, y, w, h, radius);
+    roundPath(ctx, x + t, y + t, w - 2 * t, h - 2 * t, radius - t);
     objc.CGContextEOFillPath(ctx);
 }
 
@@ -453,9 +475,19 @@ var contrast = false;
 const shadow_m = 12.0;
 const shadow_core = 40.0;
 var shadow_cells: [2][9]?*anyopaque = @splat(@splat(null));
+/// The `card_radius` the slices were made for.
+var shadow_for: f64 = 0;
 
 /// The nine slices of the card shadow for light or dark, made on first use.
 fn shadowCells(dark: bool) *const [9]?*anyopaque {
+    // The slices follow the card's corner radius, so a new radius makes them again.
+    if (shadow_for != card_radius) {
+        for (&shadow_cells) |*set| for (set) |*cell| {
+            if (cell.*) |i| objc.CFRelease(i);
+            cell.* = null;
+        };
+        shadow_for = card_radius;
+    }
     const cells = &shadow_cells[@intFromBool(dark)];
     if (cells[0] != null) return cells;
     const side = 2 * (shadow_core + 2 * shadow_m);
@@ -503,25 +535,20 @@ fn cardShadow(ctx: Id, dark: bool, alpha: f64, x: f64, y: f64, w: f64, h: f64) v
     const ys = [4]f64{ y - shadow_m, y - shadow_m + edge, y + h + shadow_m - edge, y + h + shadow_m };
     objc.CGContextSaveGState(ctx);
     objc.CGContextSetAlpha(ctx, alpha);
+    // The view is flipped and images draw upside down in a flipped context,
+    // so flip the slices back, once.
+    objc.CGContextScaleCTM(ctx, 1, -1);
     for (0..3) |r| for (0..3) |c| {
         const dw = xs[c + 1] - xs[c];
         const dh = ys[r + 1] - ys[r];
-        objc.CGContextSaveGState(ctx);
-        // The view is flipped and images draw upside down in a flipped
-        // context, so flip the slice back.
-        objc.CGContextTranslateCTM(ctx, xs[c], ys[r + 1]);
-        objc.CGContextScaleCTM(ctx, 1, -1);
-        objc.CGContextDrawImage(ctx, .{ .w = dw, .h = dh }, cells[r * 3 + c]);
-        objc.CGContextRestoreGState(ctx);
+        objc.CGContextDrawImage(ctx, .{ .x = xs[c], .y = -ys[r + 1], .w = dw, .h = dh }, cells[r * 3 + c]);
     };
     objc.CGContextRestoreGState(ctx);
 }
 
 /// Limits drawing to a rounded rectangle until the state is restored.
 fn clipRound(ctx: Id, x: f64, y: f64, w: f64, h: f64, radius: f64) void {
-    const path = objc.CGPathCreateWithRoundedRect(.{ .x = x, .y = y, .w = w, .h = h }, radius, radius, null);
-    defer if (path) |p| objc.CFRelease(p);
-    objc.CGContextAddPath(ctx, path);
+    roundPath(ctx, x, y, w, h, radius);
     objc.CGContextClip(ctx);
 }
 
@@ -1319,6 +1346,10 @@ const Win = struct {
     focus: *Doc,
     /// The last draw had scenery still moving.
     busy: bool = false,
+    /// The look, dark or not, until it next changes.
+    dark: ?bool = null,
+    /// What `fitTitlebar` measured, for the window's size it was measured at.
+    tb: struct { ok: bool = false, w: f64 = 0, h: f64 = 0, head: f64 = 0, toggle: f64 = 0, tabs: f64 = 0, radius: f64 = 0 } = .{},
     /// Motion ran since the hover was last resolved, so `tick` looks it up
     /// again when the motion ends.
     hov_stale: bool = false,
@@ -1674,6 +1705,11 @@ fn install(d: *Doc, pg: Page) void {
     d.had_sel = false;
     d.sel_out.snap(0);
     d.snap = true;
+    d.cur_m = null;
+    d.prev_t0 = -1e9;
+    d.jumped = false;
+    d.pop.snap(0);
+    d.flash_n = 0;
     d.gut.snap(gutCols(d));
     d.load_t = CACurrentMediaTime();
     d.rise = pg.fresh;
@@ -5040,9 +5076,14 @@ fn sideClick(w: *Win, p: Point, flags: usize) void {
     w.tdrag = .{ .from = null, .file = path, .cmd = flags & cmd_key != 0, .down = p, .at = p, .grab = p.x - ix + tab_pad, .name = uiLine(row.rel[row.base..], name_font, 1e5), .row = i };
 }
 
-fn isDark(view: Id) bool {
-    const name = objc.utf8(msg(Id, msg(Id, view, "effectiveAppearance", .{}), "name", .{}));
-    return std.mem.indexOf(u8, name, "Dark") != null;
+/// Whether the window's look is dark, asked of AppKit again only after
+/// `lookChanged` forgets the answer.
+fn isDark(w: *Win) bool {
+    if (w.dark) |dk| return dk;
+    const name = objc.utf8(msg(Id, msg(Id, w.view, "effectiveAppearance", .{}), "name", .{}));
+    const dk = std.mem.indexOf(u8, name, "Dark") != null;
+    w.dark = dk;
+    return dk;
 }
 
 const VRow = struct { line: usize, seg: Seg };
@@ -5051,11 +5092,11 @@ const VRow = struct { line: usize, seg: Seg };
 /// the buttons by the traffic lights.
 fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     const now = CACurrentMediaTime();
-    const dark = isDark(w.view);
+    const dark = isDark(w);
     const th = &themes[@intFromBool(dark)];
     const r = msg(Rect, w.view, "bounds", .{});
     dev_px = 1 / @max(1, msg(f64, w.window, "backingScaleFactor", .{}));
-    const full = fitTitlebar(w);
+    const full = fitTitlebar(w, r);
     // A stretched sidebar edge springs back to its limit.
     if (side_stretch.x != 0 or side_stretch.v != 0) {
         _ = side_stretch.step(now);
@@ -5065,7 +5106,7 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     // A closing folder shuts once its rows have folded away.
     finishFolds(now);
     // The sidebar slides in and out, on the first draw it's just there.
-    const shown = sideShown(w);
+    const shown = sideShownAt(r.w);
     const want: f64 = if (shown) 1 else 0;
     const zen_to: f64 = if (conf.zen) 1 else 0;
     if (w.side_seen) {
@@ -5490,11 +5531,21 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         const at_line = if (d.mode == .edit) lineOfRow(d, here.row) else std.math.maxInt(usize);
         const fo = k.focus;
         k.focus = null;
+        const plain = mixRgb(th.bg, th.muted, ga);
+        const here_ink = mixRgb(th.bg, mixRgb(th.bg, th.fg, 0.85), ga);
         for (vis[0..nvis], first..) |v, row| {
             if (v.seg.start != 0) continue;
             var nb: [20]u8 = undefined;
-            const num = std.fmt.bufPrint(&nb, "{d}", .{v.line + 1}) catch continue;
-            var ink = mixRgb(th.bg, if (v.line == at_line) mixRgb(th.bg, th.fg, 0.85) else th.muted, ga);
+            var at = nb.len;
+            var n = v.line + 1;
+            while (true) {
+                at -= 1;
+                nb[at] = '0' + @as(u8, @intCast(n % 10));
+                n /= 10;
+                if (n == 0) break;
+            }
+            const num = nb[at..];
+            var ink = if (v.line == at_line) here_ink else plain;
             if (fo) |fc| {
                 const ls = b.lineStart(v.line);
                 const le = ls + b.line(v.line).len;
@@ -6559,21 +6610,37 @@ fn setLights(w: *Win, a: f64) void {
 /// its tabs start past them; and the window's corner radius, so the cards'
 /// corners nest inside it a gap in. Full screen keeps the last values, and
 /// is what it returns.
-fn fitTitlebar(w: *Win) bool {
-    if (msg(usize, w.window, "styleMask", .{}) & (1 << 14) != 0) return true;
-    const last = msg(Id, w.window, "standardWindowButton:", .{@as(usize, 2)});
-    if (last == null) return false;
-    const at = msg(Rect, last, "convertRect:toView:", .{ msg(Rect, last, "bounds", .{}), w.view });
-    head_h = std.math.clamp(@round(2 * (at.y + at.h / 2 - gap)), 28, 44);
+fn fitTitlebar(w: *Win, r: Rect) bool {
+    if (msg(usize, w.window, "styleMask", .{}) & (1 << 14) != 0) {
+        w.tb.ok = false;
+        return true;
+    }
+    // The numbers change with the window's size, full screen or key state,
+    // which clear `ok`, so they're measured again only then.
+    if (!w.tb.ok or w.tb.w != r.w or w.tb.h != r.h) {
+        const last = msg(Id, w.window, "standardWindowButton:", .{@as(usize, 2)});
+        if (last == null) return false;
+        const at = msg(Rect, last, "convertRect:toView:", .{ msg(Rect, last, "bounds", .{}), w.view });
+        // AppKit's own radius for this window, private, so asked for with care;
+        // macOS 26's radius for a window with a toolbar otherwise.
+        const frame = msg(Id, w.view, "superview", .{});
+        const ask = objc.sel_registerName("_getCachedWindowCornerRadius");
+        const asked: f64 = if (frame != null and msg(bool, frame, "respondsToSelector:", .{ask})) msg(f64, frame, "_getCachedWindowCornerRadius", .{}) else 0;
+        w.tb = .{
+            .ok = true,
+            .w = r.w,
+            .h = r.h,
+            .head = std.math.clamp(@round(2 * (at.y + at.h / 2 - gap)), 28, 44),
+            .toggle = at.x + at.w + 27,
+            .tabs = at.x + at.w + 22,
+            .radius = std.math.clamp((if (asked >= 1) asked else 26) - gap, 6, 24),
+        };
+    }
+    head_h = w.tb.head;
     top_h = gap + head_h + 6;
-    toggle_x = at.x + at.w + 27;
-    tabs_from = at.x + at.w + 22;
-    // AppKit's own radius for this window, private, so asked for with care;
-    // macOS 26's radius for a window with a toolbar otherwise.
-    const frame = msg(Id, w.view, "superview", .{});
-    const ask = objc.sel_registerName("_getCachedWindowCornerRadius");
-    const asked: f64 = if (frame != null and msg(bool, frame, "respondsToSelector:", .{ask})) msg(f64, frame, "_getCachedWindowCornerRadius", .{}) else 0;
-    card_radius = std.math.clamp((if (asked >= 1) asked else 26) - gap, 6, 24);
+    toggle_x = w.tb.toggle;
+    tabs_from = w.tb.tabs;
+    card_radius = w.tb.radius;
     return false;
 }
 
@@ -7110,13 +7177,17 @@ fn toolTip(self: Id, _: Sel, _: Id, _: isize, p: Point, _: ?*anyopaque) callconv
 /// Also the window delegate's key and resign key calls, so the caret shows
 /// only in the key window.
 fn appearanceChanged(self: Id, _: Sel) callconv(.c) void {
+    if (winOf(self)) |w| w.tb.ok = false;
     msg(void, self, "setNeedsDisplay:", .{true});
 }
 
 /// The system's light or dark look changed: crossfade to the new colors.
 /// A window that isn't on screen yet has nothing to fade from.
 fn lookChanged(self: Id, _: Sel) callconv(.c) void {
-    if (winOf(self)) |w| if (msg(bool, w.window, "isVisible", .{})) fadeTheme(w);
+    if (winOf(self)) |w| {
+        w.dark = null;
+        if (msg(bool, w.window, "isVisible", .{})) fadeTheme(w);
+    }
     msg(void, self, "setNeedsDisplay:", .{true});
 }
 
@@ -7578,7 +7649,7 @@ fn previousCard(d: *Doc) void {
 }
 
 fn markdownPreview(d: *Doc) void {
-    preview.toggle(d.window, d.path orelse "", d.ed.text(), &themes[@intFromBool(isDark(d.view))]);
+    preview.toggle(d.window, d.path orelse "", d.ed.text(), &themes[@intFromBool(isDark(d.win))]);
 }
 
 fn comment(d: *Doc) void {
