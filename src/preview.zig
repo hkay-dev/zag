@@ -223,6 +223,27 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     }
     const clip = msg(Id, msg(Id, text, "enclosingScrollView", .{}), "contentView", .{});
     const position = msg(objc.Rect, clip, "bounds", .{});
+    const store = msg(Id, text, "textStorage", .{});
+    const origin = msg(objc.Point, text, "textContainerOrigin", .{});
+    const old_len = msg(usize, store, "length", .{});
+    const old = msg(Id, msg(Id, store, "string", .{}), "copy", .{});
+    defer msg(void, old, "release", .{});
+    // The paragraph at the top of the view: its first character, and how far the view's top is below it.
+    // TextKit 2 is asked directly; touching the view's layoutManager would switch it to TextKit 1,
+    // which draws differently.
+    const tlm = msg(Id, text, "textLayoutManager", .{});
+    const tcs = msg(Id, text, "textContentStorage", .{});
+    var anchor: usize = 0;
+    var above: f64 = 0;
+    var found = false;
+    if (old_len > 0 and tlm != null) {
+        const frag = msg(Id, tlm, "textLayoutFragmentForPosition:", .{objc.Point{ .x = 0, .y = position.y - origin.y }});
+        if (frag != null) {
+            anchor = msg(usize, tcs, "offsetFromLocation:toLocation:", .{ msg(Id, msg(Id, tcs, "documentRange", .{}), "location", .{}), msg(Id, msg(Id, frag, "rangeInElement", .{}), "location", .{}) });
+            above = position.y - origin.y - msg(objc.Rect, frag, "layoutFragmentFrame", .{}).y;
+            found = true;
+        }
+    }
     if (fade) {
         // The same crossfade as view.zig's fadeTheme, on the scroll view's layer.
         const t = msg(Id, objc.class("CATransition"), "animation", .{});
@@ -235,6 +256,20 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     msg(void, text, "setBackgroundColor:", .{color(theme.bg)});
     msg(void, window, "setBackgroundColor:", .{color(theme.bg)});
     msg(void, text, "setLinkTextAttributes:", .{msg(Id, objc.class("NSDictionary"), "dictionaryWithObject:forKey:", .{ link, key_color })});
-    msg(void, msg(Id, text, "textStorage", .{}), "setAttributedString:", .{out});
-    msg(void, text, "scrollPoint:", .{objc.Point{ .x = position.x, .y = position.y }});
+    msg(void, store, "setAttributedString:", .{out});
+    const new_len = msg(usize, store, "length", .{});
+    if (!found or new_len == 0) {
+        msg(void, text, "scrollPoint:", .{objc.Point{ .x = position.x, .y = position.y }});
+        return;
+    }
+    // The paragraph that was at the top of the view stays there: an edit above it shifts its index by
+    // the change in length, one at or below it leaves the index alone.
+    const kept = msg(usize, msg(Id, old, "commonPrefixWithString:options:", .{ msg(Id, store, "string", .{}), @as(usize, 0) }), "length", .{});
+    const shifted: isize = @as(isize, @intCast(anchor)) + @as(isize, @intCast(new_len)) - @as(isize, @intCast(old_len));
+    const at = if (anchor < kept) anchor else @min(@max(@as(usize, @intCast(@max(shifted, 0))), kept), new_len - 1);
+    // Heights below the view are only estimated until laid out, so lay out all of it first.
+    msg(void, tlm, "ensureLayoutForRange:", .{msg(Id, tcs, "documentRange", .{})});
+    const place = msg(Id, tcs, "locationFromLocation:withOffset:", .{ msg(Id, msg(Id, tcs, "documentRange", .{}), "location", .{}), @as(isize, @intCast(at)) });
+    const top = msg(objc.Rect, msg(Id, tlm, "textLayoutFragmentForLocation:", .{place}), "layoutFragmentFrame", .{}).y;
+    msg(void, text, "scrollPoint:", .{objc.Point{ .x = position.x, .y = top + origin.y + above }});
 }
