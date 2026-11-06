@@ -192,7 +192,7 @@ fn padL(d: *const Doc) f64 {
 fn gutCols(d: *const Doc) f64 {
     if (!conf.line_numbers) return 0;
     var digits: usize = 2;
-    var n = d.ed.buf.lines();
+    var n = d.file.ed.buf.lines();
     while (n >= 100) : (n /= 10) digits += 1;
     return f(digits) + 1.5;
 }
@@ -945,7 +945,7 @@ fn flashStart(d: *Doc) void {
 /// Adds the bytes `lo..hi` of the text to the flash, up to `max_flash` spans.
 fn flashAdd(d: *Doc, lo: usize, hi: usize) void {
     if (lo >= hi or d.flash_n == max_flash) return;
-    if (d.flash_n == 0) msg(void, d.view, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("barHold:"), @as(Id, null), @max(d.flash_t0 + flash_hold - CACurrentMediaTime(), 0) });
+    if (d.flash_n == 0) msg(void, d.win.view, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("barHold:"), @as(Id, null), @max(d.flash_t0 + flash_hold - CACurrentMediaTime(), 0) });
     d.flash[d.flash_n] = .{ lo, hi };
     d.flash_n += 1;
 }
@@ -1017,7 +1017,7 @@ fn haptic(kind: enum { alignment, level }) void {
 
 /// How long the file on show fades in: a fresh one rises slower than a tab switch.
 fn loadDur(d: *const Doc) f64 {
-    return if (d.rise) load_time else fade_time;
+    return if (d.file.rise) load_time else fade_time;
 }
 
 /// True while scrolling, the line band, a selection fade or the quick open
@@ -1087,7 +1087,7 @@ fn tick(self: Id, _: Sel, _: Id) callconv(.c) void {
 
 /// A hold is over: one redraw, and any fade out takes it from there.
 fn barHold(self: Id, _: Sel, key: Id) callconv(.c) void {
-    for (docs.items) |d| if (d.view == self and d.caret == key) {
+    for (docs.items) |d| if (d.win.view == self and d.caret == key) {
         d.bar_due = false;
     };
     msg(void, self, "setNeedsDisplay:", .{true});
@@ -1103,14 +1103,14 @@ fn hits(a: Rect, b: Rect) bool {
 const Mode = enum { edit, find, line, open, replace, command };
 const Drag = enum { char, word, line };
 
-/// A file a window holds but isn't showing: its other tabs, edits and all.
+/// A file held by a card, on show or parked in another tab.
 const Page = struct {
     ed: Editor,
-    path: ?[:0]u8,
-    lang: *const syntax.Lang,
-    stamp: ?files.Stamp,
-    sx: f64,
-    sy: f64,
+    path: ?[:0]u8 = null,
+    lang: *const syntax.Lang = &syntax.plain,
+    stamp: ?files.Stamp = null,
+    sx: f64 = 0,
+    sy: f64 = 0,
     /// Its tab's id, which stays with the file while the window holds it.
     id: u32,
     /// An untitled file's draft, saved as it changes, and the
@@ -1119,9 +1119,26 @@ const Page = struct {
     drafted: u64 = 0,
     draft_armed: u64 = 0,
     /// Just read from disk, so showing it rises in; set by the loaders.
-    fresh: bool = false,
+    rise: bool = false,
     /// Its sidebar row's unsaved dot, 0 to 1.
     dot: Tween = .{ .dur = fade_time },
+    /// An untitled file's first line, updated after typing pauses.
+    title: [48]u8 = undefined,
+    title_len: usize = 0,
+
+    fn name(p: *const Page) []const u8 {
+        return if (p.path) |path| std.fs.path.basename(path) else if (p.title_len > 0) p.title[0..p.title_len] else "Untitled";
+    }
+
+    /// Untitled files keep drafts, so only named files show an unsaved dot.
+    fn edited(p: *const Page) bool {
+        return p.path != null and p.ed.buf.dirty();
+    }
+
+    /// Closing an untitled file also discards its draft.
+    fn loses(p: *const Page) bool {
+        return if (p.path == null) p.ed.text().len > 0 else p.ed.buf.dirty();
+    }
 
     /// Closing its tab: an untitled file's draft goes too.
     fn deinit(p: *Page) void {
@@ -1147,10 +1164,9 @@ fn newId() u32 {
 }
 
 const Doc = struct {
-    ed: Editor,
-    /// The file on show's tab, and where it sits among the window's tabs:
+    file: Page,
+    /// The shown file's place among the card's tabs:
     /// `pages` are the others, in tab order with this one taken out.
-    id: u32 = 0,
     at: usize = 0,
     /// The header's tabs as drawn, folding ones included, and the active
     /// tab's highlight (x and width), which springs from tab to tab.
@@ -1177,19 +1193,8 @@ const Doc = struct {
     plus_t: Tween = .{ .dur = fade_time },
     /// A click on the +: its fill shows at once and fades after the release.
     plus_down: Tween = .{ .dur = press_time },
-    /// Absolute path, or null while untitled.
-    path: ?[:0]u8 = null,
-    /// Its sidebar row's unsaved dot, 0 to 1; goes with the file between pages.
-    dot: Tween = .{ .dur = fade_time },
-    /// While untitled, where its draft is kept; see `Page.draft`.
-    draft: ?[:0]u8 = null,
-    drafted: u64 = 0,
-    draft_armed: u64 = 0,
-    lang: *const syntax.Lang = &syntax.plain,
-    /// The window it's a card in, and that window's NSWindow and view.
+    /// The window this card belongs to.
     win: *Win = undefined,
-    window: Id = null,
-    view: Id = null,
     /// The card's pane in the view: where it is now, its size now, and the
     /// size it's headed for, which wrapping uses. The card sits a gap in
     /// from the pane's edges, so it draws in its pane's coordinates.
@@ -1204,9 +1209,7 @@ const Doc = struct {
     closing: bool = false,
     /// When a refused split last shook this card.
     card_shake_t0: f64 = -1,
-    /// Where scrolling is headed; vx and vy are where it shows right now.
-    sx: f64 = 0,
-    sy: f64 = 0,
+    /// Where scrolling shows right now.
     vx: f64 = 0,
     vy: f64 = 0,
     /// Typewriter mode last centered on this caret offset and text height.
@@ -1291,8 +1294,6 @@ const Doc = struct {
     /// end, for rows `cols` cells wide.
     vfirst: std.ArrayList(u32) = .empty,
     cols: usize = 0,
-    /// The file's change time and size when Zag last read or wrote it.
-    stamp: ?files.Stamp = null,
     mode: Mode = .edit,
     prompt: std.ArrayList(u8) = .empty,
     /// Find and replace: the replacement, and which field takes typing.
@@ -1361,7 +1362,6 @@ const Doc = struct {
     /// rising when it was just read from disk, else a plain fade. The caret
     /// fades in with it.
     load_t: f64 = -1,
-    rise: bool = false,
     caret_fade: bool = false,
     /// An empty window's hint: its opacity, and since when the card has
     /// been blank (-1 when it isn't).
@@ -1379,26 +1379,19 @@ const Doc = struct {
     head_marks: [max_marks]f64 = undefined,
     head_n: usize = 0,
 
-    /// An untitled file goes by its first line, kept in `title` as it's typed.
-    title: [48]u8 = undefined,
-    title_len: usize = 0,
-
     fn name(d: *const Doc) []const u8 {
-        return if (d.path) |p| std.fs.path.basename(p) else if (d.title_len > 0) d.title[0..d.title_len] else "Untitled";
+        return d.file.name();
     }
 
     /// Unsaved changes to a file, on show or in any page. Untitled files
     /// keep themselves as drafts, so they don't count.
-    fn dirty(d: *const Doc) bool {
-        if (d.path != null and d.ed.buf.dirty()) return true;
-        for (d.pages.items) |p| if (p.path != null and p.ed.buf.dirty()) return true;
+    fn dirty(d: *Doc) bool {
+        for (0..tabCount(d)) |j| if (tabPage(d, j).edited()) return true;
         return false;
     }
 
     fn deinit(d: *Doc) void {
-        d.ed.deinit(gpa);
-        if (d.path) |p| gpa.free(p);
-        dropDraft(&d.draft);
+        d.file.deinit();
         d.prompt.deinit(gpa);
         d.with.deinit(gpa);
         d.held.deinit(gpa);
@@ -1659,22 +1652,23 @@ pub fn open(path: []const u8, into: ?*Doc) void {
     if (files.isDir(abs)) {
         setRoot(abs);
         const d = into orelse keyDoc() orelse newDoc() orelse return;
-        if (sideShown(d.win)) refreshAll() else startPrompt(d, .open);
+        if (!sideShown(d.win)) startPrompt(d, .open);
         return;
     }
     defer gpa.free(abs);
     for (docs.items) |o| {
         if (o.closing) continue;
-        if (o.path != null and std.mem.eql(u8, o.path.?, abs)) return front(o);
-        if (pageIndex(o, abs)) |i| {
-            showPage(o, i);
-            return front(o);
+        for (0..tabCount(o)) |j| {
+            const p = tabPage(o, j);
+            if (p.path != null and std.mem.eql(u8, p.path.?, abs)) {
+                showTab(o, j);
+                return front(o);
+            }
         }
     }
     var pg = loadPage(abs) orelse return;
     const d = into orelse newDoc() orelse return pg.deinit();
-    if (!park(d, true)) return pg.deinit();
-    install(d, pg);
+    putTab(d, pg, d.at + 1);
     noteRecent(abs);
     front(d);
 }
@@ -1682,7 +1676,7 @@ pub fn open(path: []const u8, into: ?*Doc) void {
 /// Brings `d`'s window forward with `d` as its focused card.
 fn front(d: *Doc) void {
     focus(d);
-    showWin(d.window);
+    showWin(d.win.window);
 }
 
 /// Set for a Dev build (`Zag Dev`, bundle id ending in `.dev`), which runs
@@ -1734,16 +1728,15 @@ fn loadPage(abs: [:0]const u8) ?Page {
         ed.select(c, c);
         sy = pl.sy;
     }
-    return .{ .ed = ed, .path = z, .lang = syntax.forPath(abs), .stamp = files.stamp(abs), .sx = 0, .sy = sy, .id = newId(), .fresh = true };
+    return .{ .ed = ed, .path = z, .lang = syntax.forPath(abs), .stamp = files.stamp(abs), .sy = sy, .id = newId(), .rise = true };
 }
 
-fn pageIndex(d: *const Doc, abs: []const u8) ?usize {
-    for (d.pages.items, 0..) |p, i| if (p.path != null and std.mem.eql(u8, p.path.?, abs)) return i;
-    return null;
+fn blankPage() ?Page {
+    return .{ .ed = Editor.init(gpa, "") catch return null, .id = newId() };
 }
 
 fn isBlank(d: *const Doc) bool {
-    return d.path == null and d.ed.text().len == 0;
+    return d.file.path == null and d.file.ed.text().len == 0;
 }
 
 /// The card's only tab is an empty untitled file, which the next file it
@@ -1759,39 +1752,29 @@ fn replaceable(d: *const Doc) bool {
 /// can't.
 fn park(d: *Doc, after: bool) bool {
     if (replaceable(d)) {
-        d.ed.deinit(gpa);
-        dropDraft(&d.draft);
+        d.file.ed.deinit(gpa);
+        dropDraft(&d.file.draft);
         return true;
     }
+    // Flush its name before the view's pending retitle can see another file.
+    retitle(d);
     d.pages.insert(gpa, d.at, asPage(d)) catch return false;
-    // Its name may still wait on a retitle that now goes to the next tab.
-    if (slotOf(d, d.id)) |k| d.slots.items[k].drop();
-    rememberPlace(d);
+    rememberPlace(&d.file);
     if (after) d.at += 1;
     return true;
 }
 
 /// Shows `pg` in the window, which must have just been parked.
 fn install(d: *Doc, pg: Page) void {
-    d.ed = pg.ed;
-    d.path = pg.path;
-    d.lang = pg.lang;
-    d.stamp = pg.stamp;
-    d.sx = pg.sx;
-    d.sy = pg.sy;
-    d.id = pg.id;
-    d.draft = pg.draft;
-    d.drafted = pg.drafted;
-    d.draft_armed = pg.draft_armed;
-    d.dot = pg.dot;
+    d.file = pg;
     d.center_at = std.math.maxInt(usize);
     clearSyntax(d);
     d.vfirst.clearRetainingCapacity();
     d.cols = 0;
     d.mode = .edit;
     d.note = "";
-    d.ys.snap(d.sy);
-    d.xs.snap(d.sx);
+    d.ys.snap(d.file.sy);
+    d.xs.snap(d.file.sx);
     d.band_on = false;
     d.had_sel = false;
     d.sel_out.snap(0);
@@ -1803,10 +1786,9 @@ fn install(d: *Doc, pg: Page) void {
     d.flash_n = 0;
     d.gut.snap(gutCols(d));
     d.load_t = CACurrentMediaTime();
-    d.rise = pg.fresh;
     d.caret_fade = true;
     var rebuilt = false;
-    if (d.path) |p| if (relOf(p)) |rel| {
+    if (d.file.path) |p| if (relOf(p)) |rel| {
         // The folders are only read again when one had to open or the file
         // isn't listed yet (made since the last read).
         if (tree.reveal(gpa, rel) or (!tree_stale and !tree.has(rel))) {
@@ -1870,41 +1852,19 @@ fn pageOf(d: *const Doc, j: usize) usize {
     return if (j < d.at) j else j - 1;
 }
 
-fn tabId(d: *const Doc, j: usize) u32 {
-    return if (j == d.at) d.id else d.pages.items[pageOf(d, j)].id;
-}
-
-fn tabDraft(d: *const Doc, j: usize) ?[]const u8 {
-    return if (j == d.at) d.draft else d.pages.items[pageOf(d, j)].draft;
+fn tabPage(d: *Doc, j: usize) *Page {
+    return if (j == d.at) &d.file else &d.pages.items[pageOf(d, j)];
 }
 
 /// The file on show as a page, for moving it; the card still points at it.
 fn asPage(d: *const Doc) Page {
-    return .{ .ed = d.ed, .path = d.path, .lang = d.lang, .stamp = d.stamp, .sx = d.sx, .sy = d.sy, .id = d.id, .draft = d.draft, .drafted = d.drafted, .draft_armed = d.draft_armed, .dot = d.dot };
+    var pg = d.file;
+    pg.rise = false;
+    return pg;
 }
 
-fn tabPath(d: *const Doc, j: usize) ?[]const u8 {
-    return if (j == d.at) d.path else d.pages.items[pageOf(d, j)].path;
-}
-
-/// Tab `j` shows the dot of unsaved changes: a file with edits. An
-/// untitled file keeps itself as a draft, so it never does.
-fn tabDirty(d: *const Doc, j: usize) bool {
-    return tabPath(d, j) != null and if (j == d.at) d.ed.buf.dirty() else d.pages.items[pageOf(d, j)].ed.buf.dirty();
-}
-
-/// Closing tab `j` would lose something: edits to a file, or an untitled
-/// file's text, whose draft goes with it.
-fn tabLoses(d: *const Doc, j: usize) bool {
-    return if (j == d.at) loses(d.path, &d.ed) else loses(d.pages.items[pageOf(d, j)].path, &d.pages.items[pageOf(d, j)].ed);
-}
-
-fn loses(path: ?[:0]const u8, ed: *const Editor) bool {
-    return if (path == null) ed.text().len > 0 else ed.buf.dirty();
-}
-
-fn tabIndex(d: *const Doc, id: u32) ?usize {
-    for (0..tabCount(d)) |j| if (tabId(d, j) == id) return j;
+fn tabIndex(d: *Doc, id: u32) ?usize {
+    for (0..tabCount(d)) |j| if (tabPage(d, j).id == id) return j;
     return null;
 }
 
@@ -1922,12 +1882,7 @@ pub fn stepTab(by: isize) void {
 /// ⌘T: an untitled file in a new tab right of the one on show.
 fn newTab(d: *Doc) void {
     if (isBlank(d)) return;
-    const ed = Editor.init(gpa, "") catch return;
-    if (!park(d, true)) {
-        var e = ed;
-        return e.deinit(gpa);
-    }
-    install(d, .{ .ed = ed, .path = null, .lang = &syntax.plain, .stamp = null, .sx = 0, .sy = 0, .id = newId() });
+    putTab(d, blankPage() orelse return, d.at + 1);
 }
 
 /// Closes tab `j`, asking first when it has unsaved changes. A card's last
@@ -1936,12 +1891,12 @@ fn newTab(d: *Doc) void {
 /// left at the end.
 fn closeTab(d: *Doc, at: usize) void {
     if (tabCount(d) == 1) {
-        if (d.win.cards.pane != null) return msg(void, d.window, "performClose:", .{@as(Id, null)});
-        if (loses(d.path, &d.ed) and !keepOrDrop(d)) return;
+        if (d.win.cards.pane != null) return msg(void, d.win.window, "performClose:", .{@as(Id, null)});
+        if (d.file.loses() and !keepOrDrop(d)) return;
         return foldCard(d);
     }
     var j = at;
-    if (tabLoses(d, j)) {
+    if (tabPage(d, j).loses()) {
         showTab(d, j);
         j = d.at;
         if (!keepOrDrop(d)) return;
@@ -1951,21 +1906,18 @@ fn closeTab(d: *Doc, at: usize) void {
         pg.deinit();
         return refreshWin(d.win);
     }
-    rememberPlace(d);
-    d.ed.deinit(gpa);
-    if (d.path) |p| gpa.free(p);
-    d.path = null;
-    dropDraft(&d.draft);
+    rememberPlace(&d.file);
+    d.file.ed.deinit(gpa);
+    if (d.file.path) |p| gpa.free(p);
+    d.file.path = null;
+    dropDraft(&d.file.draft);
     swapNext(d);
     checkOutside(d);
 }
 
 /// Asks whether to save the file on show before it goes. False to keep it.
 fn keepOrDrop(d: *Doc) bool {
-    front(d);
-    var buf: [300]u8 = undefined;
-    const title = std.fmt.bufPrint(&buf, "Save changes to {s}?", .{d.name()}) catch "Save changes?";
-    return switch (askAlert(title, "Your changes are lost if you don't save them.", &.{ "Save", "Don't Save", "Cancel" })) {
+    return switch (askSave(d, 1)) {
         1000 => save(d, false),
         1001 => true,
         else => false,
@@ -1978,10 +1930,10 @@ fn named(d: *Doc) void {
     dropHead(d);
     retitle(d);
     if (d.win.focus != d) return;
-    msg(void, d.window, "setTitle:", .{objc.str(d.name())});
+    msg(void, d.win.window, "setTitle:", .{objc.str(d.name())});
     // Window menu, Mission Control and the Dock show the title; the card's header shows the name.
-    const url = if (d.path) |p| msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(p)}) else null;
-    msg(void, d.window, "setRepresentedURL:", .{url});
+    const url = if (d.file.path) |p| msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(p)}) else null;
+    msg(void, d.win.window, "setRepresentedURL:", .{url});
 }
 
 /// The key window's focused card. A Dev build never has a key window, so
@@ -2062,7 +2014,7 @@ fn splitOff(d: *Doc, down: bool, before: bool, dropped: bool) ?*Doc {
         e.size = if (down) .{ .x = d.size.x, .y = 2 * gap } else .{ .x = 2 * gap, .y = d.size.y };
     }
     e.fin = if (down) .{ .x = d.fin.x, .y = room / 2 + 2 * gap } else .{ .x = room / 2 + 2 * gap, .y = d.fin.y };
-    msg(void, d.window, "invalidateCursorRectsForView:", .{d.view});
+    msg(void, d.win.window, "invalidateCursorRectsForView:", .{d.win.view});
     return e;
 }
 
@@ -2075,13 +2027,12 @@ fn takeTab(d: *Doc, j: usize) ?Page {
         refreshWin(d.win);
         return pg;
     }
-    var blank: ?Editor = null;
-    if (tabCount(d) == 1) blank = Editor.init(gpa, "") catch return null;
+    var blank: ?Page = null;
+    if (tabCount(d) == 1) blank = blankPage() orelse return null;
+    retitle(d);
     const pg = asPage(d);
-    d.path = null;
-    d.draft = null;
-    if (blank) |ed| {
-        install(d, .{ .ed = ed, .path = null, .lang = &syntax.plain, .stamp = null, .sx = 0, .sy = 0, .id = newId() });
+    if (blank) |p| {
+        install(d, p);
     } else {
         swapNext(d);
     }
@@ -2104,12 +2055,11 @@ fn putTab(e: *Doc, pg: Page, k: usize) void {
 /// slide over to make room.
 fn reorderTab(d: *Doc, j: usize, k: usize) void {
     if (j == k) return;
-    const id = tabId(d, j);
+    const id = tabPage(d, j).id;
     if (j == d.at) {
         d.at = k;
     } else {
-        const pg = d.pages.orderedRemove(pageOf(d, j));
-        if (j < d.at) d.at -= 1;
+        const pg = dropPage(d, j);
         if (k <= d.at) {
             d.pages.insert(gpa, k, pg) catch return;
             d.at += 1;
@@ -2119,7 +2069,7 @@ fn reorderTab(d: *Doc, j: usize, k: usize) void {
     for (d.slots.items) |*s| s.flip = s.x + s.shift.x;
     const i = slotOf(d, id) orelse return;
     const s = d.slots.orderedRemove(i);
-    const at = if (k + 1 < tabCount(d)) slotOf(d, tabId(d, k + 1)) orelse 0 else d.slots.items.len;
+    const at = if (k + 1 < tabCount(d)) slotOf(d, tabPage(d, k + 1).id) orelse 0 else d.slots.items.len;
     d.slots.insert(gpa, at, s) catch {};
     refresh(d);
 }
@@ -2140,7 +2090,7 @@ fn foldCard(d: *Doc) void {
     msg(void, d.caret, "setHidden:", .{true});
     d.caret_at = null;
     focus(firstPane(up.kids[1 - g]));
-    msg(void, d.window, "invalidateCursorRectsForView:", .{d.view});
+    msg(void, d.win.window, "invalidateCursorRectsForView:", .{d.win.view});
 }
 
 fn nodeOf(n: *Node, d: *const Doc) ?*Node {
@@ -2215,7 +2165,7 @@ fn freeNodes(n: *Node) void {
 
 /// Lets go of a card that's out of its window's layout, or whose window closed.
 fn closePane(d: *Doc) void {
-    rememberPlace(d);
+    rememberPlace(&d.file);
     msg(void, d.caret, "removeFromSuperlayer", .{});
     access.drop(d);
     for (docs.items, 0..) |x, i| if (x == d) {
@@ -2347,7 +2297,7 @@ fn listPanes(n: *const Node, out: []*Doc, at: usize) usize {
 /// A doc nothing has been typed into, for a file to open into.
 pub fn blankDoc() ?*Doc {
     const d = keyDoc() orelse return null;
-    return if (d.path == null and d.ed.text().len == 0) d else null;
+    return if (isBlank(d)) d else null;
 }
 
 /// How many windows are open.
@@ -2441,7 +2391,7 @@ fn finishWin(w: *Win) void {
 /// The caller puts it in the layout.
 fn newPane(w: *Win) ?*Doc {
     const d = gpa.create(Doc) catch return null;
-    d.* = .{ .ed = Editor.init(gpa, "") catch return null, .id = newId(), .win = w, .window = w.window, .view = w.view };
+    d.* = .{ .file = blankPage() orelse return null, .win = w };
     if (conf.focus != .off) d.focus_a.snap(1);
     d.gut.snap(gutCols(d));
     docs.append(gpa, d) catch return null;
@@ -2470,46 +2420,51 @@ fn alert(text: []const u8, detail: []const u8) void {
     _ = askAlert(text, detail, &.{});
 }
 
-/// Asks to save the window's unsaved files: the one on show and its pages.
-/// Closing the window asks about untitled files' text too, since their
-/// drafts go with it; quitting keeps the drafts for next time and doesn't.
-/// False when the user cancels.
-fn settle(d: *Doc, quit: bool) bool {
-    var n: usize = @intFromBool(asks(quit, d.path, &d.ed));
-    var page: usize = 0;
-    for (d.pages.items, 0..) |*p, i| if (asks(quit, p.path, &p.ed)) {
-        n += 1;
-        page = i;
-    };
-    if (n == 0) return true;
-    if (n == 1 and !asks(quit, d.path, &d.ed)) showPage(d, page);
+fn askSave(d: *Doc, n: usize) isize {
     front(d);
     var buf: [300]u8 = undefined;
     const title = if (n == 1)
         std.fmt.bufPrint(&buf, "Save changes to {s}?", .{d.name()}) catch "Save changes?"
     else
         std.fmt.bufPrint(&buf, "Save changes to {d} files?", .{n}) catch "Save changes?";
-    return switch (askAlert(title, "Your changes are lost if you don't save them.", &.{ if (n == 1) "Save" else "Save All", "Don't Save", "Cancel" })) {
+    return askAlert(title, "Your changes are lost if you don't save them.", &.{ if (n == 1) "Save" else "Save All", "Don't Save", "Cancel" });
+}
+
+/// Asks to save the window's unsaved files: the one on show and its pages.
+/// Closing the window asks about untitled files' text too, since their
+/// drafts go with it; quitting keeps the drafts for next time and doesn't.
+/// False when the user cancels.
+fn settle(d: *Doc, quit: bool) bool {
+    var n: usize = 0;
+    var tab: usize = 0;
+    for (0..tabCount(d)) |j| if (asks(quit, tabPage(d, j))) {
+        n += 1;
+        tab = j;
+    };
+    if (n == 0) return true;
+    if (n == 1) showTab(d, tab);
+    return switch (askSave(d, n)) {
         1000 => saveAll(d, quit),
         1001 => true,
         else => false,
     };
 }
 
-fn asks(quit: bool, path: ?[:0]const u8, ed: *const Editor) bool {
-    return if (quit) path != null and ed.buf.dirty() else loses(path, ed);
+fn asks(quit: bool, p: *const Page) bool {
+    return if (quit) p.edited() else p.loses();
 }
 
 /// Saves the file on show, then each page `settle` asked about in turn.
 fn saveAll(d: *Doc, quit: bool) bool {
-    if (asks(quit, d.path, &d.ed) and !save(d, false)) return false;
-    while (true) {
-        const i = for (d.pages.items, 0..) |*p, j| {
-            if (asks(quit, p.path, &p.ed)) break j;
-        } else return true;
-        showPage(d, i);
+    const shown = d.at;
+    for (0..tabCount(d)) |i| {
+        // Save the shown file first, then the others in tab order.
+        const j = if (i == 0) shown else if (i <= shown) i - 1 else i;
+        if (!asks(quit, tabPage(d, j))) continue;
+        showTab(d, j);
         if (!save(d, false)) return false;
     }
+    return true;
 }
 
 /// For quitting: every window with unsaved changes to files asks first.
@@ -2522,7 +2477,7 @@ fn save(d: *Doc, as: bool) bool {
     // Save As writes before the doc takes the new path, so a failed write
     // leaves it as it was.
     var fresh: ?[:0]u8 = null;
-    if (d.path == null or as) {
+    if (d.file.path == null or as) {
         const p = msg(Id, objc.class("NSSavePanel"), "savePanel", .{});
         msg(void, p, "setNameFieldStringValue:", .{objc.str(d.name())});
         if (root) |r| msg(void, p, "setDirectoryURL:", .{msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(r)})});
@@ -2531,13 +2486,13 @@ fn save(d: *Doc, as: bool) bool {
         if (msg(isize, p, "runModal", .{}) != 1) return false;
         const path = objc.utf8(msg(Id, msg(Id, p, "URL", .{}), "path", .{}));
         fresh = gpa.dupeSentinel(u8, path, 0) catch return false;
-    } else if (files.stamp(d.path.?)) |now| {
+    } else if (files.stamp(d.file.path.?)) |now| {
         // Another app wrote the file since Zag read or saved it. A deleted
         // file is just written again.
-        if (!sameStamp(now, d.stamp) and !askOverwrite(d)) return false;
+        if (!sameStamp(now, d.file.stamp) and !askOverwrite(d)) return false;
     }
-    const to = fresh orelse d.path.?;
-    files.write(to, d.ed.text()) catch {
+    const to = fresh orelse d.file.path.?;
+    files.write(to, d.file.ed.text()) catch {
         alert("Couldn't save this file.", to);
         if (fresh) |z| gpa.free(z);
         return false;
@@ -2549,22 +2504,22 @@ fn save(d: *Doc, as: bool) bool {
             return false;
         };
         gpa.free(z);
-        preview.rename(d.window, d.path orelse "", abs);
-        if (d.path) |old| gpa.free(old);
-        d.path = abs;
-        d.lang = syntax.forPath(abs);
+        preview.rename(d.win.window, d.file.path orelse "", abs);
+        if (d.file.path) |old| gpa.free(old);
+        d.file.path = abs;
+        d.file.lang = syntax.forPath(abs);
         clearSyntax(d);
         named(d);
     }
-    d.ed.buf.markSaved();
-    dropDraft(&d.draft);
-    d.stamp = files.stamp(d.path.?);
+    d.file.ed.buf.markSaved();
+    dropDraft(&d.file.draft);
+    d.file.stamp = files.stamp(d.file.path.?);
     d.note = "saved";
-    noteRecent(d.path.?);
-    if (conf_path != null and std.mem.eql(u8, d.path.?, conf_path.?)) loadSettings();
+    noteRecent(d.file.path.?);
+    if (conf_path != null and std.mem.eql(u8, d.file.path.?, conf_path.?)) loadSettings();
     // A new file shows in the tree when its folder's rows are listed; every
     // file's dot goes away.
-    if (relOf(d.path.?)) |rel| if (!tree.has(rel) and listed(std.fs.path.dirname(rel))) {
+    if (relOf(d.file.path.?)) |rel| if (!tree.has(rel) and listed(std.fs.path.dirname(rel))) {
         rebuildTree();
         refreshAll();
         return true;
@@ -2666,15 +2621,12 @@ fn loadPlaces() void {
     }
 }
 
-/// Remembers where the caret and scroll were in `d`'s file, newest first.
-fn rememberPlace(d: *const Doc) void {
-    rememberAt(d.path orelse return, d.ed.cur, d.sy);
-}
-
-fn rememberAt(p: []const u8, cur: usize, sy: f64) void {
+/// Remembers the file's caret and scroll, newest first.
+fn rememberPlace(pg: *const Page) void {
+    const p = pg.path orelse return;
     loadPlaces();
     var buf: [64]u8 = undefined;
-    const head = std.fmt.bufPrint(&buf, "{d}\t{d}\t", .{ cur, @as(i64, @intFromFloat(sy)) }) catch return;
+    const head = std.fmt.bufPrint(&buf, "{d}\t{d}\t", .{ pg.ed.cur, @as(i64, @intFromFloat(pg.sy)) }) catch return;
     const entry = std.mem.concat(gpa, u8, &.{ head, p }) catch return;
     var i: usize = 0;
     while (i < places.items.len) {
@@ -2717,7 +2669,7 @@ fn placeOf(p: []const u8) ?Place {
 pub fn saveSession() void {
     saveDrafts();
     quitting = true;
-    for (docs.items) |d| rememberPlace(d);
+    for (docs.items) |d| rememberPlace(&d.file);
     if (places_due) writePlaces(null);
     const out = msg(Id, objc.class("NSMutableArray"), "array", .{});
     const order = msg(Id, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "orderedWindows", .{});
@@ -2754,15 +2706,15 @@ fn saveLayout(w: *const Win, n: *const Node, out: *std.ArrayList(u8)) !usize {
     if (n.pane) |d| {
         var kept: usize = 0;
         var on: usize = 0;
-        for (0..tabCount(d)) |j| if (tabPath(d, j) != null or tabDraft(d, j) != null) {
+        for (0..tabCount(d)) |j| if (tabPage(d, j).path != null or tabPage(d, j).draft != null) {
             if (j == d.at) on = kept;
             kept += 1;
         };
         try out.print(gpa, "\t#{d},{d},{d}", .{ kept, on, @intFromBool(w.focus == d) });
         for (0..tabCount(d)) |j| {
-            if (tabPath(d, j)) |p| {
+            if (tabPage(d, j).path) |p| {
                 try out.print(gpa, "\t{s}", .{p});
-            } else if (tabDraft(d, j)) |p| try out.print(gpa, "\t*{s}", .{p});
+            } else if (tabPage(d, j).draft) |p| try out.print(gpa, "\t*{s}", .{p});
         }
         return kept;
     }
@@ -2864,7 +2816,7 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
         if (!files.exists(z)) continue;
         var pg = (if (draft) loadDraft(z) else loadPage(z)) orelse continue;
         // A parked page isn't rising in.
-        pg.fresh = false;
+        pg.rise = false;
         d.pages.append(gpa, pg) catch {
             // A draft that can't open stays on disk for `adoptDrafts`.
             pg.deinitKeepDraft();
@@ -2886,12 +2838,12 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
     // so a tab that stays parked for many launches doesn't lose its place.
     for (d.pages.items, 0..) |pg, k| {
         if (k == tabs - 1 and on == tabs - 1) break;
-        if (pg.path) |pp| rememberAt(pp, pg.ed.cur, pg.sy);
+        rememberPlace(&pg);
     }
-    d.ed.deinit(gpa);
-    dropDraft(&d.draft);
+    d.file.ed.deinit(gpa);
+    dropDraft(&d.file.draft);
     var pg = d.pages.orderedRemove(on);
-    pg.fresh = on == tabs - 1;
+    pg.rise = on == tabs - 1;
     d.at = on;
     install(d, pg);
     if (head[2] == 1) lit.* = d;
@@ -2926,28 +2878,25 @@ fn saveDraftsNow(_: Id, _: Sel, _: Id) callconv(.c) void {
 /// Writes every untitled file that changed since its draft last did. One
 /// that's empty again loses its draft.
 fn saveDrafts() void {
-    for (docs.items) |d| {
-        keepDraft(d.path, &d.ed, &d.draft, &d.drafted);
-        for (d.pages.items) |*p| keepDraft(p.path, &p.ed, &p.draft, &p.drafted);
-    }
+    for (docs.items) |d| for (0..tabCount(d)) |j| keepDraft(tabPage(d, j));
 }
 
-fn keepDraft(path: ?[:0]u8, ed: *const Editor, draft: *?[:0]u8, drafted: *u64) void {
-    if (path != null or ed.buf.changes == drafted.*) return;
-    if (ed.text().len == 0) {
-        dropDraft(draft);
-        drafted.* = ed.buf.changes;
+fn keepDraft(p: *Page) void {
+    if (p.path != null or p.ed.buf.changes == p.drafted) return;
+    if (p.ed.text().len == 0) {
+        dropDraft(&p.draft);
+        p.drafted = p.ed.buf.changes;
         return;
     }
-    if (draft.* == null) {
+    if (p.draft == null) {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         const dir = draftsDir(&buf) orelse return;
         const secs: u64 = @intFromFloat(@max(msg(f64, objc.class("NSDate"), "timeIntervalSinceReferenceDate", .{}), 0));
-        draft.* = std.fmt.allocPrintSentinel(gpa, "{s}/{d}-{d}.txt", .{ dir, secs, newId() }, 0) catch return;
-        files.makeParent(draft.*.?) catch return;
+        p.draft = std.fmt.allocPrintSentinel(gpa, "{s}/{d}-{d}.txt", .{ dir, secs, newId() }, 0) catch return;
+        files.makeParent(p.draft.?) catch return;
     }
-    files.write(draft.*.?, ed.text()) catch return;
-    drafted.* = ed.buf.changes;
+    files.write(p.draft.?, p.ed.text()) catch return;
+    p.drafted = p.ed.buf.changes;
 }
 
 /// Deletes a draft once its text is saved to a file or its tab is closed.
@@ -2972,7 +2921,12 @@ fn loadDraft(abs: [:0]const u8) ?Page {
         ed.deinit(gpa);
         return null;
     };
-    return .{ .ed = ed, .path = null, .lang = &syntax.plain, .stamp = null, .sx = 0, .sy = 0, .id = newId(), .draft = own, .drafted = ed.buf.changes, .fresh = true };
+    var pg: Page = .{ .ed = ed, .id = newId(), .draft = own, .drafted = ed.buf.changes, .rise = true };
+    var buf: [48]u8 = undefined;
+    const nm = untitledName(&pg.ed, &buf);
+    @memcpy(pg.title[0..nm.len], nm);
+    pg.title_len = nm.len;
+    return pg;
 }
 
 /// At launch: drafts that no tab holds, left by a crash or a start that
@@ -3000,10 +2954,9 @@ pub fn adoptDrafts() void {
 }
 
 fn draftHeld(abs: []const u8) bool {
-    for (docs.items) |d| {
-        if (d.draft) |p| if (std.mem.eql(u8, p, abs)) return true;
-        for (d.pages.items) |pg| if (pg.draft) |p| if (std.mem.eql(u8, p, abs)) return true;
-    }
+    for (docs.items) |d| for (0..tabCount(d)) |j| {
+        if (tabPage(d, j).draft) |p| if (std.mem.eql(u8, p, abs)) return true;
+    };
     return false;
 }
 
@@ -3028,19 +2981,19 @@ pub fn recheckAll() void {
 /// A clean doc reloads from disk; one with unsaved changes asks first. A
 /// deleted file leaves the text as unsaved changes.
 fn checkOutside(d: *Doc) void {
-    const p = d.path orelse return;
+    const p = d.file.path orelse return;
     const now = files.stamp(p);
-    if (sameStamp(now, d.stamp)) return;
-    d.stamp = now;
+    if (sameStamp(now, d.file.stamp)) return;
+    d.file.stamp = now;
     if (now == null) {
-        d.ed.buf.saved = std.math.maxInt(u64);
+        d.file.ed.buf.saved = std.math.maxInt(u64);
         d.note = "deleted on disk";
         return refresh(d);
     }
-    if (d.ed.buf.dirty() and !askReload(d)) return;
+    if (d.file.ed.buf.dirty() and !askReload(d)) return;
     const bytes = files.read(gpa, p) catch return;
     defer gpa.free(bytes);
-    d.ed.reload(gpa, bytes) catch return;
+    d.file.ed.reload(gpa, bytes) catch return;
     d.note = "reloaded";
     refresh(d);
 }
@@ -3048,7 +3001,7 @@ fn checkOutside(d: *Doc) void {
 fn askReload(d: *Doc) bool {
     // A Dev build never puts an alert in front of Harsha: it keeps its copy.
     if (background) return false;
-    msg(void, d.window, "makeKeyAndOrderFront:", .{@as(Id, null)});
+    msg(void, d.win.window, "makeKeyAndOrderFront:", .{@as(Id, null)});
     var buf: [300]u8 = undefined;
     const title = std.fmt.bufPrint(&buf, "{s} changed in another app.", .{d.name()}) catch "This file changed in another app.";
     return askAlert(title, "Reloading it loses your unsaved changes here.", &.{ "Keep Mine", "Reload" }) == 1001;
@@ -3159,9 +3112,11 @@ pub fn loadSettings() void {
     }
     for (docs.items) |d| {
         d.dark = null;
-        d.sy = d.sy / old_lh * lh;
-        for (d.pages.items) |*pg| pg.sy = pg.sy / old_lh * lh;
-        d.ys.snap(d.sy);
+        for (0..tabCount(d)) |j| {
+            const pg = tabPage(d, j);
+            pg.sy = pg.sy / old_lh * lh;
+        }
+        d.ys.snap(d.file.sy);
         d.band_on = false;
         d.snap = true;
         reveal(d);
@@ -3174,7 +3129,7 @@ fn store(key: []const u8, value: []const u8) void {
     const p = conf_path orelse return;
     settings.store(gpa, p, &conf_saved, key, value) catch return alert("Couldn't write the settings file.", p);
     loadSettings();
-    for (docs.items) |d| if (d.path != null and std.mem.eql(u8, d.path.?, conf_path.?)) checkOutside(d);
+    for (docs.items) |d| if (d.file.path != null and std.mem.eql(u8, d.file.path.?, conf_path.?)) checkOutside(d);
 }
 
 // ---- the settings file, watched ----
@@ -3323,8 +3278,8 @@ fn startPrompt(d: *Doc, m: Mode) void {
     switch (m) {
         .find, .replace => {
             d.which = 0;
-            const s = d.ed.sel();
-            const picked = d.ed.text()[s[0]..s[1]];
+            const s = d.file.ed.sel();
+            const picked = d.file.ed.text()[s[0]..s[1]];
             const seed = if (picked.len > 0 and std.mem.indexOfScalar(u8, picked, '\n') == null) picked else d.query.items;
             d.prompt.appendSlice(gpa, seed) catch {};
             d.fresh = true;
@@ -3336,7 +3291,7 @@ fn startPrompt(d: *Doc, m: Mode) void {
             quick = null;
             // Without a folder, quick open lists the folder of the file on screen.
             const r = root orelse blk: {
-                const p = d.path orelse {
+                const p = d.file.path orelse {
                     d.mode = .edit;
                     d.note = "open a folder first (⌘O)";
                     return refresh(d);
@@ -3470,9 +3425,9 @@ fn runCommand(_: Id, _: Sel, it: Id) callconv(.c) void {
 }
 
 fn countFound(d: *Doc) void {
-    const t = d.ed.text();
+    const t = d.file.ed.text();
     const q = d.prompt.items;
-    d.found = editor.countMatches(t, q, d.ed.sel()[0]);
+    d.found = editor.countMatches(t, q, d.file.ed.sel()[0]);
     d.found[0] += 1;
 }
 
@@ -3494,7 +3449,7 @@ fn promptType(d: *Doc, s: []const u8) void {
 fn promptChanged(d: *Doc) void {
     switch (d.mode) {
         .find, .replace => if (d.which == 0) {
-            if (!d.ed.find(d.prompt.items, d.origin, false)) d.ed.select(d.origin, d.origin);
+            if (!d.file.ed.find(d.prompt.items, d.origin, false)) d.file.ed.select(d.origin, d.origin);
             remember(d);
             countFound(d);
             center(d);
@@ -3522,8 +3477,8 @@ fn accept(d: *Doc) void {
         .line => {
             d.mode = .edit;
             const n = std.fmt.parseInt(usize, q, 10) catch return;
-            const row = @min(@max(n, 1), d.ed.buf.lines()) - 1;
-            d.ed.moveTo(d.ed.buf.lineStart(row), false);
+            const row = @min(@max(n, 1), d.file.ed.buf.lines()) - 1;
+            d.file.ed.moveTo(d.file.ed.buf.lineStart(row), false);
             center(d);
         },
         .open => {
@@ -3540,14 +3495,14 @@ fn accept(d: *Doc) void {
             if (d.npicks == 0) return;
             d.mode = .edit;
             const it = cmds.items[d.picks[d.pick]].item;
-            msg(void, d.view, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("runCommand:"), it, @as(f64, 0) });
+            msg(void, d.win.view, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("runCommand:"), it, @as(f64, 0) });
         },
         .replace => {
             remember(d);
             d.fresh = false;
-            const s = d.ed.sel();
-            const replaced = d.ed.replaceOne(gpa, q, d.with.items) catch false;
-            if (d.ed.find(q, if (replaced) d.ed.cur else s[0], false)) d.jumped = true;
+            const s = d.file.ed.sel();
+            const replaced = d.file.ed.replaceOne(gpa, q, d.with.items) catch false;
+            if (d.file.ed.find(q, if (replaced) d.file.ed.cur else s[0], false)) d.jumped = true;
             countFound(d);
             center(d);
         },
@@ -3564,7 +3519,7 @@ fn replaceAll(d: *Doc) void {
     var spots: [max_flash][2]usize = undefined;
     var ns: usize = 0;
     const q = d.prompt.items;
-    const old = d.ed.text();
+    const old = d.file.ed.text();
     var i: usize = 0;
     const sensitive = editor.caseSensitive(q);
     while (q.len > 0 and ns < max_flash and i + q.len <= old.len) {
@@ -3577,7 +3532,7 @@ fn replaceAll(d: *Doc) void {
         ns += 1;
         i += q.len;
     }
-    const n = d.ed.replaceAll(gpa, q, d.with.items) catch 0;
+    const n = d.file.ed.replaceAll(gpa, q, d.with.items) catch 0;
     if (n > 0) {
         flashStart(d);
         for (spots[0..ns]) |sp| flashAdd(d, sp[0], sp[1]);
@@ -3591,8 +3546,8 @@ fn findAgain(d: *Doc, back: bool) void {
     const finding = d.mode == .find or d.mode == .replace;
     const q = if (finding) d.prompt.items else d.query.items;
     if (q.len == 0) return startPrompt(d, .find);
-    const s = d.ed.sel();
-    if (d.ed.find(q, if (back) s[0] else s[0] + 1, back)) d.jumped = true else d.note = "no matches";
+    const s = d.file.ed.sel();
+    if (d.file.ed.find(q, if (back) s[0] else s[0] + 1, back)) d.jumped = true else d.note = "no matches";
     if (finding) countFound(d);
     center(d);
 }
@@ -3648,7 +3603,7 @@ fn wrapCols(d: *const Doc) usize {
 
 /// Brings the row counts up to date after edits, a resize or a font change.
 fn layout(d: *Doc) void {
-    const b = &d.ed.buf;
+    const b = &d.file.ed.buf;
     if (!wrapping()) {
         if (b.wraps.items.len > 0) b.wraps.clearAndFree(gpa);
         d.vfirst.clearAndFree(gpa);
@@ -3681,7 +3636,7 @@ fn layout(d: *Doc) void {
 }
 
 fn totalRows(d: *const Doc) usize {
-    return if (wrapping() and d.vfirst.items.len > 0) d.vfirst.items[d.vfirst.items.len - 1] else d.ed.buf.lines();
+    return if (wrapping() and d.vfirst.items.len > 0) d.vfirst.items[d.vfirst.items.len - 1] else d.file.ed.buf.lines();
 }
 
 fn rowOfLine(d: *const Doc, i: usize) usize {
@@ -3689,7 +3644,7 @@ fn rowOfLine(d: *const Doc, i: usize) usize {
 }
 
 fn lineOfRow(d: *const Doc, r: usize) usize {
-    if (!wrapping()) return @min(r, d.ed.buf.lines() - 1);
+    if (!wrapping()) return @min(r, d.file.ed.buf.lines() - 1);
     const v = d.vfirst.items[0 .. d.vfirst.items.len - 1];
     var lo: usize = 0;
     var hi: usize = v.len;
@@ -3745,17 +3700,17 @@ fn colAt(l: []const u8, from: usize, col0: usize, p: usize) usize {
 /// The caret's screen row, and its column within that row.
 fn caretRow(d: *Doc) struct { row: usize, col: usize } {
     layout(d);
-    const b = &d.ed.buf;
-    const i = b.lineOf(d.ed.cur);
+    const b = &d.file.ed.buf;
+    const i = b.lineOf(d.file.ed.cur);
     const l = b.line(i);
-    const p = d.ed.cur - b.lineStart(i);
+    const p = d.file.ed.cur - b.lineStart(i);
     const s = segOf(d, l, p);
     return .{ .row = rowOfLine(d, i) + s.k, .col = colAt(l, s.start, s.col, p) - s.col };
 }
 
 /// Up and down by screen rows while wrapped, keeping the column.
 fn vmove(d: *Doc, delta: isize, extend: bool) void {
-    const e = &d.ed;
+    const e = &d.file.ed;
     const b = &e.buf;
     const here = caretRow(d);
     const want = e.want orelse here.col;
@@ -3774,12 +3729,12 @@ fn vmove(d: *Doc, delta: isize, extend: bool) void {
 /// ⌘← and ⌘→ while wrapped: the ends of the screen row. False on a line's
 /// first row going left, where the editor's smart home takes over.
 fn rowEdge(d: *Doc, right: bool, extend: bool) bool {
-    const b = &d.ed.buf;
-    const i = b.lineOf(d.ed.cur);
+    const b = &d.file.ed.buf;
+    const i = b.lineOf(d.file.ed.cur);
     const l = b.line(i);
-    const s = segOf(d, l, d.ed.cur - b.lineStart(i));
+    const s = segOf(d, l, d.file.ed.cur - b.lineStart(i));
     if (!right and s.k == 0) return false;
-    d.ed.moveTo(b.lineStart(i) + if (right) caretEnd(l, s) else s.start, extend);
+    d.file.ed.moveTo(b.lineStart(i) + if (right) caretEnd(l, s) else s.start, extend);
     return true;
 }
 
@@ -3800,8 +3755,8 @@ fn scrollRange(d: *Doc) [2]f64 {
 
 fn clampScroll(d: *Doc) void {
     const range = scrollRange(d);
-    d.sy = std.math.clamp(d.sy, range[0], range[1]);
-    d.sx = if (wrapping()) 0 else @max(d.sx, 0);
+    d.file.sy = std.math.clamp(d.file.sy, range[0], range[1]);
+    d.file.sx = if (wrapping()) 0 else @max(d.file.sx, 0);
 }
 
 /// Centers the caret's row in typewriter mode; otherwise scrolls just
@@ -3811,16 +3766,16 @@ fn reveal(d: *Doc) void {
     const y = f(c.row) * lh;
     const th = textH(d);
     if (conf.typewriter) {
-        d.sy = y - (th - lh) / 2;
+        d.file.sy = y - (th - lh) / 2;
     } else {
-        if (y < d.sy) d.sy = y;
-        if (y + lh > d.sy + th) d.sy = y + lh - th;
+        if (y < d.file.sy) d.file.sy = y;
+        if (y + lh > d.file.sy + th) d.file.sy = y + lh - th;
     }
     if (!wrapping()) {
         const x = f(c.col) * cw;
         const tw = rightEdge(d) - gap - 2 * pad_x - gutter(d);
-        if (x < d.sx) d.sx = @max(0, x - 8 * cw);
-        if (x > d.sx + tw - cw) d.sx = x - tw + 8 * cw;
+        if (x < d.file.sx) d.file.sx = @max(0, x - 8 * cw);
+        if (x > d.file.sx + tw - cw) d.file.sx = x - tw + 8 * cw;
     }
     clampScroll(d);
 }
@@ -3828,7 +3783,7 @@ fn reveal(d: *Doc) void {
 /// Puts the caret a third of the way down when it's off screen.
 fn center(d: *Doc) void {
     const y = f(caretRow(d).row) * lh;
-    if (y < d.sy or y + lh > d.sy + textH(d)) d.sy = y - textH(d) / 3;
+    if (y < d.file.sy or y + lh > d.file.sy + textH(d)) d.file.sy = y - textH(d) / 3;
     reveal(d);
 }
 
@@ -3837,12 +3792,12 @@ fn center(d: *Doc) void {
 fn refresh(d: *Doc) void {
     // Typewriter mode recenters when the caret moves or the text changes,
     // but not after a wheel scroll alone.
-    if (conf.typewriter and (d.center_at != d.ed.cur or d.ed.buf.touched != std.math.maxInt(usize))) reveal(d);
-    d.center_at = d.ed.cur;
+    if (conf.typewriter and (d.center_at != d.file.ed.cur or d.file.ed.buf.touched != std.math.maxInt(usize))) reveal(d);
+    d.center_at = d.file.ed.cur;
     if (conf.focus != .off) {
-        const b = &d.ed.buf;
-        const text = d.ed.text();
-        var lo = b.lineOf(d.ed.cur);
+        const b = &d.file.ed.buf;
+        const text = d.file.ed.text();
+        var lo = b.lineOf(d.file.ed.cur);
         var hi = lo;
         if (conf.focus != .line and std.mem.trim(u8, b.line(lo), " \t\r").len > 0) {
             while (lo > 0 and std.mem.trim(u8, b.line(lo - 1), " \t\r").len > 0) lo -= 1;
@@ -3854,7 +3809,7 @@ fn refresh(d: *Doc) void {
             var i = start;
             while (i < end) : (i += 1) {
                 if (std.mem.indexOfScalar(u8, ".!?", text[i]) == null) continue;
-                if (i >= d.ed.cur) {
+                if (i >= d.file.ed.cur) {
                     end = i + 1;
                     break;
                 }
@@ -3875,21 +3830,21 @@ fn refresh(d: *Doc) void {
         } else d.focus_new[1] = end;
     }
     d.focus_on = conf.focus != .off;
-    msg(void, d.view, "setNeedsDisplay:", .{true});
-    if (d.path == null) {
-        if (d.ed.buf.changes != d.draft_armed) {
-            d.draft_armed = d.ed.buf.changes;
-            laterDrafts(d.view);
+    msg(void, d.win.view, "setNeedsDisplay:", .{true});
+    if (d.file.path == null) {
+        if (d.file.ed.buf.changes != d.file.draft_armed) {
+            d.file.draft_armed = d.file.ed.buf.changes;
+            laterDrafts(d.win.view);
         }
         // An untitled file is renamed after its first line once typing
         // pauses, or at once when the caret leaves that line, as Return
         // does, so its tab doesn't change width with each letter.
         var nb: [48]u8 = undefined;
-        if (!std.mem.eql(u8, untitledName(&d.ed, &nb), d.name())) {
-            const row = nameRow(&d.ed);
+        if (!std.mem.eql(u8, untitledName(&d.file.ed, &nb), d.name())) {
+            const row = nameRow(&d.file.ed);
             const sel = objc.sel_registerName("retitle:");
-            msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:selector:object:", .{ d.view, sel, @as(Id, null) });
-            if (row != null and row.? != d.ed.buf.lineOf(d.ed.cur)) retitle(d) else msg(void, d.view, "performSelector:withObject:afterDelay:", .{ sel, @as(Id, null), @as(f64, 0.6) });
+            msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:selector:object:", .{ d.win.view, sel, @as(Id, null) });
+            if (row != null and row.? != d.file.ed.buf.lineOf(d.file.ed.cur)) retitle(d) else msg(void, d.win.view, "performSelector:withObject:afterDelay:", .{ sel, @as(Id, null), @as(f64, 0.6) });
         }
     }
     preview.update(d, &themes, isDark(d.win));
@@ -3899,7 +3854,7 @@ fn refresh(d: *Doc) void {
     };
     if (edited != d.win.edited) {
         d.win.edited = edited;
-        msg(void, d.window, "setDocumentEdited:", .{edited});
+        msg(void, d.win.window, "setDocumentEdited:", .{edited});
     }
     access.changed(d);
 }
@@ -3944,7 +3899,7 @@ pub const ax = struct {
     /// The cell of the character at byte `pos`, one column wide.
     pub fn cell(d: *Doc, pos: usize) Rect {
         layout(d);
-        const b = &d.ed.buf;
+        const b = &d.file.ed.buf;
         const i = b.lineOf(pos);
         const l = b.line(i);
         const p = @min(pos - b.lineStart(i), l.len);
@@ -3966,7 +3921,7 @@ pub const ax = struct {
 
     /// Selects `anchor` to `cur` and brings the caret into view.
     pub fn select(d: *Doc, anchor: usize, cur: usize) void {
-        d.ed.select(anchor, cur);
+        d.file.ed.select(anchor, cur);
         reveal(d);
         refresh(d);
     }
@@ -3980,16 +3935,16 @@ pub const ax = struct {
         return tabCount(d);
     }
 
-    pub fn tabAtIndex(d: *const Doc, j: usize) u32 {
-        return tabId(d, j);
+    pub fn tabAtIndex(d: *Doc, j: usize) u32 {
+        return tabPage(d, j).id;
     }
 
-    pub fn tabOf(d: *const Doc, id: u32) ?usize {
+    pub fn tabOf(d: *Doc, id: u32) ?usize {
         return tabIndex(d, id);
     }
 
-    pub fn tabTitle(d: *const Doc, j: usize, buf: *[48]u8) []const u8 {
-        return tabName(d, j, buf);
+    pub fn tabTitle(d: *Doc, j: usize, _: *[48]u8) []const u8 {
+        return tabName(d, j);
     }
 
     /// Where tab `id` last drew.
@@ -3999,9 +3954,9 @@ pub const ax = struct {
     }
 
     /// The tab under `p`, by id.
-    pub fn tabUnder(d: *const Doc, p: Point) ?u32 {
+    pub fn tabUnder(d: *Doc, p: Point) ?u32 {
         const hit = tabAt(d, inPane(d, p)) orelse return null;
-        return tabId(d, hit.j);
+        return tabPage(d, hit.j).id;
     }
 
     /// Shows tab `id` in its card, as a click on it does.
@@ -4075,7 +4030,7 @@ pub const ax = struct {
 // ---- drawing ----
 
 fn syncStates(d: *Doc, upto: usize) void {
-    const invalid = syntax.syncStates(gpa, d.lang, &d.ed.buf, &d.states, upto) catch {
+    const invalid = syntax.syncStates(gpa, d.file.lang, &d.file.ed.buf, &d.states, upto) catch {
         d.states.clearRetainingCapacity();
         d.lex[0].clear();
         return;
@@ -4133,7 +4088,7 @@ fn lineKinds(d: *Doc, i: usize, l: []const u8, walk: *usize) ?[]const syntax.Kin
     while (walk.* < old.len and old[walk.*].line < i) walk.* += 1;
     if (walk.* < old.len and old[walk.*].line == i) {
         @memcpy(out, d.lex[1].kinds.items[old[walk.*].at..][0..l.len]);
-    } else _ = syntax.lexLine(d.lang, l, d.states.items[i], out);
+    } else _ = syntax.lexLine(d.file.lang, l, d.states.items[i], out);
     return out;
 }
 
@@ -4161,26 +4116,25 @@ fn untitledName(ed: *const Editor, buf: *[48]u8) []const u8 {
 /// Gives an untitled `d` the name its text has now, in its tab and, when
 /// it's the focused card, the window's title.
 fn retitle(d: *Doc) void {
-    if (d.path != null) return;
+    if (d.file.path != null) return;
     var nb: [48]u8 = undefined;
-    const nm = untitledName(&d.ed, &nb);
+    const nm = untitledName(&d.file.ed, &nb);
     if (std.mem.eql(u8, nm, d.name())) return;
-    @memcpy(d.title[0..nm.len], nm);
-    d.title_len = nm.len;
-    if (slotOf(d, d.id)) |k| d.slots.items[k].drop();
-    if (d.win.focus == d) msg(void, d.window, "setTitle:", .{objc.str(nm)});
-    msg(void, d.view, "setNeedsDisplay:", .{true});
+    @memcpy(d.file.title[0..nm.len], nm);
+    d.file.title_len = nm.len;
+    if (slotOf(d, d.file.id)) |k| d.slots.items[k].drop();
+    if (d.win.focus == d) msg(void, d.win.window, "setTitle:", .{objc.str(nm)});
+    msg(void, d.win.view, "setNeedsDisplay:", .{true});
 }
 
 /// The untitled cards in a window take their new names once typing has
 /// paused.
 fn retitleNow(self: Id, _: Sel, _: Id) callconv(.c) void {
-    for (docs.items) |d| if (d.view == self) retitle(d);
+    for (docs.items) |d| if (d.win.view == self) retitle(d);
 }
 
-fn tabName(d: *const Doc, j: usize, buf: *[48]u8) []const u8 {
-    if (tabPath(d, j)) |p| return std.fs.path.basename(p);
-    return if (j == d.at) d.name() else untitledName(&d.pages.items[pageOf(d, j)].ed, buf);
+fn tabName(d: *Doc, j: usize) []const u8 {
+    return tabPage(d, j).name();
 }
 
 // ---- sidebar ----
@@ -4301,7 +4255,7 @@ fn headLine(d: *Doc, room: f64) Id {
     d.head_n = 0;
     d.head_lw = 0;
     d.head_cut = false;
-    const p = d.path orelse return null;
+    const p = d.file.path orelse return null;
     const dir = std.fs.path.dirname(p) orelse "/";
     var pbuf: [std.fs.max_path_bytes]u8 = undefined;
     var rel = tilde(&pbuf, dir);
@@ -4535,8 +4489,10 @@ fn panelRow(ctx: Id, d: *const Doc, th: *const Theme, p: usize, left: f64, right
 /// How much of `rel`'s unsaved dot shows (0 to 1), from whichever card holds it.
 fn rowDot(w: *const Win, rel: []const u8, now: f64) f64 {
     for (docs.items) |d| if (d.win == w) {
-        if (d.path) |p| if (relOf(p)) |r| if (std.mem.eql(u8, r, rel)) return std.math.clamp(d.dot.at(now), 0, 1);
-        for (d.pages.items) |pg| if (pg.path) |p| if (relOf(p)) |r| if (std.mem.eql(u8, r, rel)) return std.math.clamp(pg.dot.at(now), 0, 1);
+        for (0..tabCount(d)) |j| {
+            const pg = tabPage(d, j);
+            if (pg.path) |p| if (relOf(p)) |r| if (std.mem.eql(u8, r, rel)) return std.math.clamp(pg.dot.at(now), 0, 1);
+        }
     };
     return 0;
 }
@@ -4545,10 +4501,9 @@ fn rowDot(w: *const Win, rel: []const u8, now: f64) f64 {
 fn sideDotsBusy(w: *const Win, now: f64) bool {
     var busy = false;
     for (docs.items) |d| if (d.win == w) {
-        d.dot.aim(if (d.path != null and d.ed.buf.dirty()) 1 else 0, now);
-        busy = busy or d.dot.moving(now);
-        for (d.pages.items) |*pg| {
-            pg.dot.aim(if (pg.path != null and pg.ed.buf.dirty()) 1 else 0, now);
+        for (0..tabCount(d)) |j| {
+            const pg = tabPage(d, j);
+            pg.dot.aim(if (pg.edited()) 1 else 0, now);
             busy = busy or pg.dot.moving(now);
         }
     };
@@ -4864,7 +4819,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
     const full_h = msg(Rect, w.view, "bounds", .{}).h;
     // The list stops where the cards do, a gap above the window's bottom.
     const view_h = full_h - lt - gap;
-    const cur = if (w.focus.path) |p| relOf(p) else null;
+    const cur = if (w.focus.file.path) |p| relOf(p) else null;
     // The list glides to a focused file that's out of view, once it's
     // been drawn; on the first draw it's just there.
     const was = if (w.side_t.moving(now)) w.side_t.at(now) else w.side_y;
@@ -4936,9 +4891,9 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
 
     // The selection hops from row to row with a little bounce, and rides
     // along when folders above it open or close.
-    if (w.sel_gen != tree_gen or w.sel_id != w.focus.id) {
+    if (w.sel_gen != tree_gen or w.sel_id != w.focus.file.id) {
         w.sel_gen = tree_gen;
-        w.sel_id = w.focus.id;
+        w.sel_id = w.focus.file.id;
         w.sel_row = null;
         if (cur) |c| for (rows, 0..) |row, i| if (std.mem.eql(u8, row.rel, c)) {
             w.sel_row = i;
@@ -5103,7 +5058,7 @@ fn dropHead(d: *Doc) void {
     if (d.head) |l| objc.CFRelease(l);
     d.head = null;
     d.head_w = -1;
-    if (slotOf(d, d.id)) |k| d.slots.items[k].drop();
+    if (slotOf(d, d.file.id)) |k| d.slots.items[k].drop();
     if (d.stat) |l| objc.CFRelease(l);
     d.stat = null;
     d.stat_at[0] = std.math.maxInt(u64);
@@ -5141,18 +5096,18 @@ fn put(buf: []u8, n: *usize, comptime fmt: []const u8, args: anytype) void {
 /// size, and for text and Markdown the words. Made again only when the caret,
 /// the selection or the text changed; the buffer keeps the word count exact.
 fn statusLine(d: *Doc, room: f64) void {
-    const b = &d.ed.buf;
-    const t = d.ed.text();
+    const b = &d.file.ed.buf;
+    const t = d.file.ed.text();
     const avail = @max(room, 0);
-    const at = [6]u64{ d.ed.cur, d.ed.anchor, b.changes, d.id, t.len, @intFromFloat(avail) };
+    const at = [6]u64{ d.file.ed.cur, d.file.ed.anchor, b.changes, d.file.id, t.len, @intFromFloat(avail) };
     if (d.stat != null and std.mem.eql(u64, &at, &d.stat_at)) return;
     d.stat_at = at;
     var buf: [160]u8 = undefined;
     var n: usize = 0;
     var g: [32]u8 = undefined;
-    const li = b.lineOf(d.ed.cur);
-    put(&buf, &n, "Ln {d}, Col {d}", .{ li + 1, codepoints(t[b.lineStart(li)..d.ed.cur]) + 1 });
-    const s = d.ed.sel();
+    const li = b.lineOf(d.file.ed.cur);
+    put(&buf, &n, "Ln {d}, Col {d}", .{ li + 1, codepoints(t[b.lineStart(li)..d.file.ed.cur]) + 1 });
+    const s = d.file.ed.sel();
     if (s[0] != s[1]) {
         const l1 = b.lineOf(s[1]);
         var lines = l1 - b.lineOf(s[0]) + 1;
@@ -5160,7 +5115,7 @@ fn statusLine(d: *Doc, room: f64) void {
         const chars = codepoints(t[s[0]..s[1]]);
         put(&buf, &n, "  ·  {s} character{s}, {d} line{s}", .{ grouped(&g, chars), if (chars == 1) "" else "s", lines, if (lines == 1) "" else "s" });
     }
-    if (d.lang == &syntax.plain or d.lang.markdown) {
+    if (d.file.lang == &syntax.plain or d.file.lang.markdown) {
         const words = b.wordCount();
         put(&buf, &n, "  ·  {s} word{s}", .{ grouped(&g, words), if (words == 1) "" else "s" });
     }
@@ -5461,7 +5416,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     }
     d.inked.aim(if (key) 1 else 0, now);
     const ka = d.inked.at(now);
-    const b = &d.ed.buf;
+    const b = &d.file.ed.buf;
     d.gut.aim(gutCols(d), now);
     d.gw = d.gut.at(now) * cw * (1 - std.math.clamp(d.win.z.x, 0, 1));
     layout(d);
@@ -5472,20 +5427,20 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // Jumps glide the scroll. Stepping past the edge a few rows at a time and
     // live resizing snap it (the trackpad snaps in scrollWheel), and the caret
     // and band move with the page so they don't bounce back to the edge.
-    if (d.sy != d.ys.to) {
-        if (resizing or (!conf.typewriter and !d.ys.moving(now) and @abs(d.sy - d.ys.to) <= glide_rows * lh)) {
-            const by = d.sy - d.ys.at(now);
-            d.ys.snap(d.sy);
+    if (d.file.sy != d.ys.to) {
+        if (resizing or (!conf.typewriter and !d.ys.moving(now) and @abs(d.file.sy - d.ys.to) <= glide_rows * lh)) {
+            const by = d.file.sy - d.ys.at(now);
+            d.ys.snap(d.file.sy);
             d.band.shift(by);
             if (d.c_text) d.cy.shift(by);
-        } else d.ys.aim(d.sy, now);
+        } else d.ys.aim(d.file.sy, now);
     }
-    if (d.sx != d.xs.to) {
-        if (resizing or (!d.xs.moving(now) and @abs(d.sx - d.xs.to) <= 16 * cw)) {
-            const by = d.sx - d.xs.at(now);
-            d.xs.snap(d.sx);
+    if (d.file.sx != d.xs.to) {
+        if (resizing or (!d.xs.moving(now) and @abs(d.file.sx - d.xs.to) <= 16 * cw)) {
+            const by = d.file.sx - d.xs.at(now);
+            d.xs.snap(d.file.sx);
             if (d.c_text) d.cx.shift(by);
-        } else d.xs.aim(d.sx, now);
+        } else d.xs.aim(d.file.sx, now);
     }
     d.vy = d.ys.at(now);
     d.vx = d.xs.at(now);
@@ -5511,7 +5466,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // Text stops a whole column inside the same margin on the right as on
     // the left, rather than running into the card's border.
     const cols: usize = @intFromFloat(@max(@floor((card.x + card.w - pad_x - ox) / cw), 0));
-    const s = d.ed.sel();
+    const s = d.file.ed.sel();
     const here = caretRow(d);
     const finding = (d.mode == .find or d.mode == .replace) and d.prompt.items.len > 0;
 
@@ -5544,7 +5499,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // Text stops above the status strip rather than running under it.
     objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = card.w, .h = card.h - stripH(d) * (1 - d.pbar.at(now)) });
     if (loaded < 1) {
-        if (d.rise) {
+        if (d.file.rise) {
             objc.CGContextSetAlpha(ctx, loaded);
             objc.CGContextTranslateCTM(ctx, 0, (1 - loaded) * load_rise);
         } else objc.CGContextSetAlpha(ctx, swap_from + (1 - swap_from) * loaded);
@@ -5568,17 +5523,17 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     d.had_sel = has_sel;
     const fade = std.math.clamp((now - d.sel_t0) / fade_time, 0, 1);
     const sel_a = 1 - (1 - fade) * (1 - fade) * (1 - fade);
-    if (d.ed.buf.changes != d.sel_chg) d.sel_out.snap(0);
+    if (d.file.ed.buf.changes != d.sel_chg) d.sel_out.snap(0);
     // A selection that collapses with the text untouched (a click, an arrow, Escape)
     // fades out where it was; an edit under it cuts, and a new selection replaces it.
     if (has_sel) {
         d.sel_out.snap(0);
         d.sel_last = s;
-    } else if (was_sel and d.ed.buf.changes == d.sel_chg) {
+    } else if (was_sel and d.file.ed.buf.changes == d.sel_chg) {
         d.sel_out.snap(sel_a);
         d.sel_out.aim(0, now);
     }
-    d.sel_chg = d.ed.buf.changes;
+    d.sel_chg = d.file.ed.buf.changes;
     const out_a = d.sel_out.at(now);
 
     // The find indicator marks the current match: the selection while it is a
@@ -5586,7 +5541,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     var cur_m: ?[2]usize = null;
     if (finding) {
         const want = d.prompt.items;
-        if (s[1] - s[0] == want.len and editor.matchAt(d.ed.text(), s[0], want, editor.caseSensitive(want))) cur_m = s;
+        if (s[1] - s[0] == want.len and editor.matchAt(d.file.ed.text(), s[0], want, editor.caseSensitive(want))) cur_m = s;
     } else if (d.mode == .edit and has_sel) {
         const kept = if (d.cur_m) |h| h[0] == s[0] and h[1] == s[1] else false;
         if (d.jumped or kept) cur_m = s;
@@ -5620,7 +5575,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     const flash_a = flashAlpha(d, now);
 
     // The other matches' pills stay while the find bar slides away, fading with it.
-    const closing_find = d.mode == .edit and d.held_id == d.id and (d.held_mode == .find or d.held_mode == .replace) and d.pbar.at(now) > 0.002;
+    const closing_find = d.mode == .edit and d.held_id == d.file.id and (d.held_mode == .find or d.held_mode == .replace) and d.pbar.at(now) > 0.002;
     const pills: []const u8 = if (finding) d.prompt.items else if (closing_find) d.held.items else "";
     const pills_sensitive = editor.caseSensitive(pills);
     const pills_a: f64 = if (finding) 1 else d.pbar.at(now);
@@ -5687,7 +5642,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // alpha, so the text fades toward the page, band or selection under it
     // with no layer and one batch per strip however many rows are cut.
     const strip_a = [_]f64{ 0.8, 0.55, 0.3, 0.1 };
-    const base_a: f64 = if (loaded >= 1) 1 else if (d.rise) loaded else swap_from + (1 - swap_from) * loaded;
+    const base_a: f64 = if (loaded >= 1) 1 else if (d.file.rise) loaded else swap_from + (1 - swap_from) * loaded;
     var reach: [400]u8 = undefined;
     var row_kinds: [400]?[]const syntax.Kind = undefined;
     var any_reach = prev_a > 0 or cur_m != null;
@@ -5725,7 +5680,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             if (pass == 0) {
                 if (v.line != lexed) {
                     lexed = v.line;
-                    kinds = if (d.lang != &syntax.plain and v.line < d.states.items.len) lineKinds(d, v.line, l, &walk) else null;
+                    kinds = if (d.file.lang != &syntax.plain and v.line < d.states.items.len) lineKinds(d, v.line, l, &walk) else null;
                 }
                 row_kinds[ri] = kinds;
             }
@@ -5944,7 +5899,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         d.held_n = @min(tally.len, d.held_tally.len);
         @memcpy(d.held_tally[0..d.held_n], tally[0..d.held_n]);
         d.held_mode = d.mode;
-        d.held_id = d.id;
+        d.held_id = d.file.id;
         d.held_which = d.which;
         d.held.clearRetainingCapacity();
         d.held.appendSlice(gpa, d.prompt.items) catch {};
@@ -6015,7 +5970,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     if (blank) {
         if (d.blank_t0 < 0) {
             d.blank_t0 = now;
-            msg(void, d.view, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("barHold:"), @as(Id, null), @as(f64, hint_delay) });
+            msg(void, d.win.view, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("barHold:"), @as(Id, null), @as(f64, hint_delay) });
         }
         if (now >= d.blank_t0 + hint_delay) {
             if (d.hint.to != 1) d.hint.dur = hint_in;
@@ -6086,7 +6041,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // when it's over, and the fade out takes it from there.
     if (d.bar.to == 1 and !d.busy and !d.bar_due) {
         d.bar_due = true;
-        holdRedraw(d.view, d.caret, @max(d.bar_t0 + bar_hold - now, 0) + 0.02);
+        holdRedraw(d.win.view, d.caret, @max(d.bar_t0 + bar_hold - now, 0) + 0.02);
     }
 }
 
@@ -6121,9 +6076,9 @@ fn syncSlots(d: *Doc, now: f64) void {
         s.grow.aim(0, now);
     };
     for (0..tabCount(d)) |j| {
-        const id = tabId(d, j);
+        const id = tabPage(d, j).id;
         if (slotOf(d, id) != null) continue;
-        const pos = if (j == 0) 0 else slotOf(d, tabId(d, j - 1)).? + 1;
+        const pos = if (j == 0) 0 else slotOf(d, tabPage(d, j - 1).id).? + 1;
         var s: Slot = .{ .id = id };
         if (d.slots_seen) s.grow.aim(1, now) else s.grow.snap(1);
         d.slots.insert(gpa, pos, s) catch return;
@@ -6182,18 +6137,17 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
     for (d.slots.items) |*s| {
         if (s.line == null) {
             if (tabIndex(d, s.id)) |j| {
-                var nb: [48]u8 = undefined;
-                const nm = tabName(d, j, &nb);
+                const nm = tabName(d, j);
                 s.line = uiLine(nm, tab_bold, 1e5);
                 s.name_w = if (s.line != null) objc.CTLineGetTypographicBounds(s.line, null, null, null) else 0;
                 s.thin = uiLine(nm, tab_font, 1e5);
-                s.icon = iconFor(if (tabPath(d, j) != null) nm else "");
+                s.icon = iconFor(if (tabPage(d, j).path != null) nm else "");
             }
         }
         if (s.sized) s.wid.aim(s.name_w, now) else s.wid.snap(s.name_w);
         s.sized = true;
         _ = s.wid.step(now);
-        const dirty = !s.gone and if (tabIndex(d, s.id)) |j| tabDirty(d, j) else false;
+        const dirty = !s.gone and if (tabIndex(d, s.id)) |j| tabPage(d, j).edited() else false;
         s.dot.aim(if (dirty) 1 else 0, now);
         _ = s.dot.step(now);
         _ = s.grow.step(now);
@@ -6253,19 +6207,19 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
         };
         if (s.id != held_id) s.shift.aim(0, now);
         _ = s.shift.step(now);
-        if (!s.gone and s.id == d.id) act = .{ s.x, s.w };
+        if (!s.gone and s.id == d.file.id) act = .{ s.x, s.w };
     }
     const span = end + off - (x0 - pad);
     d.tab_x.aim(std.math.clamp(act[0] + off - (x0 - pad) + act[1] / 2 - room / 2, 0, @max(span - room, 0)), now);
-    if (slotOf(d, d.id)) |i| act[0] += d.slots.items[i].shift.x;
+    if (slotOf(d, d.file.id)) |i| act[0] += d.slots.items[i].shift.x;
 
     // The tab being dragged, or springing back into place, draws last on
     // its own backing, over the ones it slides past, and the highlight
     // stays under it. Off its row it's faint.
-    const top_id = if (held_id != 0) held_id else if (slotOf(d, d.id)) |i| (if (d.slots.items[i].shift.settled()) 0 else d.id) else 0;
+    const top_id = if (held_id != 0) held_id else if (slotOf(d, d.file.id)) |i| (if (d.slots.items[i].shift.settled()) 0 else d.file.id) else 0;
 
     // The active tab's highlight, with one tab sitting on it unseen.
-    for (&d.hl, act) |*h, v| if (a < 0.01 or top_id == d.id) h.snap(v) else h.aim(v, now);
+    for (&d.hl, act) |*h, v| if (a < 0.01 or top_id == d.file.id) h.snap(v) else h.aim(v, now);
     const hx = d.hl[0].step(now);
     const hw = d.hl[1].step(now);
     // The row stops at its ends: tabs scrolled past them are cut there.
@@ -6465,7 +6419,7 @@ const TabHit = struct { j: usize, id: u32, close: bool };
 
 /// The tab under `p`, and whether it's over the tab's close button. Only
 /// with two tabs or more; one is the window's title.
-fn tabAt(d: *const Doc, p: Point) ?TabHit {
+fn tabAt(d: *Doc, p: Point) ?TabHit {
     if (conf.zen or d.tabbed.to != 1 or @abs(p.y - (gap + head_h / 2)) > 12) return null;
     for (d.slots.items) |s| {
         if (s.gone or p.x < s.x or p.x >= s.x + s.w) continue;
@@ -6483,9 +6437,9 @@ fn loneTab(d: *const Doc, p: Point) ?TabHit {
 /// The card's lone file name under `p`, when it has one tab.
 fn titleTab(d: *const Doc, p: Point) ?TabHit {
     if (conf.zen or d.tabbed.to != 0 or @abs(p.y - (gap + head_h / 2)) > 12) return null;
-    const s = d.slots.items[slotOf(d, d.id) orelse return null];
+    const s = d.slots.items[slotOf(d, d.file.id) orelse return null];
     if (p.x < s.x or p.x >= s.x + s.w) return null;
-    return .{ .j = 0, .id = d.id, .close = false };
+    return .{ .j = 0, .id = d.file.id, .close = false };
 }
 
 // ---- dragging tabs ----
@@ -6698,7 +6652,10 @@ fn moveTab(from: *Doc, j: usize, dr: Drop) void {
 fn placeFile(w: *Win, path: [:0]const u8, dr: Drop) void {
     for (docs.items) |o| {
         if (o.closing) continue;
-        const j = if (o.path != null and std.mem.eql(u8, o.path.?, path)) o.at else if (pageIndex(o, path)) |i| (if (i < o.at) i else i + 1) else continue;
+        const j = for (0..tabCount(o)) |j| {
+            const p = tabPage(o, j);
+            if (p.path != null and std.mem.eql(u8, p.path.?, path)) break j;
+        } else continue;
         if (o.win != w) return open(path, null);
         if (o == dr.card and !splitZone(dr.zone)) {
             showTab(o, j);
@@ -6923,7 +6880,7 @@ fn insertText(self: Id, _: Sel, s: Id) callconv(.c) void {
     if (d.mode != .edit) {
         promptType(d, bytes);
     } else {
-        (if (conf.pairs) d.ed.typePaired(gpa, bytes) else d.ed.insert(gpa, bytes)) catch {};
+        (if (conf.pairs) d.file.ed.typePaired(gpa, bytes) else d.file.ed.insert(gpa, bytes)) catch {};
         reveal(d);
     }
     refresh(d);
@@ -6959,7 +6916,7 @@ fn doCommand(self: Id, _: Sel, sel: Sel) callconv(.c) void {
 
 /// Runs a key command. Returns whether the caret should be scrolled to.
 fn edit(d: *Doc, name: []const u8, extend: bool) !bool {
-    const e = &d.ed;
+    const e = &d.file.ed;
     for (moves) |m| if (std.mem.eql(u8, m[0], name)) {
         if (wrapping()) switch (m[1]) {
             .up, .down => {
@@ -6998,15 +6955,15 @@ fn edit(d: *Doc, name: []const u8, extend: bool) !bool {
     } else if (is(name, "cancelOperation")) {
         e.select(e.cur, e.cur);
     } else if (is(name, "scrollPageUp") or is(name, "scrollPageDown")) {
-        d.sy += if (is(name, "scrollPageUp")) -textH(d) + lh else textH(d) - lh;
+        d.file.sy += if (is(name, "scrollPageUp")) -textH(d) + lh else textH(d) - lh;
         clampScroll(d);
         return false;
     } else if (is(name, "scrollToBeginningOfDocument") or is(name, "scrollToEndOfDocument")) {
-        d.sy = if (is(name, "scrollToBeginningOfDocument")) 0 else std.math.inf(f64);
+        d.file.sy = if (is(name, "scrollToBeginningOfDocument")) 0 else std.math.inf(f64);
         clampScroll(d);
         return false;
     } else if (is(name, "centerSelectionInVisibleArea")) {
-        d.sy = std.math.inf(f64);
+        d.file.sy = std.math.inf(f64);
         center(d);
         return false;
     } else return false;
@@ -7015,7 +6972,7 @@ fn edit(d: *Doc, name: []const u8, extend: bool) !bool {
 
 fn posAt(d: *Doc, p: Point) usize {
     layout(d);
-    const b = &d.ed.buf;
+    const b = &d.file.ed.buf;
     const yy = p.y - top_h + d.vy;
     const row: usize = if (yy < 0) 0 else @min(@as(usize, @intFromFloat(yy / lh)), totalRows(d) - 1);
     const i = lineOfRow(d, row);
@@ -7032,7 +6989,7 @@ fn local(self: Id, ev: Id) Point {
 
 /// The word or line around `pos`, for double- and triple-click drags.
 fn unitAt(d: *Doc, pos: usize) [2]usize {
-    const e = &d.ed;
+    const e = &d.file.ed;
     const keep = .{ e.anchor, e.cur };
     if (d.drag == .word) e.selectWord(pos) else e.selectLine(pos);
     const r = e.sel();
@@ -7135,12 +7092,12 @@ fn cardDown(d: *Doc, p: Point, ev: Id) void {
         3 => d.drag = .line,
         else => {
             d.drag = .char;
-            d.ed.moveTo(pos, msg(usize, ev, "modifierFlags", .{}) & shift_key != 0);
+            d.file.ed.moveTo(pos, msg(usize, ev, "modifierFlags", .{}) & shift_key != 0);
         },
     }
     if (d.drag != .char) {
         d.drag_from = unitAt(d, pos);
-        d.ed.select(d.drag_from[0], d.drag_from[1]);
+        d.file.ed.select(d.drag_from[0], d.drag_from[1]);
     }
     refresh(d);
 }
@@ -7251,7 +7208,7 @@ fn setHover(d: *Doc, id: u32, shut: bool, plus: bool) void {
     d.hover = id;
     d.hover_x = shut;
     d.plus_on = plus;
-    msg(void, d.view, "setNeedsDisplay:", .{true});
+    msg(void, d.win.view, "setNeedsDisplay:", .{true});
 }
 
 fn mouseExited(self: Id, _: Sel, _: Id) callconv(.c) void {
@@ -7332,16 +7289,16 @@ fn mouseDragged(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const d = w.focus;
     d.snap = true;
     const p = inPane(d, local(self, ev));
-    if (p.y < top_h) d.sy -= lh;
-    if (p.y > bottom(d)) d.sy += lh;
+    if (p.y < top_h) d.file.sy -= lh;
+    if (p.y > bottom(d)) d.file.sy += lh;
     clampScroll(d);
-    d.ys.snap(d.sy);
+    d.ys.snap(d.file.sy);
     const pos = posAt(d, p);
     if (d.drag == .char) {
-        d.ed.moveTo(pos, true);
+        d.file.ed.moveTo(pos, true);
     } else {
         const u = unitAt(d, pos);
-        if (u[0] < d.drag_from[0]) d.ed.select(d.drag_from[1], u[0]) else d.ed.select(d.drag_from[0], @max(u[1], d.drag_from[1]));
+        if (u[0] < d.drag_from[0]) d.file.ed.select(d.drag_from[1], u[0]) else d.file.ed.select(d.drag_from[0], @max(u[1], d.drag_from[1]));
     }
     refresh(d);
 }
@@ -7363,11 +7320,11 @@ fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
         dx *= lh;
         dy *= lh;
     }
-    d.sx -= dx;
-    d.sy -= dy;
+    d.file.sx -= dx;
+    d.file.sy -= dy;
     clampScroll(d);
-    d.ys.snap(d.sy);
-    d.xs.snap(d.sx);
+    d.ys.snap(d.file.sy);
+    d.xs.snap(d.file.sx);
     refresh(d);
 }
 
@@ -7606,7 +7563,7 @@ fn menuForEvent(self: Id, _: Sel, ev: Id) callconv(.c) Id {
 fn tabMenu(self: Id, w: *Win, d: *Doc, lp: Point) Id {
     const hit = tabAt(d, lp) orelse titleTab(d, lp) orelse return null;
     const n = tabCount(d);
-    const path = tabPath(d, hit.j);
+    const path = tabPage(d, hit.j).path;
     const has_path = if (path) |x| setMenuPath(x) else false;
     if (tab_menu == null) {
         const m = newMenu();
@@ -7770,9 +7727,9 @@ fn pasteboard() Id {
 extern const NSPasteboardTypeString: Id;
 
 fn copy(d: *Doc) void {
-    const s = d.ed.sel();
+    const s = d.file.ed.sel();
     if (d.mode != .edit or s[0] == s[1]) return;
-    const text = d.ed.text()[s[0]..s[1]];
+    const text = d.file.ed.text()[s[0]..s[1]];
     const string = if (std.unicode.utf8ValidateSlice(text)) objc.str(text) else access.nsText(text);
     const pb = pasteboard();
     _ = msg(isize, pb, "clearContents", .{});
@@ -7782,7 +7739,7 @@ fn copy(d: *Doc) void {
 fn cut(d: *Doc) void {
     if (d.mode != .edit) return;
     copy(d);
-    d.ed.deleteSelection(gpa) catch {};
+    d.file.ed.deleteSelection(gpa) catch {};
     reveal(d);
 }
 
@@ -7791,24 +7748,24 @@ fn paste(d: *Doc) void {
     // An image or file on the clipboard has no text: the selection stays.
     if (s.len == 0) return;
     if (d.mode != .edit) return promptType(d, s);
-    const at = d.ed.sel()[0];
-    d.ed.insert(gpa, s) catch {};
+    const at = d.file.ed.sel()[0];
+    d.file.ed.insert(gpa, s) catch {};
     if (std.mem.indexOfScalar(u8, s, '\n') != null or s.len > 40) {
         flashStart(d);
-        flashAdd(d, at, d.ed.cur);
+        flashAdd(d, at, d.file.ed.cur);
     }
     reveal(d);
 }
 
 fn selectAll(d: *Doc) void {
-    if (d.mode == .edit) d.ed.selectAll();
+    if (d.mode == .edit) d.file.ed.selectAll();
 }
 
 fn undo(d: *Doc) void {
     d.mode = .edit;
-    const us = d.ed.buf.undos.items;
+    const us = d.file.ed.buf.undos.items;
     const span: [2]usize = if (us.len > 0) .{ us[us.len - 1].pos, us[us.len - 1].pos + us[us.len - 1].old.len } else .{ 0, 0 };
-    d.ed.undo(gpa) catch {};
+    d.file.ed.undo(gpa) catch {};
     flashStart(d);
     flashAdd(d, span[0], span[1]);
     reveal(d);
@@ -7816,9 +7773,9 @@ fn undo(d: *Doc) void {
 
 fn redo(d: *Doc) void {
     d.mode = .edit;
-    const rs = d.ed.buf.redos.items;
+    const rs = d.file.ed.buf.redos.items;
     const span: [2]usize = if (rs.len > 0) .{ rs[rs.len - 1].pos, rs[rs.len - 1].pos + rs[rs.len - 1].new.len } else .{ 0, 0 };
-    d.ed.redo(gpa) catch {};
+    d.file.ed.redo(gpa) catch {};
     flashStart(d);
     flashAdd(d, span[0], span[1]);
     reveal(d);
@@ -7883,19 +7840,19 @@ fn previousCard(d: *Doc) void {
 fn previewText(id: u32) ?[]const u8 {
     for (docs.items) |d| {
         if (d.closing) continue;
-        if (d.id == id) return d.ed.text();
+        if (d.file.id == id) return d.file.ed.text();
         for (d.pages.items) |*p| if (p.id == id) return p.ed.text();
     }
     return null;
 }
 
 fn markdownPreview(d: *Doc) void {
-    preview.toggle(d.window, d.path orelse "", d.id, &previewText, &themes[@intFromBool(isDark(d.win))]);
+    preview.toggle(d.win.window, d.file.path orelse "", d.file.id, &previewText, &themes[@intFromBool(isDark(d.win))]);
 }
 
 fn comment(d: *Doc) void {
     if (d.mode != .edit) return;
-    d.ed.toggleComment(gpa, d.lang.line_comment) catch {};
+    d.file.ed.toggleComment(gpa, d.file.lang.line_comment) catch {};
 }
 
 fn zoom(by: f64) void {

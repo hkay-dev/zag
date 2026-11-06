@@ -74,18 +74,18 @@ fn resized(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
 }
 /// `themes` are the ones the editor draws with (light, dark): zen's grey and Increase Contrast included.
 pub fn update(d: anytype, themes: *const [2]settings.Theme, dark: bool) void {
-    if (owner != d.window) return;
+    if (owner != d.win.window) return;
     // A caret move or scroll changes nothing: `changes` counts every edit, undo and redo.
-    const unchanged = seen_id == d.id and seen_changes == d.ed.buf.changes;
+    const unchanged = seen_id == d.file.id and seen_changes == d.file.ed.buf.changes;
     const th = &themes[@intFromBool(dark)];
     const same_theme = std.meta.eql(theme, th.*);
     if (unchanged and same_theme) return;
-    const active = unchanged or std.mem.eql(u8, objc.utf8(path), d.path orelse "");
+    const active = unchanged or std.mem.eql(u8, objc.utf8(path), d.file.path orelse "");
     var edited = !same_theme;
     if (active and !unchanged) {
-        seen_id = d.id;
-        seen_changes = d.ed.buf.changes;
-        pending = d.id;
+        seen_id = d.file.id;
+        seen_changes = d.file.ed.buf.changes;
+        pending = d.file.id;
         edited = true;
     }
     if (!edited) return;

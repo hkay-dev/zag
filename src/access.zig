@@ -163,14 +163,14 @@ fn post(obj: Id, comptime name: []const u8) void {
 pub fn changed(d: *Doc) void {
     if (held.items.len == 0) return;
     const obj = (find(.{ .kind = .text, .owner = @intFromPtr(d), .key = 0 }) orelse return).obj;
-    if (slot(obj, .id).* != d.id or slot(obj, .changes).* != d.ed.buf.changes) {
-        slot(obj, .id).* = d.id;
-        slot(obj, .changes).* = d.ed.buf.changes;
+    if (slot(obj, .id).* != d.file.id or slot(obj, .changes).* != d.file.ed.buf.changes) {
+        slot(obj, .id).* = d.file.id;
+        slot(obj, .changes).* = d.file.ed.buf.changes;
         post(obj, "AXValueChanged");
     }
-    if (slot(obj, .cur).* != d.ed.cur or slot(obj, .anchor).* != d.ed.anchor) {
-        slot(obj, .cur).* = d.ed.cur;
-        slot(obj, .anchor).* = d.ed.anchor;
+    if (slot(obj, .cur).* != d.file.ed.cur or slot(obj, .anchor).* != d.file.ed.anchor) {
+        slot(obj, .cur).* = d.file.ed.cur;
+        slot(obj, .anchor).* = d.file.ed.anchor;
         post(obj, "AXSelectedTextChanged");
     }
 }
@@ -252,18 +252,18 @@ fn element(kind: Kind, owner: usize, key: u64, parent: Id) Id {
 }
 
 fn textOf(d: *Doc) Id {
-    const obj = element(.text, @intFromPtr(d), 0, d.view);
+    const obj = element(.text, @intFromPtr(d), 0, d.win.view);
     if (obj != null and slot(obj, .id).* == 0) {
-        slot(obj, .id).* = d.id;
-        slot(obj, .changes).* = d.ed.buf.changes;
-        slot(obj, .cur).* = d.ed.cur;
-        slot(obj, .anchor).* = d.ed.anchor;
+        slot(obj, .id).* = d.file.id;
+        slot(obj, .changes).* = d.file.ed.buf.changes;
+        slot(obj, .cur).* = d.file.ed.cur;
+        slot(obj, .anchor).* = d.file.ed.anchor;
     }
     return obj;
 }
 
 fn tabsOf(d: *Doc) Id {
-    return element(.tabs, @intFromPtr(d), 0, d.view);
+    return element(.tabs, @intFromPtr(d), 0, d.win.view);
 }
 
 fn tabOf(d: *Doc, id: u32) Id {
@@ -434,7 +434,7 @@ pub fn nsText(s: []const u8) Id {
 
 fn textFrame(self: Id, _: Sel) callconv(.c) Rect {
     const d = docOf(self) orelse return .{};
-    return screen(d.view, ax.textRect(d));
+    return screen(d.win.view, ax.textRect(d));
 }
 
 fn textLabel(self: Id, _: Sel) callconv(.c) Id {
@@ -444,25 +444,25 @@ fn textLabel(self: Id, _: Sel) callconv(.c) Id {
 
 fn textValue(self: Id, _: Sel) callconv(.c) Id {
     const d = docOf(self) orelse return objc.str("");
-    return nsText(d.ed.text());
+    return nsText(d.file.ed.text());
 }
 
 fn textCount(self: Id, _: Sel) callconv(.c) isize {
     const d = docOf(self) orelse return 0;
-    const t = d.ed.text();
+    const t = d.file.ed.text();
     return @intCast(units(t, 0, t.len));
 }
 
 fn selText(self: Id, _: Sel) callconv(.c) Id {
     const d = docOf(self) orelse return objc.str("");
-    const s = d.ed.sel();
-    return nsText(d.ed.text()[s[0]..s[1]]);
+    const s = d.file.ed.sel();
+    return nsText(d.file.ed.text()[s[0]..s[1]]);
 }
 
 fn selRange(self: Id, _: Sel) callconv(.c) Range {
     const d = docOf(self) orelse return .{};
-    const s = d.ed.sel();
-    return toRange(d.ed.text(), s[0], s[1]);
+    const s = d.file.ed.sel();
+    return toRange(d.file.ed.text(), s[0], s[1]);
 }
 
 fn selRanges(self: Id, _: Sel) callconv(.c) Id {
@@ -473,32 +473,32 @@ fn selRanges(self: Id, _: Sel) callconv(.c) Id {
 /// VoiceOver moves the caret or selects.
 fn setSelRange(self: Id, _: Sel, r: Range) callconv(.c) void {
     const d = docOf(self) orelse return;
-    const b = toBytes(d.ed.text(), r);
+    const b = toBytes(d.file.ed.text(), r);
     ax.select(d, b[0], b[1]);
 }
 
 fn caretLine(self: Id, _: Sel) callconv(.c) isize {
     const d = docOf(self) orelse return 0;
-    return @intCast(d.ed.buf.lineOf(d.ed.cur));
+    return @intCast(d.file.ed.buf.lineOf(d.file.ed.cur));
 }
 
 fn visibleRange(self: Id, _: Sel) callconv(.c) Range {
     const d = docOf(self) orelse return .{};
     const v = ax.visible(d);
-    return toRange(d.ed.text(), v[0], @max(v[0], v[1]));
+    return toRange(d.file.ed.text(), v[0], @max(v[0], v[1]));
 }
 
 fn lineForIndex(self: Id, _: Sel, i: isize) callconv(.c) isize {
     const d = docOf(self) orelse return 0;
     if (i < 0) return 0;
-    return @intCast(d.ed.buf.lineOf(advance(d.ed.text(), 0, @intCast(i))));
+    return @intCast(d.file.ed.buf.lineOf(advance(d.file.ed.text(), 0, @intCast(i))));
 }
 
 /// Line `n` with its line break, as NSTextView gives it.
 fn rangeForLine(self: Id, _: Sel, n: isize) callconv(.c) Range {
     const d = docOf(self) orelse return .{};
-    const b = &d.ed.buf;
-    const t = d.ed.text();
+    const b = &d.file.ed.buf;
+    const t = d.file.ed.text();
     if (n < 0 or @as(usize, @intCast(n)) >= b.lines()) return .{ .loc = units(t, 0, t.len) };
     const k: usize = @intCast(n);
     return toRange(t, b.lineStart(k), if (k + 1 < b.lines()) b.lineStart(k + 1) else t.len);
@@ -506,7 +506,7 @@ fn rangeForLine(self: Id, _: Sel, n: isize) callconv(.c) Range {
 
 fn stringForRange(self: Id, _: Sel, r: Range) callconv(.c) Id {
     const d = docOf(self) orelse return objc.str("");
-    const t = d.ed.text();
+    const t = d.file.ed.text();
     const b = toBytes(t, r);
     return nsText(t[b[0]..b[1]]);
 }
@@ -519,28 +519,28 @@ fn attributedForRange(self: Id, _: Sel, r: Range) callconv(.c) Id {
 /// Where a range draws: its stretch of one row, or every row it touches.
 fn frameForRange(self: Id, _: Sel, r: Range) callconv(.c) Rect {
     const d = docOf(self) orelse return .{};
-    const t = d.ed.text();
+    const t = d.file.ed.text();
     const b = toBytes(t, r);
     const a = ax.cell(d, b[0]);
-    if (b[1] == b[0]) return screen(d.view, a);
+    if (b[1] == b[0]) return screen(d.win.view, a);
     const z = ax.cell(d, editor.prevChar(t, b[1]));
-    if (z.y == a.y) return screen(d.view, .{ .x = a.x, .y = a.y, .w = @max(z.x + z.w - a.x, a.w), .h = a.h });
+    if (z.y == a.y) return screen(d.win.view, .{ .x = a.x, .y = a.y, .w = @max(z.x + z.w - a.x, a.w), .h = a.h });
     const tr = ax.textRect(d);
-    return screen(d.view, .{ .x = tr.x, .y = a.y, .w = tr.w, .h = z.y + z.h - a.y });
+    return screen(d.win.view, .{ .x = tr.x, .y = a.y, .w = tr.w, .h = z.y + z.h - a.y });
 }
 
 /// The character under screen point `p`.
 fn rangeForPosition(self: Id, _: Sel, p: Point) callconv(.c) Range {
     const d = docOf(self) orelse return .{};
-    const t = d.ed.text();
-    const pos = ax.posAtPoint(d, fromScreen(d.view, p));
+    const t = d.file.ed.text();
+    const pos = ax.posAtPoint(d, fromScreen(d.win.view, p));
     return toRange(t, pos, editor.nextChar(t, pos));
 }
 
 /// The whole character that unit `i` falls in.
 fn rangeForIndex(self: Id, _: Sel, i: isize) callconv(.c) Range {
     const d = docOf(self) orelse return .{};
-    const t = d.ed.text();
+    const t = d.file.ed.text();
     const pos = advance(t, 0, @intCast(@max(i, 0)));
     return toRange(t, pos, editor.nextChar(t, pos));
 }
@@ -548,7 +548,7 @@ fn rangeForIndex(self: Id, _: Sel, i: isize) callconv(.c) Range {
 /// The text has one style for VoiceOver: all of it.
 fn styleRange(self: Id, _: Sel, _: isize) callconv(.c) Range {
     const d = docOf(self) orelse return .{};
-    const t = d.ed.text();
+    const t = d.file.ed.text();
     return .{ .len = units(t, 0, t.len) };
 }
 
@@ -569,7 +569,7 @@ fn tabsFrame(self: Id, _: Sel) callconv(.c) Rect {
     const n = ax.tabs(d);
     const first = ax.tabRect(d, ax.tabAtIndex(d, 0));
     const last = ax.tabRect(d, ax.tabAtIndex(d, n - 1));
-    return screen(d.view, .{ .x = first.x, .y = first.y, .w = @max(last.x + last.w - first.x, 0), .h = first.h });
+    return screen(d.win.view, .{ .x = first.x, .y = first.y, .w = @max(last.x + last.w - first.x, 0), .h = first.h });
 }
 
 fn tabsChildren(self: Id, _: Sel) callconv(.c) Id {
@@ -596,7 +596,7 @@ fn tabIndex(self: Id) ?struct { d: *Doc, j: usize } {
 
 fn tabFrame(self: Id, _: Sel) callconv(.c) Rect {
     const t = tabIndex(self) orelse return .{};
-    return screen(t.d.view, ax.tabRect(t.d, @intCast(slot(self, .key).*)));
+    return screen(t.d.win.view, ax.tabRect(t.d, @intCast(slot(self, .key).*)));
 }
 
 fn tabTitle(self: Id, _: Sel) callconv(.c) Id {
