@@ -376,7 +376,8 @@ function color with their address dimmed. Other files are plain text.
 Zag has a theme for light mode and one for dark mode. **View > Theme** picks the mode under
 Appearance: Auto (the default) switches every window when the Mac switches, and Light or Dark keeps
 Zag in that mode whatever the Mac does. Below that it picks the themes: Paper (the default), Ayu Light
-or One Light for light mode, and Ink (the default), Ayu Dark or One Dark for dark mode. Checkmarks
+or One Light for light mode, and Ink (the default), Ayu Dark, One Dark or Black for dark mode. Black is
+for OLED screens: a black window with soft off-white text. Checkmarks
 show the mode and the two themes in use. Zag remembers them in the settings file.
 Zen Mode turns every theme color grey while it's on, without changing the saved colors.
 Switching themes, or the Mac's light and dark setting, fades over a quarter of a second. Gray
@@ -413,7 +414,7 @@ zen = off                # hide the chrome and center an 80-column grey page
 sidebar = on             # the folder's files on the left
 sidebar-width = 250      # in points, from 150 to 500
 appearance = auto        # auto, light or dark
-light-theme = paper      # paper, ayu-light, one-light, ink, ayu-dark or one-dark
+light-theme = paper      # paper, ayu-light, one-light, ink, ayu-dark, one-dark or black
 dark-theme = ink
 light.comment = #B3AEA3  # one color of the light theme, as #rrggbb
 ```

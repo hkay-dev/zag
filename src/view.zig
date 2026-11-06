@@ -175,9 +175,11 @@ fn mixRgb(a: Rgb, b: Rgb, t: f64) Rgb {
 }
 
 /// How much of the chrome color paints over the sidebar material: the rest
-/// shows through. Zen covers the material completely. (The material can't
-/// be hidden: Zag's view lives inside it.)
-fn chromeAlpha(dark: bool, z: f64) f64 {
+/// shows through. Zen covers the material completely, and so does a theme
+/// whose background is pure black (Black), so no grey shows. (The material
+/// can't be hidden: Zag's view lives inside it.)
+fn chromeAlpha(th: *const Theme, dark: bool, z: f64) f64 {
+    if (th.bg[0] + th.bg[1] + th.bg[2] == 0) return 1;
     const a: f64 = if (dark) 0.7 else 0.6;
     return a + (1 - a) * std.math.clamp(z, 0, 1);
 }
@@ -4611,7 +4613,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
         const y = @min(lt + f(j) * side_h, lt + f(e) * side_h - sy - side_h);
         w.stuck_y[j] = y;
         objc.CGContextClearRect(ctx, .{ .y = y, .w = side_w, .h = side_h });
-        fillA(ctx, bg, chromeAlpha(dark, w.z.x), 0, y, side_w, side_h);
+        fillA(ctx, bg, chromeAlpha(th, dark, w.z.x), 0, y, side_w, side_h);
         var turn: ?f64 = null;
         for (vs[0..vn]) |v| if (v.at == a) {
             turn = v.p;
@@ -4626,7 +4628,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
     const more = std.math.clamp((f(rows.len) * side_h - moved - sy - view_h) / side_fade, 0, 1);
     // Drawn at full strength: the band's height is what eases, and not while the
     // sidebar slides, when its alpha would scale the repaint unevenly.
-    if (more * side_fade >= 1 and fade >= 1) fadeList(ctx, bg, chromeAlpha(dark, w.z.x), lt + view_h, more * side_fade);
+    if (more * side_fade >= 1 and fade >= 1) fadeList(ctx, bg, chromeAlpha(th, dark, w.z.x), lt + view_h, more * side_fade);
     objc.CGContextRestoreGState(ctx);
 }
 
@@ -4946,7 +4948,7 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     objc.CGContextClearRect(ctx, .{ .w = r.w, .h = r.h });
     // Text upright for every draw: a strip-only one skips the cards, whose drawPane also sets it.
     objc.flipText(ctx);
-    fillA(ctx, chrome(th, dark, w.z.x), chromeAlpha(dark, w.z.x), 0, 0, r.w, r.h);
+    fillA(ctx, chrome(th, dark, w.z.x), chromeAlpha(th, dark, w.z.x), 0, 0, r.w, r.h);
     const key = msg(bool, w.window, "isKeyWindow", .{});
     const many = w.cards.pane == null;
     for (&w.hot_t, 1..) |*t, i| t.aim(if (w.hot == i) 1 else 0, now);

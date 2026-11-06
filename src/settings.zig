@@ -119,6 +119,23 @@ const one_dark: Theme = .{
     .header = rgb(0x31363F),
 };
 
+/// Black for OLED screens: pure black with off-white text a step softer than
+/// Ink's, since black raises the contrast, and Ink's hues pulled a tenth
+/// toward black to sit with it.
+pub const black: Theme = .{
+    .bg = rgb(0x000000),
+    .fg = rgb(0xCBC6BA),
+    .muted = rgb(0x7B776F),
+    .kinds = .{ rgb(0xCBC6BA), rgb(0xD87C61), rgb(0x96AD73), rgb(0x6F6B63), rgb(0xD1A660), rgb(0x7FA6C2), rgb(0xBA93C2) },
+    .sel = rgb(0x3A2416),
+    .line = rgb(0x0A0A0B),
+    .caret = rgb(0xE67A33),
+    .match = rgb(0x3A3018),
+    .panel = rgb(0x101012),
+    .rule = rgb(0x1C1C20),
+    .header = rgb(0x111113),
+};
+
 pub const Scheme = struct {
     /// How the settings file names it.
     key: []const u8,
@@ -136,6 +153,7 @@ pub const schemes = [_]Scheme{
     .{ .key = "ink", .title = "Ink", .dark = true, .theme = ink },
     .{ .key = "ayu-dark", .title = "Ayu Dark", .dark = true, .theme = ayu_dark },
     .{ .key = "one-dark", .title = "One Dark", .dark = true, .theme = one_dark },
+    .{ .key = "black", .title = "Black", .dark = true, .theme = black },
 };
 
 fn schemeIndex(key: []const u8) ?u8 {
@@ -355,7 +373,7 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         \\# Light or dark: auto follows the Mac, light or dark keeps Zag in that mode.
         \\appearance = {s}
         \\# The theme for each mode: paper, ayu-light, one-light,
-        \\# ink, ayu-dark or one-dark.
+        \\# ink, ayu-dark, one-dark or black.
         \\light-theme = {s}
         \\dark-theme = {s}
         \\
