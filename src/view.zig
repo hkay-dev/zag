@@ -6853,11 +6853,12 @@ fn mouseExited(self: Id, _: Sel, _: Id) callconv(.c) void {
 }
 
 /// Zen's lights peek back while the mouse is in the window's top-left
-/// corner, and fade out a hold after it leaves.
+/// corner, and fade out a hold after it leaves. Typing (no hold) needs no
+/// timer: its own redraw starts the fade.
 fn peekTo(w: *Win, in: bool, hold: f64) void {
     w.peek_in = in;
     w.peek_out = CACurrentMediaTime() + hold;
-    holdRedraw(w.view, w.window, hold);
+    if (hold > 0) holdRedraw(w.view, w.window, hold);
 }
 
 /// The mouse lets go of a button it pressed: the button's fill fades.
