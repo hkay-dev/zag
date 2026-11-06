@@ -337,10 +337,6 @@ fn setFont() void {
     side_h = @round((conf.size - 1) * 2.3);
     side_base = @round((side_h - objc.CTFontGetAscent(side_font) - objc.CTFontGetDescent(side_font)) / 2 + objc.CTFontGetAscent(side_font));
     name_off = (objc.CTFontGetAscent(name_font) - objc.CTFontGetDescent(name_font)) / 2;
-    for (&cut_dots) |*p| if (p.*) |l| {
-        objc.CFRelease(l);
-        p.* = null;
-    };
     tab_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 1, @as(f64, 0) }), "retain", .{});
     tab_bold = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 1, @as(f64, 0.23) }), "retain", .{});
     path_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 3, @as(f64, 0) }), "retain", .{});
@@ -444,9 +440,7 @@ const Ink = struct {
                 if (k.focus) |fo| {
                     const at = k.offset + i;
                     if (at < k.selected[0] or at >= k.selected[1]) {
-                        const in_new: f64 = if (at >= fo.new[0] and at < fo.new[1]) 1 else 0;
-                        const in_old: f64 = if (at >= fo.old[0] and at < fo.old[1]) 1 else 0;
-                        const a = 1 - fo.amt * (0.78 - 0.78 * (in_new * fo.t + in_old * (1 - fo.t)));
+                        const a = fo.dim(at >= fo.new[0] and at < fo.new[1], at >= fo.old[0] and at < fo.old[1]);
                         for (&paint, th.bg) |*v, bg| v.* = bg + (v.* - bg) * a;
                     }
                 }
@@ -461,7 +455,16 @@ const Ink = struct {
 
 /// Focus mode's lit text: the byte range it's fading to, the one it's
 /// fading from, and how far along the fade is.
-const Focus = struct { new: [2]usize, old: [2]usize, t: f64, amt: f64 };
+const Focus = struct {
+    new: [2]usize,
+    old: [2]usize,
+    t: f64,
+    amt: f64,
+
+    fn dim(fo: Focus, in_new: bool, in_old: bool) f64 {
+        return 1 - fo.amt * (0.78 - 0.78 * (f(@intFromBool(in_new)) * fo.t + f(@intFromBool(in_old)) * (1 - fo.t)));
+    }
+};
 /// Focus mode fades from one span to the next at an even rate.
 const focus_time = 0.25;
 
@@ -959,33 +962,48 @@ const stag_cap = 0.12;
 /// A new current match starts its pop at this speed: it peaks near 1.14.
 const pop_kick = 6.0;
 
+const RowSpan = struct { x0: f64, x1: f64, lo: usize, hi: usize, col: usize };
+
+/// Where file bytes `m` fall on row `sg` of line `l`, starting at byte `ls`.
+fn rowSpan(l: []const u8, ls: usize, sg: Seg, m: [2]usize, ox: f64, skip: usize) ?RowSpan {
+    if (m[0] > ls + l.len or m[1] <= ls) return null;
+    const lo = std.math.clamp(@max(m[0], ls) - ls, sg.start, sg.end);
+    const hi = std.math.clamp(@min(m[1], ls + l.len) - ls, sg.start, sg.end);
+    const col = editor.colOf(l, sg.start, sg.col, lo);
+    const x0 = ox + (f(col - sg.col) - f(skip)) * cw;
+    return .{ .x0 = x0, .x1 = ox + (f(editor.colOf(l, lo, col, hi) - sg.col) - f(skip)) * cw, .lo = lo, .hi = hi, .col = col };
+}
+
+/// Fills a row span, with a tail when the range runs on to the next line.
+fn fillSpan(ctx: Id, col: Rgb, a: f64, rg: [2]usize, ls: usize, l: []const u8, sg: Seg, ox: f64, skip: usize, y: f64) void {
+    const sp = rowSpan(l, ls, sg, rg, ox, skip) orelse return;
+    const tail: f64 = if (rg[1] > ls + l.len and sg.end == l.len) 0.6 * cw else 0;
+    const w = sp.x1 - sp.x0 + tail;
+    if (w > 0) fillA(ctx, col, a, sp.x0, y, w, lh);
+}
+
 /// Draws the find indicator over row `sg` of line `l` (which starts at byte
 /// `ls`): bytes `m` of the file as an opaque pill with its glyphs redrawn
 /// dark, grown by `scale` about its center and `a` opaque.
 fn pillOver(k: *Ink, th: *const Theme, dark: bool, l: []const u8, ls: usize, sg: Seg, m: [2]usize, ox: f64, skip: usize, y: f64, scale: f64, a: f64) void {
-    if (m[0] > ls + l.len or m[1] <= ls) return;
-    const lo = std.math.clamp(@max(m[0], ls) - ls, sg.start, sg.end);
-    const hi = std.math.clamp(@min(m[1], ls + l.len) - ls, sg.start, sg.end);
-    if (lo >= hi) return;
-    const col = editor.colOf(l, sg.start, sg.col, lo);
-    const x0 = ox + (f(col - sg.col) - f(skip)) * cw;
-    const x1 = ox + (f(editor.colOf(l, lo, col, hi) - sg.col) - f(skip)) * cw;
+    const sp = rowSpan(l, ls, sg, m, ox, skip) orelse return;
+    if (sp.lo >= sp.hi) return;
     const ctx = k.ctx;
     k.flush();
     objc.CGContextSaveGState(ctx);
-    const cx = (x0 + x1) / 2;
+    const cx = (sp.x0 + sp.x1) / 2;
     const cy = y + lh / 2;
     if (scale != 1) {
         objc.CGContextTranslateCTM(ctx, cx, cy);
         objc.CGContextScaleCTM(ctx, scale, scale);
         objc.CGContextTranslateCTM(ctx, -cx, -cy);
     }
-    pill(ctx, if (dark) find_dark else find_light, a, x0 - 2, y + 1, x1 - x0 + 4, lh - 2, 3);
+    pill(ctx, if (dark) find_dark else find_light, a, sp.x0 - 2, y + 1, sp.x1 - sp.x0 + 4, lh - 2, 3);
     var ink: Rgb = undefined;
     for (&ink, th.fg, find_ink) |*c, fg, dk| c.* = fg + (dk - fg) * a;
     const was = k.focus;
     k.focus = null;
-    _ = k.run(l, lo, hi, col, null, th, ink, x0, y + baseline, 0, 1 << 16);
+    _ = k.run(l, sp.lo, sp.hi, sp.col, null, th, ink, sp.x0, y + baseline, 0, 1 << 16);
     k.flush();
     k.focus = was;
     objc.CGContextRestoreGState(ctx);
@@ -4027,15 +4045,15 @@ fn dropIcons() void {
 }
 
 /// A row's name at `room` wide: the whole line when it fits, else the cut one
-/// (ending in `dotsFor(k)`), made again only when the room changed.
-fn sideFit(sl: *SideLine, k: usize, room: f64) Id {
+/// (ending in `uiDots(fnt)`), made again only when the room changed.
+fn sideFit(sl: *SideLine, fnt: Id, room: f64) Id {
     const l = sl.full orelse return null;
     if (sl.w < 0) sl.w = lineW(l);
     if (sl.w <= room) return l;
     if (sl.cut_room != room) {
         if (sl.cut) |c| objc.CFRelease(c);
         sl.cut_room = room;
-        sl.cut = objc.CTLineCreateTruncatedLine(l, room, 1, dotsFor(k));
+        sl.cut = objc.CTLineCreateTruncatedLine(l, room, 1, uiDots(fnt));
     }
     return sl.cut orelse l;
 }
@@ -4626,7 +4644,7 @@ fn drawRow(w: *Win, ctx: Id, th: *const Theme, dark: bool, i: usize, y: f64, tur
     if (row.dir) drawIcon(icon(.folder, dark, th), x + 10, iy, s) else tile(sl.icon, x + 10, iy, s);
     const nx = x + 10 + s + 8;
     const room = side_w - nx - if (row.dir) @as(f64, 14) else 26;
-    const plain = sideFit(sl, 2, room);
+    const plain = sideFit(sl, side_font, room);
     // How far the selection's highlight is on this row, for the bold name.
     const bp: f64 = if (row.dir or w.sel.row == null) 0 else (1 - std.math.clamp(@abs(w.sel.s.x - (f(i) * side_h - sh)) / side_h, 0, 1)) * std.math.clamp(w.sel.a.at(now), 0, 1);
     var nw = if (1 - bp > 0.001) drawLineA(ctx, plain, th.fg, 1 - bp, nx, y + side_base) else if (plain == sl.full) sl.w else lineW(plain);
@@ -4641,7 +4659,7 @@ fn drawRow(w: *Win, ctx: Id, th: *const Theme, dark: bool, i: usize, y: f64, tur
         const kept: ?*SideLine = for (&w.bold) |*b| {
             if (b.line.full != null and b.row == i and b.gen == tree_gen) break &b.line;
         } else null;
-        const line = if (kept) |k| sideFit(k, 3, room) else uiLine(row.rel[row.base..], name_font, room);
+        const line = if (kept) |k| sideFit(k, name_font, room) else uiLine(row.rel[row.base..], name_font, room);
         defer if (kept == null) if (line) |l| objc.CFRelease(l);
         const bw = drawLineA(ctx, line, th.fg, bp, nx, y + side_base);
         nw += (bw - nw) * bp;
@@ -4970,55 +4988,49 @@ fn uiLine(s: []const u8, fnt: Id, width: f64) Id {
     defer msg(void, text, "release", .{});
     const line = objc.CTLineCreateWithAttributedString(text);
     if (line == null or lineW(line) <= width) return line;
-    const token = ellipsis(fnt);
-    defer if (token) |t| objc.CFRelease(t);
-    const short = objc.CTLineCreateTruncatedLine(line, width, 1, token);
+    const short = objc.CTLineCreateTruncatedLine(line, width, 1, uiDots(fnt));
     if (short == null) return line;
     objc.CFRelease(line.?);
     return short;
 }
 
-/// One attributes dictionary per UI font in use (retained), so a line doesn't
-/// build one; emptied when the fonts are made again.
-const UiAttrs = struct { font: Id, attrs: Id };
+/// One attributes dictionary and cut ellipsis per UI font in use, emptied
+/// when the fonts are made again.
+const UiAttrs = struct { font: Id, attrs: Id, dots: Id = null };
 var ui_attrs: [10]UiAttrs = undefined;
 var ui_attrs_n: usize = 0;
 
 fn dropAttrs() void {
-    for (ui_attrs[0..ui_attrs_n]) |a| msg(void, a.attrs, "release", .{});
+    for (ui_attrs[0..ui_attrs_n]) |a| {
+        msg(void, a.attrs, "release", .{});
+        if (a.dots) |d| objc.CFRelease(d);
+    }
     ui_attrs_n = 0;
 }
 
 fn uiAttrs(fnt: Id) Id {
-    for (ui_attrs[0..ui_attrs_n]) |a| if (a.font == fnt) return a.attrs;
+    return uiEntry(fnt).attrs;
+}
+
+fn uiEntry(fnt: Id) *UiAttrs {
+    for (ui_attrs[0..ui_attrs_n]) |*a| if (a.font == fnt) return a;
     if (ui_attrs_n == ui_attrs.len) dropAttrs();
     const objs = [2]Id{ fnt, msg(Id, objc.class("NSNumber"), "numberWithBool:", .{true}) };
     const keys = [2]Id{ objc.str("NSFont"), objc.str("CTForegroundColorFromContext") };
     const made = msg(Id, msg(Id, objc.class("NSDictionary"), "dictionaryWithObjects:forKeys:count:", .{ &objs, &keys, @as(usize, 2) }), "retain", .{});
     ui_attrs[ui_attrs_n] = .{ .font = fnt, .attrs = made };
     ui_attrs_n += 1;
-    return made;
+    return &ui_attrs[ui_attrs_n - 1];
 }
 
-/// The ellipsis `uiLine` ends a cut line with, in `fnt`. Owned: CFRelease it.
-fn ellipsis(fnt: Id) Id {
-    const dots = attributed("…", uiAttrs(fnt));
-    defer msg(void, dots, "release", .{});
-    return objc.CTLineCreateWithAttributedString(dots);
-}
-
-/// The ellipses that cut lines end with, made on first use and kept until the
-/// fonts change: tab names bold then thin, then sidebar rows plain then bold.
-var cut_dots: [4]Id = @splat(null);
-
-fn dotsFor(k: usize) Id {
-    if (cut_dots[k] == null) cut_dots[k] = ellipsis(switch (k) {
-        0 => tab_bold,
-        1 => tab_font,
-        2 => side_font,
-        else => name_font,
-    });
-    return cut_dots[k];
+fn uiDots(fnt: Id) Id {
+    const e = uiEntry(fnt);
+    if (e.dots == null) {
+        const text = attributed("…", e.attrs);
+        defer msg(void, text, "release", .{});
+        e.dots = objc.CTLineCreateWithAttributedString(text);
+    }
+    return e.dots;
 }
 
 fn attributed(s: []const u8, attrs: Id) Id {
@@ -5079,7 +5091,17 @@ fn isDark(w: *Win) bool {
     return dk;
 }
 
-const VRow = struct { line: usize, seg: Seg };
+const VRow = struct { line: usize, seg: Seg, kinds: ?[]const syntax.Kind = null, reach: u8 = 0 };
+
+fn cardRect(d: *const Doc) Rect {
+    return .{ .x = gap, .y = gap, .w = d.size.x - 2 * gap, .h = d.size.y - 2 * gap };
+}
+
+fn cardShade(d: *const Doc, ctx: Id, dark: bool, now: f64) void {
+    const zen_k = 1 - std.math.clamp(d.win.z.x, 0, 1);
+    const card = cardRect(d);
+    if (zen_k > 0) cardShadow(ctx, dark, zen_k * (0.5 + 0.5 * d.win.key_a.at(now)), card.x, card.y, card.w, card.h);
+}
 
 /// Draws a window: its chrome, each card in its pane, then the sidebar and
 /// the buttons by the traffic lights.
@@ -5163,25 +5185,21 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
         // that reaches only its shadow draws just that.
         const body: Rect = .{ .x = d.org.x + gap, .y = d.org.y, .w = d.size.x - gap, .h = d.size.y };
         const shade: Rect = .{ .x = body.x - shadow_m, .y = body.y, .w = body.w - gap + 2 * shadow_m, .h = body.h };
-        if (!hits(dirty, shade)) {
-            busy = busy or d.busy;
-            gliding = gliding or d.cx.moving(now) or d.cy.moving(now);
-            continue;
-        }
-        objc.CGContextSaveGState(ctx);
-        objc.CGContextTranslateCTM(ctx, d.org.x, d.org.y);
         const shaking = (now - d.card_shake_t0) / shake_time;
-        if (shaking >= 0 and shaking < 1) objc.CGContextTranslateCTM(ctx, 6 * @sin(2 * std.math.pi * 3 * shaking) * (1 - shaking), 0);
-        if (grown < 1) {
-            objc.CGContextSetAlpha(ctx, grown);
-            objc.CGContextBeginTransparencyLayer(ctx, null);
+        if (hits(dirty, shade)) {
+            objc.CGContextSaveGState(ctx);
+            objc.CGContextTranslateCTM(ctx, d.org.x, d.org.y);
+            if (shaking >= 0 and shaking < 1) objc.CGContextTranslateCTM(ctx, 6 * @sin(2 * std.math.pi * 3 * shaking) * (1 - shaking), 0);
+            if (grown < 1) {
+                objc.CGContextSetAlpha(ctx, grown);
+                objc.CGContextBeginTransparencyLayer(ctx, null);
+            }
+            if (hits(dirty, body)) drawPane(d, ctx, th, dark, key, many, now, resizing) else cardShade(d, ctx, dark, now);
+            if (grown < 1) objc.CGContextEndTransparencyLayer(ctx);
+            objc.CGContextRestoreGState(ctx);
+            busy = busy or (shaking >= 0 and shaking < 1);
         }
-        if (hits(dirty, body)) drawPane(d, ctx, th, dark, key, many, now, resizing) else if (w.z.x < 1) {
-            cardShadow(ctx, dark, (1 - std.math.clamp(w.z.x, 0, 1)) * (0.5 + 0.5 * w.key_a.at(now)), gap, gap, d.size.x - 2 * gap, d.size.y - 2 * gap);
-        }
-        if (grown < 1) objc.CGContextEndTransparencyLayer(ctx);
-        objc.CGContextRestoreGState(ctx);
-        busy = busy or d.busy or (shaking >= 0 and shaking < 1);
+        busy = busy or d.busy;
         gliding = gliding or d.cx.moving(now) or d.cy.moving(now);
     };
     // The sidebar, and the buttons by the traffic lights, each with a soft
@@ -5225,7 +5243,9 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         msg(void, d.caret, "setBackgroundColor:", .{msg(Id, nscolor(th.caret), "CGColor", .{})});
         preview.update(d, &themes, dark);
     }
-    const r = bounds(d);
+    const card = cardRect(d);
+    const zt = std.math.clamp(d.win.z.x, 0, 1);
+    const zen_k = 1 - zt;
     const focused = d.win.focus == d;
     // The caret only shows in the key window's focused card.
     const key = win_key and focused and !d.closing;
@@ -5238,11 +5258,10 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     const ka = d.inked.at(now);
     const b = &d.file.ed.buf;
     d.gut.aim(gutCols(d), now);
-    d.gw = d.gut.at(now) * cw * (1 - std.math.clamp(d.win.z.x, 0, 1));
+    d.gw = d.gut.at(now) * cw * zen_k;
     layout(d);
     if (conf.typewriter and d.center_h != textH(d)) reveal(d);
     d.center_h = textH(d);
-    d.band.dur = if (conf.typewriter) scroll_time else caret_time;
     clampScroll(d);
     // Jumps glide the scroll. Stepping past the edge a few rows at a time and
     // live resizing snap it (the trackpad snaps in scrollWheel), and the caret
@@ -5266,10 +5285,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     d.vx = d.xs.at(now);
     // The card that holds the text, header and prompt line, which draw
     // inside its rounded corners.
-    const lx = gap;
-    const card: Rect = .{ .x = lx, .y = gap, .w = rightEdge(d) - lx, .h = r.h - 2 * gap };
-    const zen_k = 1 - std.math.clamp(d.win.z.x, 0, 1);
-    if (zen_k > 0) cardShadow(ctx, dark, zen_k * (0.5 + 0.5 * d.win.key_a.at(now)), card.x, card.y, card.w, card.h);
+    cardShade(d, ctx, dark, now);
     pill(ctx, th.bg, 1, card.x, card.y, card.w, card.h, card_radius);
     objc.CGContextSaveGState(ctx);
     clipRound(ctx, card.x, card.y, card.w, card.h, card_radius);
@@ -5279,7 +5295,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     const last = @min(total, @as(usize, @intFromFloat(@max(@ceil((d.vy + textH(d)) / lh), 0))) + 1);
     const first: usize = @min(@as(usize, @intFromFloat(@max(@floor(d.vy / lh), 0))), last);
     const skip: usize = @intFromFloat(@max(@ceil(d.vx / cw), 0));
-    const tx = lx + padL(d);
+    const tx = gap + padL(d);
     // Sideways-scrolled text stops at the line numbers rather than running under them.
     const clip_l = card.x + (tx - 0.5 * cw - card.x) * std.math.clamp(d.gw / (3.5 * cw), 0, 1);
     const ox = tx + f(skip) * cw - d.vx;
@@ -5315,24 +5331,23 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // place. A tab switch just fades from a little dim, with no rise.
     const load = std.math.clamp((now - d.load_t) / loadDur(d), 0, 1);
     const loaded = 1 - (1 - load) * (1 - load) * (1 - load);
+    const base_a: f64 = if (loaded >= 1) 1 else if (d.file.rise) loaded else swap_from + (1 - swap_from) * loaded;
     objc.CGContextSaveGState(ctx);
     // Text stops above the status strip rather than running under it.
     objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = card.w, .h = card.h - stripH(d) * (1 - d.pbar.at(now)) });
     if (loaded < 1) {
-        if (d.file.rise) {
-            objc.CGContextSetAlpha(ctx, loaded);
-            objc.CGContextTranslateCTM(ctx, 0, (1 - loaded) * load_rise);
-        } else objc.CGContextSetAlpha(ctx, swap_from + (1 - swap_from) * loaded);
+        objc.CGContextSetAlpha(ctx, base_a);
+        if (d.file.rise) objc.CGContextTranslateCTM(ctx, 0, (1 - loaded) * load_rise);
     }
 
     // The caret line's band slides after the caret, and stays on its line
     // under a selection, which draws over it in its own color.
     const band_on = d.mode == .edit;
-    if (band_on and d.band_on) d.band.aim(f(here.row) * lh, now) else d.band.snap(f(here.row) * lh);
+    if (band_on and d.band_on) d.band.aimOver(f(here.row) * lh, if (conf.typewriter) scroll_time else caret_time, now) else d.band.snap(f(here.row) * lh);
     d.band_on = band_on;
     d.band_a.aim(if (band_on) 1 else 0, now);
     const band_alpha = d.band_a.at(now);
-    if (band_alpha > 0) fillA(ctx, th.line, band_alpha, lx, top_h + d.band.at(now) - d.vy, card.w, lh);
+    if (band_alpha > 0) fillA(ctx, th.line, band_alpha, gap, top_h + d.band.at(now) - d.vy, card.w, lh);
     objc.CGContextSaveGState(ctx);
     objc.CGContextClipToRect(ctx, .{ .x = clip_l, .y = card.y, .w = ox + f(cols) * cw - clip_l, .h = card.h });
 
@@ -5406,38 +5421,17 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         const ls = b.lineStart(v.line);
         const l = b.line(v.line);
         const sg = v.seg;
-        const xat = struct {
-            fn x(line: []const u8, g: Seg, p: usize, o: f64, sk: usize) f64 {
-                return o + (f(editor.colOf(line, g.start, g.col, p) - g.col) - f(sk)) * cw;
-            }
-        }.x;
-        // Fills the part of `rg` that falls on this row, with a tail past the
-        // line's end when `rg` runs on to the next line.
-        const span = struct {
-            fn fill(c: Id, col: Rgb, a: f64, rg: [2]usize, ls_: usize, line: []const u8, g: Seg, o: f64, sk: usize, y_: f64) void {
-                if (rg[0] > ls_ + line.len or rg[1] <= ls_) return;
-                const lo = std.math.clamp(@max(rg[0], ls_) - ls_, g.start, g.end);
-                const hi = std.math.clamp(@min(rg[1], ls_ + line.len) - ls_, g.start, g.end);
-                const tail: f64 = if (rg[1] > ls_ + line.len and g.end == line.len) 0.6 * cw else 0;
-                const x0 = xat(line, g, lo, o, sk);
-                const w = xat(line, g, hi, o, sk) - x0 + tail;
-                if (w > 0) fillA(c, col, a, x0, y_, w, lh);
-            }
-        }.fill;
-        if (has_sel) span(ctx, th.sel, sel_a, s, ls, l, sg, ox, skip, y);
-        if (out_a > 0) span(ctx, th.sel, out_a, d.sel_last, ls, l, sg, ox, skip, y);
-        if (flash_a > 0) for (d.flash[0..d.flash_n]) |fr| span(ctx, th.caret, flash_a, fr, ls, l, sg, ox, skip, y);
+        if (has_sel) fillSpan(ctx, th.sel, sel_a, s, ls, l, sg, ox, skip, y);
+        if (out_a > 0) fillSpan(ctx, th.sel, out_a, d.sel_last, ls, l, sg, ox, skip, y);
+        if (flash_a > 0) for (d.flash[0..d.flash_n]) |fr| fillSpan(ctx, th.caret, flash_a, fr, ls, l, sg, ox, skip, y);
         if (pills.len > 0) {
             // Opening find on prefilled text fades the matches in, the nearest first.
             const dist = if (row > here.row) row - here.row else here.row - row;
             const m_a = std.math.clamp((now - d.stag_t0 - @min(stag_row * f(dist), stag_cap)) / fade_time, 0, 1) * pills_a;
             var j = sg.start -| (pills.len - 1);
             while (j < sg.end and j + pills.len <= l.len) : (j += 1) if (editor.matchAt(l, j, pills, pills_sensitive)) {
-                const lo = @max(j, sg.start);
-                const hi = @min(j + pills.len, sg.end);
-                if (lo < hi and ls + j != s[0]) {
-                    const x0 = xat(l, sg, lo, ox, skip);
-                    pill(ctx, th.match, match_alpha * m_a, x0, y + 2, xat(l, sg, hi, ox, skip) - x0, lh - 4, 3);
+                if (rowSpan(l, ls, sg, .{ ls + j, ls + j + pills.len }, ox, skip)) |sp| {
+                    if (sp.lo < sp.hi and ls + j != s[0]) pill(ctx, th.match, match_alpha * m_a, sp.x0, y + 2, sp.x1 - sp.x0, lh - 4, 3);
                 }
                 j += pills.len - 1;
             };
@@ -5462,9 +5456,6 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // alpha, so the text fades toward the page, band or selection under it
     // with no layer and one batch per strip however many rows are cut.
     const strip_a = [_]f64{ 0.8, 0.55, 0.3, 0.1 };
-    const base_a: f64 = if (loaded >= 1) 1 else if (d.file.rise) loaded else swap_from + (1 - swap_from) * loaded;
-    var reach: [400]u8 = undefined;
-    var row_kinds: [400]?[]const syntax.Kind = undefined;
     var any_reach = prev_a > 0 or cur_m != null;
     var any_cut = false;
     for (0..2 + strip_a.len) |pass| {
@@ -5486,13 +5477,12 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             }
         }
         lexed = std.math.maxInt(usize);
-        for (vis[0..nvis], first..) |v, row| {
-            const ri = row - first;
-            if (pass == 1 and reach[ri] == 2) continue;
-            if (pass >= 2 and reach[ri] != 2) continue;
+        for (vis[0..nvis], first..) |*v, row| {
+            if (pass == 1 and v.reach == 2) continue;
+            if (pass >= 2 and v.reach != 2) continue;
             const l = b.line(v.line);
             const ls = b.lineStart(v.line);
-            if (pass == 1 and reach[ri] == 0) {
+            if (pass == 1 and v.reach == 0) {
                 const fading_here = prev_a > 0 and d.prev_m[0] <= ls + l.len and d.prev_m[1] > ls;
                 const current_here = if (cur_m) |m| m[0] <= ls + l.len and m[1] > ls else false;
                 if (!fading_here and !current_here) continue;
@@ -5502,18 +5492,18 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
                     lexed = v.line;
                     kinds = if (d.file.lang != &syntax.plain and v.line < d.states.items.len) lineKinds(d, v.line, l, &walk) else null;
                 }
-                row_kinds[ri] = kinds;
+                v.kinds = kinds;
             }
             k.offset = ls;
             const row_y = top_h + f(row) * lh - d.vy;
             // Later passes redraw only the last columns, at the x pass 0 gives them.
             const back = @min(cols, 2);
             const used = if (pass > 0)
-                k.run(l, v.seg.start, v.seg.end, v.seg.col, row_kinds[ri], th, th.fg, ox + f(cols - back) * cw, row_y + baseline, skip + cols - back, back + 1)
+                k.run(l, v.seg.start, v.seg.end, v.seg.col, v.kinds, th, th.fg, ox + f(cols - back) * cw, row_y + baseline, skip + cols - back, back + 1)
             else
-                k.run(l, v.seg.start, v.seg.end, v.seg.col, row_kinds[ri], th, th.fg, ox, row_y + baseline, skip, cols + 1);
+                k.run(l, v.seg.start, v.seg.end, v.seg.col, v.kinds, th, th.fg, ox, row_y + baseline, skip, cols + 1);
             if (pass == 0) {
-                reach[ri] = if (used > cols) 2 else if (used == cols) 1 else 0;
+                v.reach = if (used > cols) 2 else if (used == cols) 1 else 0;
                 any_reach = any_reach or used >= cols;
                 any_cut = any_cut or used > cols;
             }
@@ -5525,18 +5515,64 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     }
     objc.CGContextRestoreGState(ctx);
 
-    // Line numbers sit right-aligned beside the text, still when it scrolls
-    // sideways, and dim with Focus like their line. The caret's line is the
-    // text color at 0.85, a step above muted (about 0.65 of it); wrapped
-    // rows carry none.
+    drawGutter(d, &k, th, vis[0..nvis], first, here.row, tx);
+    objc.CGContextRestoreGState(ctx);
+
+    drawBar(d, ctx, th, card, now);
+
+    if (d.mode == .edit) {
+        const spot: [3]usize = .{ 0, here.row, here.col };
+        // A shift-move that extends a selection snaps, like the selection's edge.
+        if (has_sel and !std.mem.eql(usize, &spot, &d.spot)) d.snap = true;
+        placeCaret(d, now, tx + f(here.col) * cw - 1, top_h + f(here.row) * lh + 2, true, spot, key);
+        // A newly shown file's caret fades in with its text.
+        if (d.caret_fade and key) {
+            d.caret_fade = false;
+            fadeIn(d.caret, loadDur(d));
+        }
+    }
+
+    // The quick open list, rising out of the prompt line.
+    drawPanel(d, ctx, th, dark, win_key, card, now);
+
+    // The status strip along the card's bottom, in the header's small folder
+    // ink, dimmer in a card that isn't key. It fades out under the prompt band
+    // as it rises and back as it sinks, and away with Zen.
+    const stat_a = zen_k * (1 - d.pbar.at(now));
+    if (stat_a > 0.01) {
+        statusLine(d, card.w - 2 * pad_x);
+        const sy = card.y + card.h - strip_h / 2 + path_off;
+        paintLine(ctx, d.stat, th.muted, stat_a * (0.62 + 0.38 * ka), @round(card.x + card.w - pad_x - d.stat_w), @round(sy));
+    }
+
+    drawPrompt(d, ctx, th, &k, card, ka, key, finding, now);
+
+    drawHint(d, ctx, th, &k, card, now);
+
+    drawHeader(d, ctx, th, &k, dark, ka, card, zt, now);
+    // Ends the card clip that drawPane set at its top.
+    objc.CGContextRestoreGState(ctx);
+    drawRing(d, ctx, th, dark, card, zt, now);
+    d.busy = scenery(d, now);
+    // The scroll bar's hold has no frames to draw: a one-shot timer redraws
+    // when it's over, and the fade out takes it from there.
+    if (d.bar.to == 1 and !d.busy and !d.bar_due) {
+        d.bar_due = true;
+        delayRedraw(d.win.view, d.caret, @max(d.bar_t0 + bar_hold - now, 0) + 0.02);
+    }
+}
+
+// Line numbers stay beside the text and dim with Focus. Wrapped rows carry none.
+fn drawGutter(d: *Doc, k: *Ink, th: *const Theme, vis: []const VRow, first: usize, here_row: usize, tx: f64) void {
+    const b = &d.file.ed.buf;
+    const fo = k.focus;
+    k.focus = null;
     const ga = std.math.clamp(d.gw / (3.5 * cw), 0, 1);
     if (ga > 0) {
-        const at_line = if (d.mode == .edit) lineOfRow(d, here.row) else std.math.maxInt(usize);
-        const fo = k.focus;
-        k.focus = null;
+        const at_line = if (d.mode == .edit) lineOfRow(d, here_row) else std.math.maxInt(usize);
         const plain = mixRgb(th.bg, th.muted, ga);
         const here_ink = mixRgb(th.bg, mixRgb(th.bg, th.fg, 0.85), ga);
-        for (vis[0..nvis], first..) |v, row| {
+        for (vis, first..) |v, row| {
             if (v.seg.start != 0) continue;
             var nb: [20]u8 = undefined;
             var at = nb.len;
@@ -5552,22 +5588,16 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             if (fo) |fc| {
                 const ls = b.lineStart(v.line);
                 const le = ls + b.line(v.line).len;
-                const in_new: f64 = if (fc.new[0] <= le and fc.new[1] > ls) 1 else 0;
-                const in_old: f64 = if (fc.old[0] <= le and fc.old[1] > ls) 1 else 0;
-                ink = mixRgb(th.bg, ink, 1 - fc.amt * (0.78 - 0.78 * (in_new * fc.t + in_old * (1 - fc.t))));
+                ink = mixRgb(th.bg, ink, fc.dim(fc.new[0] <= le and fc.new[1] > ls, fc.old[0] <= le and fc.old[1] > ls));
             }
             _ = k.text(num, null, th, ink, tx - 1.5 * cw - f(num.len) * cw, top_h + f(row) * lh - d.vy + baseline, 0, num.len);
         }
         k.flush();
-        k.focus = fo;
     }
-    k.focus = null;
-    objc.CGContextRestoreGState(ctx);
+}
 
-    // The overlay scroll bar fades in while the page moves, and out a second
-    // after it stops. The hold costs no frames: `drawPane`'s end sets a
-    // one-shot timer that redraws once it's over.
-    // Nothing draws or waits when the whole file fits.
+// The bar's hold costs no frames; drawPane arms a one-shot timer for its end.
+fn drawBar(d: *Doc, ctx: Id, th: *const Theme, card: Rect, now: f64) void {
     const bar_room = textH(d);
     const range = scrollRange(d);
     const bar_span = range[1] - range[0];
@@ -5588,54 +5618,10 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             pill(ctx, th.fg, bar_alpha * alpha, card.x + card.w - bar_w - 3, top_h + 2 + at_y, bar_w, knob, bar_w * 0.5);
         }
     } else if (d.bar.to != 0) d.bar.snap(0);
-
-    const by = bottom(d);
-    if (d.mode == .edit) {
-        const spot: [3]usize = .{ 0, here.row, here.col };
-        // A shift-move that extends a selection snaps, like the selection's edge.
-        if (has_sel and !std.mem.eql(usize, &spot, &d.spot)) d.snap = true;
-        placeCaret(d, now, tx + f(here.col) * cw - 1, top_h + f(here.row) * lh + 2, true, spot, key);
-        // A newly shown file's caret fades in with its text.
-        if (d.caret_fade and key) {
-            d.caret_fade = false;
-            fadeIn(d.caret, loadDur(d));
-        }
-    }
-
-    // The quick open list, rising out of the prompt line.
-    const band_y = card.y + card.h - barH();
-    const ty = band_y + 6 + baseline;
-    drawPanel(d, ctx, th, dark, win_key, card, by, now);
-
-    // The status strip along the card's bottom, in the header's small folder
-    // ink, dimmer in a card that isn't key. It fades out under the prompt band
-    // as it rises and back as it sinks, and away with Zen.
-    const stat_a = zen_k * (1 - d.pbar.at(now));
-    if (stat_a > 0.01) {
-        statusLine(d, card.w - 2 * pad_x);
-        const sy = card.y + card.h - strip_h / 2 + path_off;
-        paintLine(ctx, d.stat, th.muted, stat_a * (0.62 + 0.38 * ka), @round(card.x + card.w - pad_x - d.stat_w), @round(sy));
-    }
-
-    drawPrompt(d, ctx, th, &k, card, band_y, tx, ty, ka, key, finding, now);
-
-    drawHint(d, ctx, th, &k, card, by, now);
-
-    const zt = std.math.clamp(d.win.z.x, 0, 1);
-    drawHeader(d, ctx, th, &k, dark, ka, card, zt, now);
-    // Ends the card clip that drawPane set at its top.
-    objc.CGContextRestoreGState(ctx);
-    drawRing(d, ctx, th, dark, card, zt, now);
-    d.busy = scenery(d, now);
-    // The scroll bar's hold has no frames to draw: a one-shot timer redraws
-    // when it's over, and the fade out takes it from there.
-    if (d.bar.to == 1 and !d.busy and !d.bar_due) {
-        d.bar_due = true;
-        delayRedraw(d.win.view, d.caret, @max(d.bar_t0 + bar_hold - now, 0) + 0.02);
-    }
 }
 
-fn drawPanel(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, card: Rect, by: f64, now: f64) void {
+fn drawPanel(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, card: Rect, now: f64) void {
+    const by = bottom(d);
     const want_ph: f64 = if (listing(d) != null) f(panelRows(d)) * prow + 2 * ppad else 0;
     d.panel.aim(want_ph, now);
     const ph = d.panel.at(now);
@@ -5707,7 +5693,10 @@ fn drawPanel(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, card
     }
 }
 
-fn drawPrompt(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, band_y: f64, tx: f64, ty: f64, ka: f64, key: bool, finding: bool, now: f64) void {
+fn drawPrompt(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, ka: f64, key: bool, finding: bool, now: f64) void {
+    const band_y = card.y + card.h - barH();
+    const ty = band_y + 6 + baseline;
+    const tx = gap + padL(d);
     // The prompt line: find, replace, go to line, quick open and the palette.
     // Its band slides up from the card's bottom as it opens and back down as
     // it closes, drawing what it last showed until it's gone. The text above
@@ -5803,7 +5792,8 @@ fn drawPrompt(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, band_y: f
     } else d.fresh_shown = false;
 }
 
-fn drawHint(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, by: f64, now: f64) void {
+fn drawHint(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, now: f64) void {
+    const by = bottom(d);
     // An empty window says what to do: its hint fades in after a pause, so
     // a restored session never flashes it, and out on the first key.
     const blank = isBlank(d) and d.mode == .edit and !d.closing;
@@ -5847,7 +5837,6 @@ fn drawHeader(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, 
         const right = card.x + card.w - 10;
         objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = @max(right - card.x, 0), .h = head_h });
         drawTabs(d, ctx, th, k, dark, ka, tabsX(card.x + d.org.x, d.org.y < 1) - d.org.x, right, mono_y, now);
-        k.flush();
         if (zt > 0.001) objc.CGContextEndTransparencyLayer(ctx);
     }
 }
@@ -5883,14 +5872,15 @@ fn headY() f64 {
     return gap + head_h / 2;
 }
 
+/// Zen has no header row.
 fn offHeadRow(p: Point, slack: f64) bool {
-    return @abs(p.y - headY()) > slack;
+    return conf.zen or @abs(p.y - headY()) > slack;
 }
 
 /// The sidebar button by the traffic lights, or the + at the sidebar's
 /// top right, under `p` in the view: anywhere on its capsule.
 fn toolAt(w: *const Win, p: Point) ?Icon {
-    if (conf.zen or offHeadRow(p, 14)) return null;
+    if (offHeadRow(p, 14)) return null;
     if (root != null and @abs(p.x - toggle_x) <= 14) return .sidebar;
     if (sideShown(w) and @abs(p.x - (side_w - gap - 20)) <= 14) return .plus;
     return null;
@@ -5898,7 +5888,7 @@ fn toolAt(w: *const Win, p: Point) ?Icon {
 
 /// Whether `p`, in the card's pane, is on the + after its tabs.
 fn onTabPlus(d: *const Doc, p: Point) bool {
-    return !conf.zen and d.tabbed.to == 1 and !offHeadRow(p, 14) and @abs(p.x - d.plus_x) <= 14;
+    return d.tabbed.to == 1 and !offHeadRow(p, 14) and @abs(p.x - d.plus_x) <= 14;
 }
 
 /// Brings the header's slots in line with the window's tabs: a new tab
@@ -6164,9 +6154,8 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, ka: f64, a:
     const pad = tab_pad * a;
     const sx = s.x + s.shift.x;
     if (s.w < 0.5 or sx > x1 or sx + s.w < x0 - pad) return;
-    const j = if (s.gone) null else tabIndex(d, s.id);
-    const on = j != null and j.? == d.at;
-    const hovered = j != null and s.id == d.hover;
+    const on = !s.gone and s.id == d.file.id;
+    const hovered = !s.gone and s.id == d.hover;
     s.hov.aim(if (hovered) 1 else 0, now);
     s.xhov.aim(if (hovered and d.hover_x) 1 else 0, now);
     const hv = s.hov.at(now) * a;
@@ -6211,7 +6200,7 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, ka: f64, a:
     // The weight switches halfway while the ink brightens: the two weights
     // have different widths, so drawing both at once smears the name.
     objc.CGContextSetAlpha(ctx, alpha * ink_a);
-    const name = if (j == null) s.name[which].full else sideFit(&s.name[which], which, room_w + 1);
+    const name = if (s.gone) s.name[which].full else sideFit(&s.name[which], if (which == 0) tab_bold else tab_font, room_w + 1);
     paintLine(ctx, name, ink, 1, nx, by);
     objc.CGContextRestoreGState(ctx);
     // The unsaved dot sits after the name with one tab and slides into
@@ -6245,7 +6234,7 @@ const TabHit = struct { j: usize, id: u32, close: bool };
 /// The tab under `p`, and whether it's over the tab's close button. Only
 /// with two tabs or more; one is the window's title.
 fn tabAt(d: *Doc, p: Point) ?TabHit {
-    if (conf.zen or d.tabbed.to != 1 or offHeadRow(p, 12)) return null;
+    if (d.tabbed.to != 1 or offHeadRow(p, 12)) return null;
     for (d.slots.items) |s| {
         if (s.gone or p.x < s.x or p.x >= s.x + s.w) continue;
         const j = tabIndex(d, s.id) orelse return null;
@@ -6261,7 +6250,7 @@ fn loneTab(d: *const Doc, p: Point) ?TabHit {
 
 /// The card's lone file name under `p`, when it has one tab.
 fn titleTab(d: *const Doc, p: Point) ?TabHit {
-    if (conf.zen or d.tabbed.to != 0 or offHeadRow(p, 12)) return null;
+    if (d.tabbed.to != 0 or offHeadRow(p, 12)) return null;
     const s = d.slots.items[slotOf(d, d.file.id) orelse return null];
     if (p.x < s.x or p.x >= s.x + s.w) return null;
     return .{ .j = 0, .id = d.file.id, .close = false };
@@ -6957,7 +6946,8 @@ fn mouseMoved(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
     const p = local(self, ev);
     // The corner is the header's strip up to where its tabs start, past the lights.
-    if (w.peek_in != (p.x < tabs_from and p.y < top_h)) peekTo(w, !w.peek_in, 0.6);
+    const corner = conf.zen and p.x < tabs_from and p.y < top_h;
+    if (w.peek_in != corner) peekTo(w, corner, 0.6);
     hoverAt(w, p);
 }
 
@@ -7020,7 +7010,7 @@ fn setHover(d: *Doc, id: u32, shut: bool, plus: bool) void {
 
 fn mouseExited(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
-    peekTo(w, false, 0.6);
+    if (conf.zen) peekTo(w, false, 0.6);
     if (w.hot != 0) {
         redrawHot(w, w.hot);
         w.hot = 0;
