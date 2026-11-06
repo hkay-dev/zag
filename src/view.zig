@@ -2005,7 +2005,6 @@ fn takeTab(d: *Doc, j: usize) ?Page {
     }
     var blank: ?Page = null;
     if (tabCount(d) == 1) blank = blankPage() orelse return null;
-    retitle(d);
     const pg = asPage(d);
     if (blank) |p| {
         install(d, p);
@@ -3866,9 +3865,7 @@ pub const ax = struct {
 
     pub const tabOf = tabIndex;
 
-    pub fn tabTitle(d: *Doc, j: usize, _: *[48]u8) []const u8 {
-        return tabName(d, j);
-    }
+    pub const tabTitle = tabName;
 
     /// Where tab `id` last drew.
     pub fn tabRect(d: *const Doc, id: u32) Rect {

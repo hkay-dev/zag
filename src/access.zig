@@ -597,8 +597,7 @@ fn tabFrame(self: Id, _: Sel) callconv(.c) Rect {
 
 fn tabTitle(self: Id, _: Sel) callconv(.c) Id {
     const t = tabIndex(self) orelse return objc.str("");
-    var buf: [48]u8 = undefined;
-    return objc.str(ax.tabTitle(t.d, t.j, &buf));
+    return objc.str(ax.tabTitle(t.d, t.j));
 }
 
 fn tabValue(self: Id, _: Sel) callconv(.c) Id {
