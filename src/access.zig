@@ -497,7 +497,7 @@ fn rangeForLine(self: Id, _: Sel, n: isize) callconv(.c) Range {
     const t = d.file.ed.text();
     if (n < 0 or @as(usize, @intCast(n)) >= b.lines()) return .{ .loc = units(t, 0, t.len) };
     const k: usize = @intCast(n);
-    return toRange(t, b.lineStart(k), if (k + 1 < b.lines()) b.lineStart(k + 1) else t.len);
+    return toRange(t, b.lineStart(k), b.lineStop(k));
 }
 
 fn stringForRange(self: Id, _: Sel, r: Range) callconv(.c) Id {

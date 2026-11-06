@@ -993,9 +993,9 @@ fn pillOver(k: *Ink, th: *const Theme, dark: bool, l: []const u8, ls: usize, sg:
     const lo = std.math.clamp(@max(m[0], ls) - ls, sg.start, sg.end);
     const hi = std.math.clamp(@min(m[1], ls + l.len) - ls, sg.start, sg.end);
     if (lo >= hi) return;
-    const col = colAt(l, sg.start, sg.col, lo);
+    const col = editor.colOf(l, sg.start, sg.col, lo);
     const x0 = ox + (f(col - sg.col) - f(skip)) * cw;
-    const x1 = ox + (f(colAt(l, lo, col, hi) - sg.col) - f(skip)) * cw;
+    const x1 = ox + (f(editor.colOf(l, lo, col, hi) - sg.col) - f(skip)) * cw;
     const ctx = k.ctx;
     k.flush();
     objc.CGContextSaveGState(ctx);
@@ -1307,9 +1307,8 @@ const Doc = struct {
     /// The last draw had scenery still moving.
     busy: bool = false,
     /// Soft wrap: the first screen row of each line, plus the total at the
-    /// end, for rows `cols` cells wide.
+    /// end, for rows `wraps_cols` cells wide.
     vfirst: std.ArrayList(u32) = .empty,
-    cols: usize = 0,
     mode: Mode = .edit,
     prompt: std.ArrayList(u8) = .empty,
     /// Find and replace: the replacement, and which field takes typing.
@@ -1711,8 +1710,7 @@ fn loadPage(abs: [:0]const u8) ?Page {
     };
     var sy: f64 = 0;
     if (placeOf(abs)) |pl| {
-        var c = @min(pl.cur, bytes.len);
-        while (c > 0 and c < bytes.len and bytes[c] & 0xC0 == 0x80) c -= 1;
+        const c = editor.charStart(bytes, @min(pl.cur, bytes.len));
         ed.select(c, c);
         sy = pl.sy;
     }
@@ -1758,7 +1756,6 @@ fn install(d: *Doc, pg: Page) void {
     d.center_at = std.math.maxInt(usize);
     clearSyntax(d);
     d.vfirst.clearRetainingCapacity();
-    d.cols = 0;
     d.mode = .edit;
     d.note = "";
     d.ys.snap(d.file.sy);
@@ -2946,7 +2943,7 @@ fn checkOutside(d: *Doc) void {
     if (std.meta.eql(now, d.file.stamp)) return;
     d.file.stamp = now;
     if (now == null) {
-        d.file.ed.buf.saved = std.math.maxInt(u64);
+        d.file.ed.buf.markUnsaved();
         d.note = "deleted on disk";
         return refresh(d);
     }
@@ -3476,27 +3473,12 @@ var note_buf: [40]u8 = undefined;
 /// ⌥Return in find and replace.
 fn replaceAll(d: *Doc) void {
     remember(d);
-    // Where each replacement will stand once the earlier ones are in.
     var spots: [max_flash][2]usize = undefined;
-    var ns: usize = 0;
     const q = d.prompt.items;
-    const old = d.file.ed.text();
-    var i: usize = 0;
-    const sensitive = editor.caseSensitive(q);
-    while (q.len > 0 and ns < max_flash and i + q.len <= old.len) {
-        if (!editor.matchAt(old, i, q, sensitive)) {
-            i += 1;
-            continue;
-        }
-        const lo: usize = @intCast(@as(isize, @intCast(i)) + @as(isize, @intCast(ns)) * (@as(isize, @intCast(d.with.items.len)) - @as(isize, @intCast(q.len))));
-        spots[ns] = .{ lo, lo + d.with.items.len };
-        ns += 1;
-        i += q.len;
-    }
-    const n = d.file.ed.replaceAll(gpa, q, d.with.items) catch 0;
+    const n = d.file.ed.replaceAll(gpa, q, d.with.items, &spots) catch 0;
     if (n > 0) {
         flashStart(d);
-        for (spots[0..ns]) |sp| flashAdd(d, sp[0], sp[1]);
+        for (spots[0..@min(n, spots.len)]) |sp| flashAdd(d, sp[0], sp[1]);
     }
     d.mode = .edit;
     d.note = std.fmt.bufPrint(&note_buf, "replaced {d}", .{n}) catch "";
@@ -3570,8 +3552,7 @@ fn layout(d: *Doc) void {
         d.vfirst.clearAndFree(gpa);
         return;
     }
-    const cols = if (d.closing and d.cols >= 8) d.cols else wrapCols(d);
-    d.cols = cols;
+    const cols = if (d.closing and b.wraps_cols >= 8) b.wraps_cols else wrapCols(d);
     const stale = d.vfirst.items.len != b.lines() + 1;
     if (cols != b.wraps_cols or b.wraps.items.len != b.lines()) {
         b.wraps.resize(gpa, b.lines()) catch return;
@@ -3606,20 +3587,13 @@ fn rowOfLine(d: *const Doc, i: usize) usize {
 
 fn lineOfRow(d: *const Doc, r: usize) usize {
     if (!wrapping()) return @min(r, d.file.ed.buf.lines() - 1);
-    const v = d.vfirst.items[0 .. d.vfirst.items.len - 1];
-    var lo: usize = 0;
-    var hi: usize = v.len;
-    while (hi - lo > 1) {
-        const mid = (lo + hi) / 2;
-        if (v[mid] <= r) lo = mid else hi = mid;
-    }
-    return lo;
+    return @import("buffer.zig").lastAtMost(d.vfirst.items[0 .. d.vfirst.items.len - 1], r);
 }
 
 /// Fills in where a row that starts at `s.start` ends.
 fn segFrom(d: *const Doc, l: []const u8, s: Seg) Seg {
     if (!wrapping()) return .{ .end = l.len };
-    const r = editor.rowEnd(l, s.start, s.col, d.cols);
+    const r = editor.rowEnd(l, s.start, s.col, d.file.ed.buf.wraps_cols);
     return .{ .k = s.k, .start = s.start, .col = s.col, .end = r.end, .ecol = r.col };
 }
 
@@ -3646,50 +3620,47 @@ fn caretEnd(l: []const u8, s: Seg) usize {
     return if (s.end < l.len) editor.prevChar(l, s.end) else l.len;
 }
 
-/// Display column of byte `p`, counting from byte `from` at column `col0`.
-fn colAt(l: []const u8, from: usize, col0: usize, p: usize) usize {
-    var c = col0;
-    var i = from;
-    while (i < p and i < l.len) {
-        const x = editor.cells(l, i, c);
-        c += x.w;
-        i += x.len;
-    }
-    return c;
-}
+const RowCol = struct { row: usize, col: usize };
 
 /// The caret's screen row, and its column within that row.
-fn caretRow(d: *Doc) struct { row: usize, col: usize } {
+fn caretRow(d: *Doc) RowCol {
     layout(d);
-    const b = &d.file.ed.buf;
-    const i = b.lineOf(d.file.ed.cur);
-    const l = b.line(i);
-    const p = d.file.ed.cur - b.lineStart(i);
-    const s = segOf(d, l, p);
-    return .{ .row = rowOfLine(d, i) + s.k, .col = colAt(l, s.start, s.col, p) - s.col };
+    return rowColOf(d, d.file.ed.cur);
 }
 
-/// Up and down by screen rows while wrapped, keeping the column.
+fn rowColOf(d: *const Doc, pos: usize) RowCol {
+    const b = &d.file.ed.buf;
+    const i = b.lineOf(pos);
+    const l = b.line(i);
+    const p = @min(pos - b.lineStart(i), l.len);
+    const s = segOf(d, l, p);
+    return .{ .row = rowOfLine(d, i) + s.k, .col = editor.colOf(l, s.start, s.col, p) - s.col };
+}
+
+/// Up and down by screen rows, keeping the column.
 fn vmove(d: *Doc, delta: isize, extend: bool) void {
     const e = &d.file.ed;
-    const b = &e.buf;
     const here = caretRow(d);
     const want = e.want orelse here.col;
     const to = @as(isize, @intCast(here.row)) + delta;
-    if (to < 0) return e.moveTo(0, extend);
-    if (to >= totalRows(d)) return e.moveTo(e.text().len, extend);
-    const r: usize = @intCast(to);
-    const i = lineOfRow(d, r);
-    const l = b.line(i);
-    const s = segN(d, l, r - rowOfLine(d, i));
-    const byte = std.math.clamp(editor.byteAtCol(l, f(s.col + want)), s.start, caretEnd(l, s));
-    e.moveTo(b.lineStart(i) + byte, extend);
+    const r: usize = @intCast(std.math.clamp(to, 0, @as(isize, @intCast(totalRows(d) - 1))));
+    const pos = if (r == here.row) (if (delta < 0) @as(usize, 0) else e.text().len) else byteAtRow(d, r, f(want));
+    e.moveTo(pos, extend);
     e.want = want;
+}
+
+fn byteAtRow(d: *const Doc, row: usize, x: f64) usize {
+    const b = &d.file.ed.buf;
+    const i = lineOfRow(d, row);
+    const l = b.line(i);
+    const s = segN(d, l, row - rowOfLine(d, i));
+    return b.lineStart(i) + std.math.clamp(editor.byteAtCol(l, f(s.col) + x), s.start, caretEnd(l, s));
 }
 
 /// ⌘← and ⌘→ while wrapped: the ends of the screen row. False on a line's
 /// first row going left, where the editor's smart home takes over.
 fn rowEdge(d: *Doc, right: bool, extend: bool) bool {
+    layout(d);
     const b = &d.file.ed.buf;
     const i = b.lineOf(d.file.ed.cur);
     const l = b.line(i);
@@ -3833,9 +3804,7 @@ pub const ax = struct {
     pub const Card = Doc;
     pub const Window = Win;
 
-    pub fn winOfView(view: Id) ?*Win {
-        return winOf(view);
-    }
+    pub const winOfView = winOf;
 
     pub fn alive(d: *const Doc) bool {
         return std.mem.indexOfScalar(*Doc, docs.items, @constCast(d)) != null and !d.closing;
@@ -3846,18 +3815,14 @@ pub const ax = struct {
     }
 
     /// Gives card `d` the typing.
-    pub fn focusCard(d: *Doc) void {
-        focus(d);
-    }
+    pub const focusCard = focus;
 
     /// The window's cards in layout order, leaving out ones folding away.
     pub fn cards(w: *const Win, out: []*Doc) usize {
         return listPanes(w.cards, out, 0);
     }
 
-    pub fn name(d: *const Doc) []const u8 {
-        return d.name();
-    }
+    pub const name = Doc.name;
 
     /// Where the text shows in the card.
     pub fn textRect(d: *const Doc) Rect {
@@ -3867,14 +3832,8 @@ pub const ax = struct {
     /// The cell of the character at byte `pos`, one column wide.
     pub fn cell(d: *Doc, pos: usize) Rect {
         layout(d);
-        const b = &d.file.ed.buf;
-        const i = b.lineOf(pos);
-        const l = b.line(i);
-        const p = @min(pos - b.lineStart(i), l.len);
-        const s = segOf(d, l, p);
-        const row = rowOfLine(d, i) + s.k;
-        const col = colAt(l, s.start, s.col, p) - s.col;
-        return .{ .x = d.org.x + gap + padL(d) + f(col) * cw - d.vx, .y = d.org.y + top_h + f(row) * lh - d.vy, .w = cw, .h = lh };
+        const c = rowColOf(d, pos);
+        return .{ .x = d.org.x + gap + padL(d) + f(c.col) * cw - d.vx, .y = d.org.y + top_h + f(c.row) * lh - d.vy, .w = cw, .h = lh };
     }
 
     /// The byte nearest `p`.
@@ -3899,17 +3858,13 @@ pub const ax = struct {
         return !conf.zen and d.tabbed.to == 1;
     }
 
-    pub fn tabs(d: *const Doc) usize {
-        return tabCount(d);
-    }
+    pub const tabs = tabCount;
 
     pub fn tabAtIndex(d: *Doc, j: usize) u32 {
         return tabPage(d, j).id;
     }
 
-    pub fn tabOf(d: *Doc, id: u32) ?usize {
-        return tabIndex(d, id);
-    }
+    pub const tabOf = tabIndex;
 
     pub fn tabTitle(d: *Doc, j: usize, _: *[48]u8) []const u8 {
         return tabName(d, j);
@@ -3935,13 +3890,9 @@ pub const ax = struct {
         return true;
     }
 
-    pub fn paneUnder(w: *const Win, p: Point) ?*Doc {
-        return paneAt(w, p);
-    }
+    pub const paneUnder = paneAt;
 
-    pub fn sidebar(w: *const Win) bool {
-        return sideShown(w);
-    }
+    pub const sidebar = sideShown;
 
     pub fn sideRect(w: *const Win) Rect {
         return .{ .y = top_h, .w = side_w, .h = @max(msg(Rect, w.view, "bounds", .{}).h - top_h, 0) };
@@ -5485,7 +5436,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         const sg = v.seg;
         const xat = struct {
             fn x(line: []const u8, g: Seg, p: usize, o: f64, sk: usize) f64 {
-                return o + (f(colAt(line, g.start, g.col, p) - g.col) - f(sk)) * cw;
+                return o + (f(editor.colOf(line, g.start, g.col, p) - g.col) - f(sk)) * cw;
             }
         }.x;
         // Fills the part of `rg` that falls on this row, with a tail past the
@@ -5848,7 +5799,7 @@ fn drawPrompt(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, band_y: f
         // A prefilled selection fades out over `fade_time` once typing or a
         // click ends it, at the width it had.
         if (prompting and d.fresh) {
-            d.fresh_w = f(editor.colOf(d.held.items, d.held.items.len)) * cw;
+            d.fresh_w = f(editor.colOf(d.held.items, 0, 0, d.held.items.len)) * cw;
             d.fresh_shown = true;
         } else if (d.fresh_shown) {
             d.fresh_shown = false;
@@ -6788,13 +6739,12 @@ fn insertText(self: Id, _: Sel, s: Id) callconv(.c) void {
 
 const moves = [_]struct { []const u8, editor.Motion }{
     .{ "moveLeft", .left },                     .{ "moveBackward", .left },            .{ "moveRight", .right },
-    .{ "moveForward", .right },                 .{ "moveUp", .up },                    .{ "moveDown", .down },
+    .{ "moveForward", .right },
     .{ "moveWordLeft", .word_left },            .{ "moveWordBackward", .word_left },   .{ "moveWordRight", .word_right },
     .{ "moveWordForward", .word_right },        .{ "moveToBeginningOfLine", .home },   .{ "moveToLeftEndOfLine", .home },
     .{ "moveToEndOfLine", .end },               .{ "moveToRightEndOfLine", .end },     .{ "moveToBeginningOfParagraph", .line_start },
-    .{ "moveParagraphBackward", .line_start },  .{ "moveToEndOfParagraph", .end },     .{ "moveParagraphForward", .end },
-    .{ "moveToBeginningOfDocument", .top },     .{ "moveToEndOfDocument", .bottom },   .{ "pageUp", .page_up },
-    .{ "pageDown", .page_down },
+    .{ "moveParagraphBackward", .line_start },  .{ "moveToEndOfParagraph", .line_end }, .{ "moveParagraphForward", .line_end },
+    .{ "moveToBeginningOfDocument", .top },     .{ "moveToEndOfDocument", .bottom },
 };
 
 fn doCommand(self: Id, _: Sel, sel: Sel) callconv(.c) void {
@@ -6817,21 +6767,28 @@ fn doCommand(self: Id, _: Sel, sel: Sel) callconv(.c) void {
 /// Runs a key command. Returns whether the caret should be scrolled to.
 fn edit(d: *Doc, name: []const u8, extend: bool) !bool {
     const e = &d.file.ed;
+    if (is(name, "moveUp")) {
+        vmove(d, -1, extend);
+        return true;
+    }
+    if (is(name, "moveDown")) {
+        vmove(d, 1, extend);
+        return true;
+    }
+    if (is(name, "pageUp")) {
+        vmove(d, -@as(isize, @intCast(pageLines(d))), extend);
+        return true;
+    }
+    if (is(name, "pageDown")) {
+        vmove(d, @intCast(pageLines(d)), extend);
+        return true;
+    }
     for (moves) |m| if (std.mem.eql(u8, m[0], name)) {
         if (wrapping()) switch (m[1]) {
-            .up, .down => {
-                vmove(d, if (m[1] == .up) -1 else 1, extend);
-                return true;
-            },
-            .page_up, .page_down => {
-                const n: isize = @intCast(pageLines(d));
-                vmove(d, if (m[1] == .page_up) -n else n, extend);
-                return true;
-            },
-            .home, .end => if (!is(name, "moveToEndOfParagraph") and !is(name, "moveParagraphForward") and rowEdge(d, m[1] == .end, extend)) return true,
+            .home, .end => if (rowEdge(d, m[1] == .end, extend)) return true,
             else => {},
         };
-        e.move(m[1], extend, pageLines(d));
+        e.move(m[1], extend);
         return true;
     };
     if (is(name, "deleteBackward") or is(name, "deleteBackwardByDecomposingPreviousCharacter")) {
@@ -6872,15 +6829,11 @@ fn edit(d: *Doc, name: []const u8, extend: bool) !bool {
 
 fn posAt(d: *Doc, p: Point) usize {
     layout(d);
-    const b = &d.file.ed.buf;
     const yy = p.y - top_h + d.vy;
     const row: usize = if (yy < 0) 0 else @min(@as(usize, @intFromFloat(yy / lh)), totalRows(d) - 1);
-    const i = lineOfRow(d, row);
-    const l = b.line(i);
-    const s = segN(d, l, row - rowOfLine(d, i));
     // A click in the line numbers lands at the start of its row.
     const x = if (d.gw >= cw and p.x < gap + padL(d)) 0 else @max((p.x - gap - padL(d) + d.vx) / cw, 0);
-    return b.lineStart(i) + std.math.clamp(editor.byteAtCol(l, f(s.col) + x), s.start, caretEnd(l, s));
+    return byteAtRow(d, row, x);
 }
 
 fn local(self: Id, ev: Id) Point {
@@ -6889,13 +6842,7 @@ fn local(self: Id, ev: Id) Point {
 
 /// The word or line around `pos`, for double- and triple-click drags.
 fn unitAt(d: *Doc, pos: usize) [2]usize {
-    const e = &d.file.ed;
-    const keep = .{ e.anchor, e.cur };
-    if (d.drag == .word) e.selectWord(pos) else e.selectLine(pos);
-    const r = e.sel();
-    e.anchor = keep[0];
-    e.cur = keep[1];
-    return r;
+    return if (d.drag == .word) d.file.ed.wordAt(pos) orelse .{ pos, pos } else d.file.ed.lineAt(pos);
 }
 
 /// The header and the band over the sidebar stand in for the hidden title
@@ -7646,21 +7593,15 @@ fn selectAll(d: *Doc) void {
 
 fn undo(d: *Doc) void {
     d.mode = .edit;
-    const us = d.file.ed.buf.undos.items;
-    const span: [2]usize = if (us.len > 0) .{ us[us.len - 1].pos, us[us.len - 1].pos + us[us.len - 1].old.len } else .{ 0, 0 };
-    d.file.ed.undo(gpa) catch {};
     flashStart(d);
-    flashAdd(d, span[0], span[1]);
+    if (d.file.ed.undo(gpa) catch null) |span| flashAdd(d, span[0], span[1]);
     reveal(d);
 }
 
 fn redo(d: *Doc) void {
     d.mode = .edit;
-    const rs = d.file.ed.buf.redos.items;
-    const span: [2]usize = if (rs.len > 0) .{ rs[rs.len - 1].pos, rs[rs.len - 1].pos + rs[rs.len - 1].new.len } else .{ 0, 0 };
-    d.file.ed.redo(gpa) catch {};
     flashStart(d);
-    flashAdd(d, span[0], span[1]);
+    if (d.file.ed.redo(gpa) catch null) |span| flashAdd(d, span[0], span[1]);
     reveal(d);
 }
 
@@ -7678,7 +7619,7 @@ fn previewText(id: u32) ?[]const u8 {
 }
 
 fn markdownPreview(d: *Doc) void {
-    preview.toggle(d.win.window, d.file.path orelse "", d.file.id, &previewText, &themes[@intFromBool(isDark(d.win))]);
+    preview.toggle(d, &previewText, &themes[@intFromBool(isDark(d.win))]);
 }
 
 fn comment(d: *Doc) void {

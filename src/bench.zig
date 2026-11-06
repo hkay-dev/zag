@@ -13,16 +13,10 @@ const Id = objc.Id;
 const Sel = objc.Sel;
 const msg = objc.msg;
 
-extern fn CACurrentMediaTime() f64;
 extern fn CGEventCreateScrollWheelEvent2(source: ?*anyopaque, units: u32, count: u32, w1: i32, w2: i32, w3: i32) ?*anyopaque;
 extern fn CGEventSetLocation(ev: ?*anyopaque, at: objc.Point) void;
-extern fn sysctl(name: [*]const c_int, len: c_uint, old: ?*anyopaque, oldlen: *usize, new: ?*anyopaque, newlen: usize) c_int;
-extern fn gettimeofday(tv: *[2]i64, tz: ?*anyopaque) c_int;
-extern fn getrusage(who: c_int, usage: *[18]i64) c_int;
-extern fn task_info(task: u32, flavor: c_int, info: *[64]u64, count: *u32) c_int;
 extern fn usleep(us: c_uint) c_int;
 extern fn clock_gettime_nsec_np(clock: c_int) u64;
-extern var mach_task_self_: u32;
 
 const Sample = struct { metric: []const u8, x: f64 };
 var samples: std.ArrayList(Sample) = .empty;
@@ -148,11 +142,11 @@ fn run(_: Id, _: Sel, _: Id) callconv(.c) void {
 /// The process's physical footprint now and its peak so far, in MB, from
 /// TASK_VM_INFO (phys_footprint and ledger_phys_footprint_peak).
 fn memory(comptime now: []const u8, comptime peak: []const u8) void {
-    var info: [64]u64 = @splat(0);
-    var n: u32 = 128;
-    if (task_info(mach_task_self_, 22, &info, &n) != 0) return;
-    put(now, @as(f64, @floatFromInt(info[18])) / (1 << 20));
-    put(peak, @as(f64, @floatFromInt(info[21])) / (1 << 20));
+    var info: std.c.task_vm_info_data_t = std.mem.zeroes(std.c.task_vm_info_data_t);
+    var n = std.c.TASK.VM.INFO_COUNT;
+    if (std.c.task_info(std.c.mach_task_self(), std.c.TASK.VM.INFO, @ptrCast(&info), &n) != 0) return;
+    put(now, @as(f64, @floatFromInt(info.phys_footprint)) / (1 << 20));
+    put(peak, @as(f64, @floatFromInt(info.ledger_phys_footprint_peak)) / (1 << 20));
 }
 
 /// Times `f(args)` plus the draw it causes (the whole view when `full`),
@@ -241,14 +235,14 @@ fn sleep(s: f64) void {
     _ = usleep(@intFromFloat(s * 1e6));
 }
 
-fn seconds(tv: *const [2]i64) f64 {
-    return @as(f64, @floatFromInt(tv[0])) + @as(f64, @floatFromInt(@as(i32, @truncate(tv[1])))) / 1e6;
+fn seconds(tv: std.c.timeval) f64 {
+    return @as(f64, @floatFromInt(tv.sec)) + @as(f64, @floatFromInt(tv.usec)) / 1e6;
 }
 
 fn wallNow() f64 {
-    var tv: [2]i64 = undefined;
-    _ = gettimeofday(&tv, null);
-    return seconds(&tv);
+    var tv: std.c.timeval = undefined;
+    _ = std.c.gettimeofday(&tv, null);
+    return seconds(tv);
 }
 
 /// When this process started: p_starttime opens kinfo_proc.
@@ -256,15 +250,15 @@ fn procStart() f64 {
     var buf: [1024]u8 align(8) = undefined;
     var len: usize = buf.len;
     const mib = [_]c_int{ 1, 14, 1, std.c.getpid() };
-    if (sysctl(&mib, 4, &buf, &len, null, 0) != 0) return wallNow();
-    return seconds(@ptrCast(&buf));
+    if (std.c.sysctl(&mib, 4, &buf, &len, null, 0) != 0) return wallNow();
+    return seconds(@as(*const std.c.timeval, @ptrCast(&buf)).*);
 }
 
 /// User plus system CPU seconds of every thread of this process so far.
 fn cpuNow() f64 {
-    var ru: [18]i64 = undefined;
-    _ = getrusage(0, &ru);
-    return seconds(ru[0..2]) + seconds(ru[2..4]);
+    var ru: std.c.rusage = undefined;
+    _ = std.c.getrusage(std.c.rusage.SELF, &ru);
+    return seconds(ru.utime) + seconds(ru.stime);
 }
 
 fn put(metric: []const u8, x: f64) void {

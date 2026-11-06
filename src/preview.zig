@@ -2,6 +2,7 @@
 const std = @import("std");
 const objc = @import("objc.zig");
 const settings = @import("settings.zig");
+const syntax = @import("syntax.zig");
 const Id = objc.Id;
 const msg = objc.msg;
 const Range = extern struct { loc: usize, len: usize };
@@ -9,14 +10,12 @@ var window: Id = null;
 var text: Id = null;
 var target: Id = null;
 var owner: Id = null;
-var source: Id = null;
 var path: Id = null;
 var theme: settings.Theme = undefined;
 var fade = false;
-/// The doc and edit count last seen by `update`.
+/// The doc and edit count last scheduled or rendered.
 var seen_id: u32 = std.math.maxInt(u32);
 var seen_changes: u64 = 0;
-var pending: ?u32 = null;
 var text_of: *const fn (u32) ?[]const u8 = undefined;
 /// Fonts and paragraph styles don't depend on the theme, so each is made once and kept.
 /// `fonts[block][traits]`: body, three heading sizes, mono; each with italic and bold added.
@@ -32,15 +31,12 @@ fn attr(s: Id, key: Id, value: Id, r: Range) void {
 }
 fn closed(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:", .{target});
-    msg(void, source, "release", .{});
     msg(void, path, "release", .{});
-    source = null;
     path = null;
     owner = null;
     window = null;
     text = null;
     fade = false;
-    pending = null;
 }
 pub fn close(w: Id) void {
     if (owner == w) msg(void, window, "close", .{});
@@ -85,7 +81,6 @@ pub fn update(d: anytype, themes: *const [2]settings.Theme, dark: bool) void {
     if (active and !unchanged) {
         seen_id = d.file.id;
         seen_changes = d.file.ed.buf.changes;
-        pending = d.file.id;
         edited = true;
     }
     if (!edited) return;
@@ -94,7 +89,7 @@ pub fn update(d: anytype, themes: *const [2]settings.Theme, dark: bool) void {
     msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:", .{target});
     msg(void, target, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("render:"), @as(Id, null), @as(f64, 0.15) });
 }
-pub fn toggle(w: Id, name: []const u8, id: u32, getter: *const fn (u32) ?[]const u8, th: *const settings.Theme) void {
+pub fn toggle(d: anytype, getter: *const fn (u32) ?[]const u8, th: *const settings.Theme) void {
     if (window != null) { msg(void, window, "close", .{}); return; }
     if (target == null) {
         const c = objc.ClassBuilder.begin("NSObject", "ZePreview");
@@ -104,14 +99,11 @@ pub fn toggle(w: Id, name: []const u8, id: u32, getter: *const fn (u32) ?[]const
         c.method("markdownPreview:", @ptrCast(&closeAction), "v@:@");
         target = msg(Id, msg(Id, c.finish(), "alloc", .{}), "init", .{});
     }
-    owner = w;
-    path = msg(Id, objc.str(name), "mutableCopy", .{});
-    seen_id = std.math.maxInt(u32);
+    owner = d.win.window;
+    path = msg(Id, objc.str(d.file.path orelse ""), "mutableCopy", .{});
+    seen_id = d.file.id;
+    seen_changes = d.file.ed.buf.changes;
     theme = th.*;
-    // A source left from an earlier opening would match and skip the first render.
-    msg(void, source, "release", .{});
-    source = null;
-    pending = id;
     text_of = getter;
     const frame: objc.Rect = .{ .w = 620, .h = 700 };
     window = msg(Id, msg(Id, objc.class("NSWindow"), "alloc", .{}), "initWithContentRect:styleMask:backing:defer:", .{ frame, @as(usize, 1 | 2 | 4 | 8), @as(usize, 2), false });
@@ -132,7 +124,7 @@ pub fn toggle(w: Id, name: []const u8, id: u32, getter: *const fn (u32) ?[]const
     // A saved frame wins; only a first opening is placed beside the editor's window.
     const name_key = objc.str("ZePreview");
     if (!msg(bool, window, "setFrameUsingName:", .{name_key})) {
-        const fr = msg(objc.Rect, w, "frame", .{});
+        const fr = msg(objc.Rect, d.win.window, "frame", .{});
         msg(void, window, "setFrameTopLeftPoint:", .{objc.Point{ .x = fr.x + fr.w - 80, .y = fr.y + fr.h }});
     }
     _ = msg(bool, window, "setFrameAutosaveName:", .{name_key});
@@ -169,27 +161,17 @@ fn style(flags: usize) Id {
     return slot.*;
 }
 fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
-    if (pending) |id| {
-        pending = null;
-        if (text_of(id)) |bytes| {
-            if (source != null and std.mem.eql(u8, objc.utf8(source), bytes)) {
-                if (!fade) return;
-            } else {
-                msg(void, source, "release", .{});
-                source = msg(Id, objc.str(bytes), "retain", .{});
-            }
-        }
-    }
+    const bytes = text_of(seen_id) orelse return;
     const options = objc.new("NSAttributedStringMarkdownParsingOptions");
     defer msg(void, options, "release", .{});
     msg(void, options, "setInterpretedSyntax:", .{@as(isize, 0)});
-    const parsed = msg(Id, msg(Id, objc.class("NSAttributedString"), "alloc", .{}), "initWithMarkdown:options:baseURL:error:", .{ msg(Id, source, "dataUsingEncoding:", .{@as(usize, 4)}), options, @as(Id, null), @as(?*Id, null) });
+    const parsed = msg(Id, msg(Id, objc.class("NSAttributedString"), "alloc", .{}), "initWithMarkdown:options:baseURL:error:", .{ msg(Id, objc.str(bytes), "dataUsingEncoding:", .{@as(usize, 4)}), options, @as(Id, null), @as(?*Id, null) });
     defer msg(void, parsed, "release", .{});
     const out = objc.new("NSMutableAttributedString");
     defer msg(void, out, "release", .{});
     const key_intent, const key_inline, const key_link = .{ objc.str("NSPresentationIntent"), objc.str("NSInlinePresentationIntent"), objc.str("NSLink") };
     const key_font, const key_color, const key_style, const key_back, const key_line = .{ objc.str("NSFont"), objc.str("NSColor"), objc.str("NSParagraphStyle"), objc.str("NSBackgroundColor"), objc.str("NSUnderline") };
-    const fg, const link, const muted, const panel = .{ color(theme.fg), color(theme.kinds[5]), color(theme.muted), color(theme.panel) };
+    const fg, const link, const muted, const panel = .{ color(theme.fg), color(theme.kinds[@intFromEnum(syntax.Kind.function)]), color(theme.muted), color(theme.panel) };
     var i: usize = 0;
     var previous: usize = 0;
     while (i < msg(usize, parsed, "length", .{})) {

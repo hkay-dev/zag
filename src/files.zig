@@ -64,8 +64,9 @@ pub fn absolute(gpa: Allocator, path: []const u8) ![:0]u8 {
     defer gpa.free(z);
     if (c.realpath(z, &buf)) |p| return gpa.dupeSentinel(u8, std.mem.span(p), 0);
     if (path.len > 0 and path[0] == '/') return gpa.dupeSentinel(u8, path, 0);
-    const here = c.getcwd(&buf, buf.len) orelse return error.NoCwd;
-    return std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ std.mem.span(@as([*:0]u8, @ptrCast(here))), path }, 0);
+    const here = cwd(gpa) orelse return error.NoCwd;
+    defer gpa.free(here);
+    return std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ here, path }, 0);
 }
 
 pub fn isDir(path: [:0]const u8) bool {

@@ -36,10 +36,6 @@ pub fn build(b: *std.Build) void {
     exe.headerpad_size = 0;
     b.installArtifact(exe);
 
-    const run = b.addRunArtifact(exe);
-    run.addPassthruArgs();
-    b.step("run", "Run Zag").dependOn(&run.step);
-
     const tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/tests.zig"),
         .target = b.graph.host,

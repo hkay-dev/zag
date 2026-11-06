@@ -4,9 +4,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Buffer = @import("buffer.zig").Buffer;
 
-pub const tab_width = 4;
+const tab_width = 4;
 
-pub const Motion = enum { left, right, up, down, word_left, word_right, home, end, line_start, top, bottom, page_up, page_down };
+pub const Motion = enum { left, right, word_left, word_right, home, end, line_start, line_end, top, bottom };
 
 pub const Editor = struct {
     buf: Buffer,
@@ -55,15 +55,19 @@ pub const Editor = struct {
         e.select(if (extend) e.anchor else pos, pos);
     }
 
-    pub fn move(e: *Editor, m: Motion, extend: bool, page: usize) void {
-        const b = &e.buf;
-        const t = e.text();
-        const row = b.lineOf(e.cur);
+    pub fn move(e: *Editor, m: Motion, extend: bool) void {
         if (!extend and e.hasSel() and (m == .left or m == .right)) {
             const s = e.sel();
             return e.select(s[@intFromBool(m == .right)], s[@intFromBool(m == .right)]);
         }
-        const pos: usize = switch (m) {
+        e.moveTo(e.target(m), extend);
+    }
+
+    fn target(e: *const Editor, m: Motion) usize {
+        const b = &e.buf;
+        const t = e.text();
+        const row = b.lineOf(e.cur);
+        return switch (m) {
             .left => if (e.cur == b.lineStart(row) and row > 0) b.lineEnd(row - 1) else prevChar(t, e.cur),
             .right => if (e.cur == b.lineEnd(row) and row + 1 < b.lines()) b.lineStart(row + 1) else nextChar(t, e.cur),
             .word_left => wordLeft(t, e.cur),
@@ -75,20 +79,10 @@ pub const Editor = struct {
                 break :blk if (e.cur == nb) ls else nb;
             },
             .line_start => b.lineStart(row),
-            .end => b.lineEnd(row),
+            .end, .line_end => b.lineEnd(row),
             .top => 0,
             .bottom => t.len,
-            .up, .down, .page_up, .page_down => {
-                const col = e.want orelse colOf(b.line(row), e.cur - b.lineStart(row));
-                const step: usize = if (m == .up or m == .down) 1 else @max(page, 1);
-                const to: usize = if (m == .up or m == .page_up) row -| step else @min(row + step, b.lines() - 1);
-                const p = if (to == row and (m == .up or m == .page_up)) 0 else if (to == row) t.len else b.lineStart(to) + byteAtCol(b.line(to), @floatFromInt(col));
-                e.moveTo(p, extend);
-                e.want = col;
-                return;
-            },
         };
-        e.moveTo(pos, extend);
     }
 
     /// Replaces the selection with `s`.
@@ -119,12 +113,11 @@ pub const Editor = struct {
 
     pub fn deleteBack(e: *Editor, gpa: Allocator, unit: Unit) !void {
         if (!e.hasSel()) {
-            const t = e.text();
             const row = e.buf.lineOf(e.cur);
             const ls = e.buf.lineStart(row);
             e.anchor = switch (unit) {
-                .char => if (e.cur == ls and row > 0) e.buf.lineEnd(row - 1) else prevChar(t, e.cur),
-                .word => wordLeft(t, e.cur),
+                .char => e.target(.left),
+                .word => e.target(.word_left),
                 .line => if (e.cur != ls) ls else if (row > 0) e.buf.lineEnd(row - 1) else ls,
             };
         }
@@ -133,12 +126,11 @@ pub const Editor = struct {
 
     pub fn deleteForward(e: *Editor, gpa: Allocator, unit: Unit) !void {
         if (!e.hasSel()) {
-            const t = e.text();
             const row = e.buf.lineOf(e.cur);
             const le = e.buf.lineEnd(row);
             e.anchor = switch (unit) {
-                .char => if (e.cur == le and row + 1 < e.buf.lines()) e.buf.lineStart(row + 1) else nextChar(t, e.cur),
-                .word => wordRight(t, e.cur),
+                .char => e.target(.right),
+                .word => e.target(.word_right),
                 .line => if (e.cur != le) le else if (row + 1 < e.buf.lines()) e.buf.lineStart(row + 1) else le,
             };
         }
@@ -163,7 +155,7 @@ pub const Editor = struct {
         const r = e.sel();
         if (e.buf.lineOf(r[0]) == e.buf.lineOf(r[1])) {
             if (e.indent[0] == '\t') return e.insert(gpa, "\t");
-            const col = colOf(e.buf.line(e.buf.lineOf(e.cur)), e.cur - e.buf.lineStart(e.buf.lineOf(e.cur)));
+            const col = colOf(e.buf.line(e.buf.lineOf(e.cur)), 0, 0, e.cur - e.buf.lineStart(e.buf.lineOf(e.cur)));
             return e.insert(gpa, "    "[0 .. tab_width - col % tab_width]);
         }
         try e.eachLine(gpa, .indent);
@@ -240,34 +232,39 @@ pub const Editor = struct {
         e.select(start, start + out.items.len);
     }
 
-    pub fn undo(e: *Editor, gpa: Allocator) !void {
-        if (try e.buf.undo(gpa)) |p| e.select(p, p);
+    pub fn undo(e: *Editor, gpa: Allocator) !?[2]usize {
+        const step = try e.buf.undo(gpa) orelse return null;
+        e.select(step.before, step.before);
+        return .{ step.pos, step.pos + step.old.len };
     }
 
-    pub fn redo(e: *Editor, gpa: Allocator) !void {
-        if (try e.buf.redo(gpa)) |p| e.select(p, p);
+    pub fn redo(e: *Editor, gpa: Allocator) !?[2]usize {
+        const step = try e.buf.redo(gpa) orelse return null;
+        const p = step.pos + step.new.len;
+        e.select(p, p);
+        return .{ step.pos, step.pos + step.new.len };
     }
 
-    pub fn selectWord(e: *Editor, pos: usize) void {
+    pub fn wordAt(e: *const Editor, pos: usize) ?[2]usize {
         const t = e.text();
         var a = pos;
         var z = pos;
-        const k = if (pos < t.len) class(t[pos]) else if (pos > 0) class(t[pos - 1]) else return;
+        const k = if (pos < t.len) class(t[pos]) else if (pos > 0) class(t[pos - 1]) else return null;
         while (a > 0 and t[a - 1] != '\n' and class(t[a - 1]) == k) a -= 1;
         while (z < t.len and t[z] != '\n' and class(t[z]) == k) z += 1;
-        e.select(a, z);
+        return .{ a, z };
     }
 
-    pub fn selectLine(e: *Editor, pos: usize) void {
+    pub fn lineAt(e: *const Editor, pos: usize) [2]usize {
         const row = e.buf.lineOf(pos);
-        e.select(e.buf.lineStart(row), if (row + 1 < e.buf.lines()) e.buf.lineStart(row + 1) else e.text().len);
+        return .{ e.buf.lineStart(row), e.buf.lineStop(row) };
     }
 
     pub fn selectAll(e: *Editor) void {
         e.select(0, e.text().len);
     }
 
-    /// Selects the next match of `q` after the selection, or before it when
+    /// Selects the next match of `q` at or after `from`, or before `from` when
     /// `back`, wrapping around. False when there is none.
     pub fn find(e: *Editor, q: []const u8, from: usize, back: bool) bool {
         const p = search(e.text(), q, from, back) orelse return false;
@@ -325,7 +322,7 @@ pub const Editor = struct {
     }
 
     /// Replaces every match of `q` as one undo step. Returns how many.
-    pub fn replaceAll(e: *Editor, gpa: Allocator, q: []const u8, with: []const u8) !usize {
+    pub fn replaceAll(e: *Editor, gpa: Allocator, q: []const u8, with: []const u8, spots: [][2]usize) !usize {
         const t = e.text();
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(gpa);
@@ -344,6 +341,10 @@ pub const Editor = struct {
                 done = i;
             }
             try out.appendSlice(gpa, t[done..i]);
+            if (n < spots.len) {
+                const start = first.? + out.items.len;
+                spots[n] = .{ start, start + with.len };
+            }
             try out.appendSlice(gpa, with);
             n += 1;
             i += q.len;
@@ -361,7 +362,7 @@ pub const Editor = struct {
         const t = e.text();
         var a: usize = 0;
         while (a < t.len and a < bytes.len and t[a] == bytes[a]) a += 1;
-        while (a > 0 and a < t.len and t[a] & 0xC0 == 0x80) a -= 1;
+        a = charStart(t, a);
         var z: usize = 0;
         while (z < t.len - a and z < bytes.len - a and t[t.len - 1 - z] == bytes[bytes.len - 1 - z]) z += 1;
         const old_len = t.len;
@@ -392,7 +393,7 @@ pub fn matchAt(t: []const u8, i: usize, q: []const u8, sensitive: bool) bool {
     return std.ascii.eqlIgnoreCase(t[i .. i + q.len], q);
 }
 
-pub fn search(t: []const u8, q: []const u8, from: usize, back: bool) ?usize {
+fn search(t: []const u8, q: []const u8, from: usize, back: bool) ?usize {
     if (q.len == 0 or q.len > t.len) return null;
     const end = t.len - q.len + 1;
     const start = @min(from, end);
@@ -494,11 +495,14 @@ pub fn nextChar(t: []const u8, i: usize) usize {
     return j;
 }
 
-pub fn prevChar(t: []const u8, i: usize) usize {
-    if (i == 0) return 0;
-    var j = i - 1;
-    while (j > 0 and t[j] & 0xC0 == 0x80) j -= 1;
+pub fn charStart(t: []const u8, i: usize) usize {
+    var j = i;
+    while (j > 0 and j < t.len and t[j] & 0xC0 == 0x80) j -= 1;
     return j;
+}
+
+pub fn prevChar(t: []const u8, i: usize) usize {
+    return if (i == 0) 0 else charStart(t, i - 1);
 }
 
 /// The codepoint at `i` and its byte length; bad bytes read as U+FFFD.
@@ -510,7 +514,7 @@ pub fn decode(t: []const u8, i: usize) struct { cp: u21, len: usize } {
 }
 
 /// How many cells a codepoint takes: 2 for East Asian wide and emoji.
-pub fn width(cp: u21) usize {
+fn width(cp: u21) usize {
     return switch (cp) {
         0x1100...0x115F, 0x2E80...0xA4CF, 0xAC00...0xD7A3, 0xF900...0xFAFF, 0xFE30...0xFE4F, 0xFF00...0xFF60, 0xFFE0...0xFFE6, 0x1F300...0x1F64F, 0x1F900...0x1F9FF, 0x20000...0x3FFFD => 2,
         else => 1,
@@ -525,10 +529,10 @@ pub fn cells(l: []const u8, i: usize, col: usize) struct { cp: u21, w: usize, le
     return .{ .cp = d.cp, .w = width(d.cp), .len = d.len };
 }
 
-/// Display column of byte `n` in line `l`.
-pub fn colOf(l: []const u8, n: usize) usize {
-    var col: usize = 0;
-    var i: usize = 0;
+/// Display column of byte `n`, starting at byte `from` and column `col0`.
+pub fn colOf(l: []const u8, from: usize, col0: usize, n: usize) usize {
+    var col = col0;
+    var i = from;
     while (i < n and i < l.len) {
         const c = cells(l, i, col);
         col += c.w;
@@ -587,6 +591,30 @@ pub fn rowCount(line: []const u8, cols: usize) usize {
 const t_ = std.testing;
 const gpa_t = t_.allocator;
 
+test "word and line queries leave selection and motion state alone" {
+    var e = try Editor.init(gpa_t, "one two\r\n漢字");
+    defer e.deinit(gpa_t);
+    e.select(0, 3);
+    e.want = 5;
+    e.typing = true;
+    try t_.expectEqual(@as(?[2]usize, .{ 4, 7 }), e.wordAt(5));
+    try t_.expectEqual([2]usize{ 0, 9 }, e.lineAt(5));
+    try t_.expectEqual([2]usize{ 9, 15 }, e.lineAt(15));
+    try t_.expectEqual([2]usize{ 0, 3 }, e.sel());
+    try t_.expectEqual(@as(?usize, 5), e.want);
+    try t_.expect(e.typing);
+    try t_.expectEqual(@as(usize, 9), charStart(e.text(), 11));
+    try t_.expectEqual(@as(usize, 15), charStart(e.text(), 15));
+    try t_.expectEqual(@as(usize, 12), prevChar(e.text(), 15));
+    try t_.expectEqual(@as(usize, 6), colOf("漢\t字", 3, 2, 7));
+    var empty = try Editor.init(gpa_t, "");
+    defer empty.deinit(gpa_t);
+    try t_.expectEqual(@as(?[2]usize, null), empty.wordAt(0));
+    try t_.expectEqual([2]usize{ 0, 0 }, empty.lineAt(0));
+    try t_.expectEqual(@as(?[2]usize, null), try empty.undo(gpa_t));
+    try t_.expectEqual(@as(?[2]usize, null), try empty.redo(gpa_t));
+}
+
 test "cells returns the decoded codepoint with its width and byte length" {
     const cases = .{
         .{ "a", 0, @as(u21, 'a'), 1, 1 },
@@ -603,25 +631,26 @@ test "cells returns the decoded codepoint with its width and byte length" {
         try t_.expectEqual(@as(usize, c[3]), got.w);
         try t_.expectEqual(@as(usize, c[4]), got.len);
     }
+    try t_.expectEqual(@as(usize, 7), byteAtCol("漢字abc", 5.0));
 }
 
 test "newline keeps indentation and undo is one step per typing run" {
     var e = try Editor.init(gpa_t, "fn x() {\n    a");
     defer e.deinit(gpa_t);
-    e.move(.bottom, false, 0);
+    e.move(.bottom, false);
     try e.newline(gpa_t);
     for ("bc") |c| try e.insert(gpa_t, &.{c});
     try t_.expectEqualStrings("fn x() {\n    a\n    bc", e.text());
-    try e.undo(gpa_t);
+    _ = try e.undo(gpa_t);
     try t_.expectEqualStrings("fn x() {\n    a\n    ", e.text());
-    try e.undo(gpa_t);
+    _ = try e.undo(gpa_t);
     try t_.expectEqualStrings("fn x() {\n    a", e.text());
 }
 
 test "CRLF files get CRLF newlines" {
     var e = try Editor.init(gpa_t, "a\r\nb");
     defer e.deinit(gpa_t);
-    e.move(.end, false, 0);
+    e.move(.end, false);
     try e.newline(gpa_t);
     try t_.expectEqualStrings("a\r\n\r\nb", e.text());
 }
@@ -641,7 +670,7 @@ test "typed characters outside ASCII join the typing run" {
     var e = try Editor.init(gpa_t, "");
     defer e.deinit(gpa_t);
     for ([_][]const u8{ "ü", "b", "😀", "r" }) |s| try e.insert(gpa_t, s);
-    try e.undo(gpa_t);
+    _ = try e.undo(gpa_t);
     try t_.expectEqualStrings("", e.text());
 }
 
@@ -663,16 +692,6 @@ test "indent and outdent a block, skipping a line the selection only touches" {
     try t_.expectEqualStrings("    a\n    b\nc", e.text());
     try e.outdent(gpa_t);
     try t_.expectEqualStrings("a\nb\nc", e.text());
-}
-
-test "up and down keep the column across short lines and wide chars" {
-    var e = try Editor.init(gpa_t, "abcdef\nx\n漢字abc");
-    defer e.deinit(gpa_t);
-    e.moveTo(5, false);
-    e.move(.down, false, 0);
-    try t_.expectEqual(@as(usize, 8), e.cur);
-    e.move(.down, false, 0);
-    try t_.expectEqual(@as(usize, 9 + 7), e.cur);
 }
 
 test "search wraps and backs up past the current match" {
@@ -738,12 +757,20 @@ test "pairs close openers, step over closers, wrap selections and delete empty p
 test "replace all is one undo step and keeps the case rule" {
     var e = try Editor.init(gpa_t, "a foo b FOO foo");
     defer e.deinit(gpa_t);
-    try t_.expectEqual(@as(usize, 3), try e.replaceAll(gpa_t, "foo", "x"));
+    var spots: [2][2]usize = undefined;
+    try t_.expectEqual(@as(usize, 3), try e.replaceAll(gpa_t, "foo", "x", &spots));
+    try t_.expectEqual([2][2]usize{ .{ 2, 3 }, .{ 6, 7 } }, spots);
     try t_.expectEqualStrings("a x b x x", e.text());
-    try e.undo(gpa_t);
+    try t_.expectEqual(@as(?[2]usize, .{ 2, 15 }), try e.undo(gpa_t));
     try t_.expectEqualStrings("a foo b FOO foo", e.text());
-    try t_.expectEqual(@as(usize, 1), try e.replaceAll(gpa_t, "FOO", "y"));
+    try t_.expectEqual(@as(usize, 1), try e.replaceAll(gpa_t, "FOO", "y", &.{}));
     try t_.expectEqualStrings("a foo b y foo", e.text());
+    _ = try e.undo(gpa_t);
+    try t_.expectEqual(@as(usize, 3), try e.replaceAll(gpa_t, "foo", "longer", &spots));
+    try t_.expectEqual([2][2]usize{ .{ 2, 8 }, .{ 11, 17 } }, spots);
+    try t_.expectEqual(@as(?[2]usize, .{ 2, 15 }), try e.undo(gpa_t));
+    try t_.expectEqual(@as(?[2]usize, .{ 2, 24 }), try e.redo(gpa_t));
+    try t_.expectEqual(@as(usize, 24), e.cur);
 }
 
 test "rows break after the last space that fits, or mid-word" {
@@ -792,6 +819,6 @@ test "reload keeps the caret and undoes back to the old text" {
     try t_.expect(!e.buf.dirty());
     try e.reload(gpa_t, "zero\none\nTWO\nthree\n");
     try t_.expectEqual(@as(usize, 15), e.cur);
-    try e.undo(gpa_t);
+    _ = try e.undo(gpa_t);
     try t_.expectEqualStrings("zero\none\ntwo\nthree\n", e.text());
 }

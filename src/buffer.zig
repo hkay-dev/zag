@@ -4,7 +4,7 @@ const Allocator = std.mem.Allocator;
 
 /// One change: `old` at `pos` was replaced by `new`. `seq` tells saved
 /// states apart; `before` is where the caret was.
-const Edit = struct { pos: usize, old: []u8, new: []u8, before: usize, seq: u64 };
+pub const Edit = struct { pos: usize, old: []u8, new: []u8, before: usize, seq: u64 };
 
 pub const Buffer = struct {
     text: std.ArrayList(u8) = .empty,
@@ -74,19 +74,18 @@ pub const Buffer = struct {
         return e;
     }
 
+    /// Start of the next line, or the end of the text.
+    pub fn lineStop(b: *const Buffer, i: usize) usize {
+        return if (i + 1 < b.lines()) b.lineStart(i + 1) else b.text.items.len;
+    }
+
     pub fn line(b: *const Buffer, i: usize) []const u8 {
         return b.text.items[b.lineStart(i)..b.lineEnd(i)];
     }
 
     /// The line that holds byte `pos`.
     pub fn lineOf(b: *const Buffer, pos: usize) usize {
-        var lo: usize = 0;
-        var hi: usize = b.starts.items.len;
-        while (hi - lo > 1) {
-            const mid = (lo + hi) / 2;
-            if (b.starts.items[mid] <= pos) lo = mid else hi = mid;
-        }
-        return lo;
+        return lastAtMost(b.starts.items, pos);
     }
 
     pub fn dirty(b: *const Buffer) bool {
@@ -95,6 +94,10 @@ pub const Buffer = struct {
 
     pub fn markSaved(b: *Buffer) void {
         b.saved = b.top();
+    }
+
+    pub fn markUnsaved(b: *Buffer) void {
+        b.saved = std.math.maxInt(u64);
     }
 
     fn top(b: *const Buffer) u64 {
@@ -111,12 +114,12 @@ pub const Buffer = struct {
         if (join and b.undos.items.len > 0 and b.top() != b.saved) {
             const last = &b.undos.items[b.undos.items.len - 1];
             if (old.len == 0 and last.old.len == 0 and start == last.pos + last.new.len) {
-                last.new = try grow(gpa, last.new, last.new, new);
+                last.new = try grow(gpa, last.new, new, false);
             } else if (new.len == 0 and last.new.len == 0 and end == last.pos) {
-                last.old = try grow(gpa, last.old, old, last.old);
+                last.old = try grow(gpa, last.old, old, true);
                 last.pos = start;
             } else if (new.len == 0 and last.new.len == 0 and start == last.pos) {
-                last.old = try grow(gpa, last.old, last.old, old);
+                last.old = try grow(gpa, last.old, old, false);
             } else return b.record(gpa, start, end, new, caret);
             try b.splice(gpa, start, end, new);
             return;
@@ -138,19 +141,19 @@ pub const Buffer = struct {
         try b.splice(gpa, start, end, new);
     }
 
-    /// Undoes the last edit and returns where the caret goes.
-    pub fn undo(b: *Buffer, gpa: Allocator) !?usize {
+    /// Undoes the last edit and returns the restored change.
+    pub fn undo(b: *Buffer, gpa: Allocator) !?Edit {
         const e = b.undos.pop() orelse return null;
         try b.redos.append(gpa, e);
         try b.splice(gpa, e.pos, e.pos + e.new.len, e.old);
-        return e.before;
+        return e;
     }
 
-    pub fn redo(b: *Buffer, gpa: Allocator) !?usize {
+    pub fn redo(b: *Buffer, gpa: Allocator) !?Edit {
         const e = b.redos.pop() orelse return null;
         try b.undos.append(gpa, e);
         try b.splice(gpa, e.pos, e.pos + e.old.len, e.new);
-        return e.pos + e.new.len;
+        return e;
     }
 
     /// Swaps the bytes and keeps `starts` in step without rescanning the file.
@@ -191,6 +194,17 @@ pub const Buffer = struct {
     }
 };
 
+/// Index of the last sorted entry at or before `pos`; `v` starts with zero.
+pub fn lastAtMost(v: []const u32, pos: usize) usize {
+    var lo: usize = 0;
+    var hi: usize = v.len;
+    while (hi - lo > 1) {
+        const mid = (lo + hi) / 2;
+        if (v[mid] <= pos) lo = mid else hi = mid;
+    }
+    return lo;
+}
+
 /// Word starts whose byte lies in `start..end`, including boundary context.
 fn wordStarts(s: []const u8, start: usize, end: usize) usize {
     var n: usize = 0;
@@ -201,9 +215,7 @@ fn wordStarts(s: []const u8, start: usize, end: usize) usize {
 }
 
 /// Extends `old` with the other slice, preserving it across reallocations.
-fn grow(gpa: Allocator, old: []u8, a: []const u8, c: []const u8) ![]u8 {
-    const prepend = c.ptr == old.ptr;
-    const extra = if (prepend) a else c;
+fn grow(gpa: Allocator, old: []u8, extra: []const u8, prepend: bool) ![]u8 {
     const out = try gpa.realloc(old, old.len + extra.len);
     if (prepend) std.mem.copyBackwards(u8, out[extra.len..], out[0..old.len]);
     @memcpy(if (prepend) out[0..extra.len] else out[old.len..], extra);
@@ -263,7 +275,7 @@ test "undo walks typing back to the saved text and clears dirty" {
     b.markSaved();
     for (" there", 3..) |c, i| try b.replace(t.allocator, i, i, &.{c}, i, true);
     try t.expect(b.dirty());
-    try t.expectEqual(@as(?usize, 3), try b.undo(t.allocator));
+    try t.expectEqual(@as(usize, 3), (try b.undo(t.allocator)).?.before);
     try t.expectEqualStrings("hi!", b.text.items);
     try t.expect(!b.dirty());
     _ = try b.redo(t.allocator);
@@ -285,6 +297,8 @@ test "lineEnd stops before a CRLF" {
     defer b.deinit(t.allocator);
     try t.expectEqualStrings("ab", b.line(0));
     try t.expectEqualStrings("cd", b.line(1));
+    try t.expectEqual(@as(usize, 4), b.lineStop(0));
+    try t.expectEqual(@as(usize, 6), b.lineStop(1));
 }
 
 test "joined typing and both deletion directions undo and redo whole runs" {
