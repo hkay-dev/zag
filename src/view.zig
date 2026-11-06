@@ -4258,12 +4258,11 @@ fn selPill(ctx: Id, th: *const Theme, dark: bool, key: bool, y: f64) void {
 /// `turn` is how far a folding folder's chevron has turned, 0 to 1. The file
 /// on show in the focused card has its name in bold, which fades in as the
 /// selection's highlight arrives and out as it leaves.
-fn drawRow(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, i: usize, y: f64, cur: ?[]const u8, turn: ?f64) void {
+fn drawRow(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, i: usize, y: f64, turn: ?f64) void {
     const row = tree.rows.items[i];
     const s = side_icon;
     const now = CACurrentMediaTime();
     const x = 16 + f(row.depth) * 16;
-    if (cur != null and std.mem.eql(u8, row.rel, cur.?)) selPill(ctx, th, dark, key, y);
     if (w.menu_row == i and w.menu_gen == tree_gen) {
         const ma = w.menu_a.at(now);
         if (ma > 0.01) menuMark(ctx, th, ma, side_inset, y, side_w - 2 * side_inset - 2, side_h, side_radius);
@@ -4424,7 +4423,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
             objc.CGContextSaveGState(ctx);
             objc.CGContextClipToRect(ctx, .{ .y = lt + f(v.at + 1) * side_h - sy - sh, .w = side_w, .h = f(v.n) * side_h - v.off });
             objc.CGContextSetAlpha(ctx, fade * v.p);
-            drawRow(w, ctx, th, k, dark, key, i, y, null, null);
+            drawRow(w, ctx, th, k, dark, i, y, null);
             k.flush();
             objc.CGContextRestoreGState(ctx);
             continue;
@@ -4433,7 +4432,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
         for (vs[0..vn]) |v| if (v.at == i) {
             turn = v.p;
         };
-        drawRow(w, ctx, th, k, dark, key, i, y, null, turn);
+        drawRow(w, ctx, th, k, dark, i, y, turn);
     }
 
     // Pinned folders, each held up by the end of its rows, the outer ones
@@ -4450,7 +4449,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
         w.stuck_y[j] = y;
         objc.CGContextClearRect(ctx, .{ .y = y, .w = side_w, .h = side_h });
         fillA(ctx, bg, chromeAlpha(dark), 0, y, side_w, side_h);
-        drawRow(w, ctx, th, k, dark, key, a, y, cur, null);
+        drawRow(w, ctx, th, k, dark, a, y, null);
         low = @max(low, y + side_h);
     }
     k.flush();
