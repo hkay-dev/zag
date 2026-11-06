@@ -2896,6 +2896,7 @@ fn startPrompt(d: *Doc, m: Mode) void {
     d.prompt.clearRetainingCapacity();
     d.fresh = false;
     d.note = "";
+    const was_palette = d.palette;
     switch (m) {
         .find, .replace => {
             d.which = 0;
@@ -2931,6 +2932,8 @@ fn startPrompt(d: *Doc, m: Mode) void {
         },
         else => {},
     }
+    // The old picks index the other list, so the new one fades in fresh.
+    if (d.palette != was_palette) d.prev_n = 0;
     refresh(d);
 }
 
