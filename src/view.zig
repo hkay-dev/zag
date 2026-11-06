@@ -890,7 +890,8 @@ fn scenery(d: *const Doc, now: f64) bool {
         d.plus_t.moving(now) or !d.pick_s.settled() or tabsMoving(d, now) or
         (d.pick_live and (now < d.rows_t0 + row_lag * 5 + row_fade or now < d.pick_t0 + xfade_time)) or
         !d.pop.settled() or now < d.prev_t0 + fade_time or now < d.stag_t0 + stag_cap + fade_time or (d.flash_n > 0 and now < d.flash_t0 + flash_hold + flash_time) or
-        now < d.load_t + loadDur(d) or (d.had_sel and now < d.sel_t0 + fade_time) or d.bar.moving(now);
+        now < d.load_t + loadDur(d) or (d.had_sel and now < d.sel_t0 + fade_time) or d.bar.moving(now) or
+        now < d.fresh_t0 + fade_time;
 }
 
 const spring_k = 380.0;
@@ -1157,6 +1158,11 @@ const Doc = struct {
     which: u1 = 0,
     /// The prompt still shows its starting text; typing replaces it.
     fresh: bool = false,
+    /// That selection's band as last drawn, for fading out: its width, whether
+    /// it was showing, and when it began to fade.
+    fresh_w: f64 = 0,
+    fresh_shown: bool = false,
+    fresh_t0: f64 = 0,
     /// The last find, for find next and previous.
     query: std.ArrayList(u8) = .empty,
     /// Where the caret was when find opened.
@@ -3123,16 +3129,16 @@ fn accept(d: *Doc) void {
             center(d);
         },
         .open => {
-            d.mode = .edit;
             if (d.npicks == 0) return;
+            d.mode = .edit;
             const rel = d.list.?.paths.items[d.picks[d.pick]];
             var buf: [std.c.PATH_MAX]u8 = undefined;
             const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ root.?, rel }) catch return;
             open(path, d);
         },
         .command => {
-            d.mode = .edit;
             if (d.npicks == 0) return;
+            d.mode = .edit;
             const it = cmds.items[d.picks[d.pick]].item;
             msg(void, d.view, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("runCommand:"), it, @as(f64, 0) });
         },
@@ -3943,10 +3949,15 @@ fn headLine(d: *Doc, room: f64) Id {
 
 /// Draws `img` centered in the square at `x`, `y` with side `s`.
 fn drawIcon(img: Id, x: f64, y: f64, s: f64) void {
+    drawIconIn(img, x, y, s, s, 1);
+}
+
+/// Draws `img` centered in the `w` by `h` box at `x`, `y`, at opacity `a`.
+fn drawIconIn(img: Id, x: f64, y: f64, w: f64, h: f64, a: f64) void {
     if (img == null) return;
     const size = msg(Point, img, "size", .{});
-    const r: Rect = .{ .x = @round(x + (s - size.x) / 2), .y = @round(y + (s - size.y) / 2), .w = size.x, .h = size.y };
-    msg(void, img, "drawInRect:fromRect:operation:fraction:respectFlipped:hints:", .{ r, Rect{}, @as(usize, 2), @as(f64, 1), true, @as(Id, null) });
+    const r: Rect = .{ .x = @round(x + (w - size.x) / 2), .y = @round(y + (h - size.y) / 2), .w = size.x, .h = size.y };
+    msg(void, img, "drawInRect:fromRect:operation:fraction:respectFlipped:hints:", .{ r, Rect{}, @as(usize, 2), a, true, @as(Id, null) });
 }
 
 /// The palette and quick open rows: 26pt tall, with the list 4pt in from
@@ -3971,12 +3982,29 @@ fn faded(c: Rgb, bg: Rgb, a: f64) Rgb {
     return .{ bg[0] + (c[0] - bg[0]) * a, bg[1] + (c[1] - bg[1]) * a, bg[2] + (c[2] - bg[2]) * a };
 }
 
+/// How many rows the panel's height holds: the picks, or the one "No matches".
+fn panelRows(d: *const Doc) usize {
+    return @max(d.npicks, 1);
+}
+
+/// The row fonts, made on first use.
+fn panelFonts() void {
+    if (panel_font != null) return;
+    panel_font = msg(Id, msg(Id, objc.class("NSFont"), "systemFontOfSize:", .{@as(f64, 13)}), "retain", .{});
+    panel_small = msg(Id, msg(Id, objc.class("NSFont"), "systemFontOfSize:", .{@as(f64, 12)}), "retain", .{});
+}
+
+/// The baseline of text in `fnt`, centered in a row's height from its top.
+fn rowBase(fnt: Id) f64 {
+    return @round((prow - objc.CTFontGetAscent(fnt) - objc.CTFontGetDescent(fnt)) / 2 + objc.CTFontGetAscent(fnt));
+}
+
 /// Draws `s` in `fnt` with its left edge at `x`, cut to `room`, vertically
 /// centered in a row whose top is `y`. Returns its width.
 fn rowText(ctx: Id, s: []const u8, fnt: Id, c: Rgb, x: f64, y: f64, room: f64) f64 {
     if (room < 4 or s.len == 0) return 0;
     const line = rowLine(s, fnt, room);
-    const base = @round((prow - objc.CTFontGetAscent(fnt) - objc.CTFontGetDescent(fnt)) / 2 + objc.CTFontGetAscent(fnt));
+    const base = rowBase(fnt);
     return drawLine(ctx, line, c, x, y + base);
 }
 
@@ -4019,15 +4047,20 @@ fn checkImage(th: *const Theme) Id {
     return check_img;
 }
 
+/// The row shown when nothing matches: one dim "No matches" in the row font,
+/// with its top at `top` (pushed down by `rise`), drawn at opacity `a`.
+fn panelNone(ctx: Id, th: *const Theme, left: f64, top: f64, a: f64, rise: f64) void {
+    if (a < 0.01) return;
+    panelFonts();
+    _ = rowText(ctx, "No matches", panel_font, faded(th.muted, th.panel, a), left, top + rise, 1e5);
+}
+
 /// One row of the palette or quick open list, picked by `p`, whose content
 /// runs from `left` to `right`, with its top at `y` (pushed down by `rise`),
 /// drawn at opacity `a`.
 fn panelRow(ctx: Id, d: *const Doc, th: *const Theme, p: usize, left: f64, right: f64, top: f64, a: f64, rise: f64) void {
     if (a < 0.01) return;
-    if (panel_font == null) {
-        panel_font = msg(Id, msg(Id, objc.class("NSFont"), "systemFontOfSize:", .{@as(f64, 13)}), "retain", .{});
-        panel_small = msg(Id, msg(Id, objc.class("NSFont"), "systemFontOfSize:", .{@as(f64, 12)}), "retain", .{});
-    }
+    panelFonts();
     const y = top + rise;
     const ink = faded(th.fg, th.panel, a);
     const dim = faded(th.muted, th.panel, a);
@@ -4035,14 +4068,7 @@ fn panelRow(ctx: Id, d: *const Doc, th: *const Theme, p: usize, left: f64, right
         if (p >= cmds.items.len) return;
         const c = cmds.items[p];
         const x = left + check_col;
-        if (c.on) {
-            const img = checkImage(th);
-            if (img != null) {
-                const size = msg(Point, img, "size", .{});
-                const r: Rect = .{ .x = @round(left + (check_col - size.x) / 2), .y = @round(y + (prow - size.y) / 2), .w = size.x, .h = size.y };
-                msg(void, img, "drawInRect:fromRect:operation:fraction:respectFlipped:hints:", .{ r, Rect{}, @as(usize, 2), a, true, @as(Id, null) });
-            }
-        }
+        if (c.on) drawIconIn(checkImage(th), left, y, check_col, prow, a);
         // Shortcuts: one glyph to a cell, flush right like a menu's.
         const cells = std.unicode.utf8CountCodepoints(c.keys) catch 0;
         const keys_w = f(cells) * key_cell;
@@ -4051,7 +4077,7 @@ fn panelRow(ctx: Id, d: *const Doc, th: *const Theme, p: usize, left: f64, right
         while (it.nextCodepointSlice()) |g| : (at += key_cell) {
             const line = rowLine(g, panel_small, 1e5);
             const gw = if (line != null) objc.CTLineGetTypographicBounds(line, null, null, null) else 0;
-            const base = @round((prow - objc.CTFontGetAscent(panel_small) - objc.CTFontGetDescent(panel_small)) / 2 + objc.CTFontGetAscent(panel_small));
+            const base = rowBase(panel_small);
             _ = drawLine(ctx, line, dim, at + (key_cell - gw) / 2, y + base);
         }
         const room = right - keys_w - (if (cells > 0) @as(f64, 12) else 0) - x;
@@ -5051,7 +5077,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // The quick open list, rising out of the prompt line.
     const band_y = card.y + card.h - barH();
     const ty = band_y + 6 + baseline;
-    const want_ph: f64 = if (listing(d) != null) f(d.npicks) * prow + 2 * ppad else 0;
+    const want_ph: f64 = if (listing(d) != null) f(panelRows(d)) * prow + 2 * ppad else 0;
     d.panel.aim(want_ph, now);
     const ph = d.panel.at(now);
     const closing = listing(d) == null;
@@ -5109,6 +5135,14 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
                 panelRow(ctx, d, th, d.prev_picks[i], px + 14, px + pw - 14, y, a * (1 - swap), rise);
                 panelRow(ctx, d, th, p, px + 14, px + pw - 14, y, a * swap, rise);
             } else panelRow(ctx, d, th, p, px + 14, px + pw - 14, y, a, rise);
+        }
+        // No match leaves one dim row, so the panel keeps a row's height. It
+        // fades in as the rows it replaces fade out, and out as rows return.
+        if (d.npicks == 0 or (crossing and d.prev_n == 0)) {
+            const lone: f64 = if (d.npicks > 0) 1 - swap else if (crossing and d.prev_n > 0) swap else 1;
+            const t = std.math.clamp((now - d.rows_t0) / row_fade, 0, 1);
+            const a = t * t * (3 - 2 * t);
+            panelNone(ctx, th, px + 14, by - ph + ppad, a * lone, (1 - a) * 2);
         }
         k.flush();
         objc.CGContextRestoreGState(ctx);
@@ -5177,9 +5211,19 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             else => "open",
         };
         x += f(k.text(label, null, th, th.caret, x, ty, 0, 8) + 1) * cw;
+        // A prefilled selection fades out over `fade_time` once typing or a
+        // click ends it, at the width it had.
         if (prompting and d.fresh) {
+            d.fresh_w = f(editor.colOf(d.held.items, d.held.items.len)) * cw;
+            d.fresh_shown = true;
+        } else if (d.fresh_shown) {
+            d.fresh_shown = false;
+            d.fresh_t0 = now;
+        }
+        const band_a = if (d.fresh_shown) 1 else 1 - std.math.clamp((now - d.fresh_t0) / fade_time, 0, 1);
+        if (band_a > 0 and d.fresh_w > 0) {
             k.flush();
-            fill(ctx, th.sel, x, band_y + 6, f(editor.colOf(d.held.items, d.held.items.len)) * cw, lh);
+            fillA(ctx, th.sel, band_a, x, band_y + 6, d.fresh_w, lh);
         }
         x += f(k.text(d.held.items, null, th, ink, x, ty, 0, 400)) * cw;
         var cx = x;
@@ -5198,7 +5242,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         _ = k.text(tally, null, th, th.muted, card.x + card.w - pad_x - f(tally.len) * cw, ty, 0, 64);
         k.flush();
         objc.CGContextRestoreGState(ctx);
-    }
+    } else d.fresh_shown = false;
 
     // An empty window says what to do: its hint fades in after a pause, so
     // a restored session never flashes it, and out on the first key.
@@ -6234,7 +6278,7 @@ fn cardDown(d: *Doc, p: Point, ev: Id) void {
     }
     d.win.side_down = false;
     if (listing(d) != null) {
-        const top = by - f(d.npicks) * prow - ppad;
+        const top = by - f(panelRows(d)) * prow - ppad;
         if (p.y >= top and p.y < by) {
             d.pick = @min(@as(usize, @intFromFloat((p.y - top) / prow)), d.npicks -| 1);
             accept(d);
