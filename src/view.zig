@@ -198,6 +198,7 @@ pub var sidebar_item: Id = null;
 pub var focus_items: [4]Id = @splat(null);
 pub var typewriter_item: Id = null;
 pub var zen_item: Id = null;
+pub var late_item: Id = null;
 /// View > Theme items, in `settings.schemes` order.
 pub var scheme_items: [settings.schemes.len]Id = @splat(null);
 /// View > Theme's Appearance items: Auto, Light, Dark.
@@ -2849,6 +2850,11 @@ fn fadeTheme(w: *Win) void {
     for (docs.items) |d| if (d.win == w) msg(void, d.caret, "addAnimation:forKey:", .{ t, objc.str("theme") });
 }
 
+/// Enables or greys menu items (the View menus don't autoenable).
+fn lock(items: []const Id, on: bool) void {
+    for (items) |it| if (it != null) msg(void, it, "setEnabled:", .{on});
+}
+
 /// Reads the settings file and applies it to every window.
 pub fn loadSettings() void {
     if (conf_path == null) conf_path = settings.path(gpa) catch null;
@@ -2864,10 +2870,11 @@ pub fn loadSettings() void {
     const old_themes = themes;
     const old_look = conf.look;
     const old_zen = conf.zen;
+    const old_late = conf.late_night;
     conf = settings.load(gpa, p);
     buildThemes();
-    // A theme or appearance pick crossfades; zen's own change doesn't.
-    const crossfade = conf.look != old_look or (conf.zen == old_zen and !std.meta.eql(old_themes, themes));
+    // A theme or appearance pick crossfades, and so does Late-Night; zen's own change doesn't.
+    const crossfade = conf.late_night != old_late or conf.look != old_look or (conf.zen == old_zen and !std.meta.eql(old_themes, themes));
     side_w = conf.sidebar_width;
     conf_stamp = files.stamp(p);
     setFont();
@@ -2887,6 +2894,12 @@ pub fn loadSettings() void {
     for (look_items, 0..) |it, i| {
         if (it != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(i == @intFromEnum(conf.look)))});
     }
+    // Late-Night shows its values in these items and locks them.
+    if (late_item != null) msg(void, late_item, "setState:", .{@as(isize, @intFromBool(conf.late_night))});
+    lock(&.{ typewriter_item, zen_item }, !conf.late_night);
+    lock(&focus_items, !conf.late_night);
+    lock(&scheme_items, !conf.late_night);
+    lock(&look_items, !conf.late_night);
     // Auto leaves it to the Mac; Light and Dark pin every window.
     const look: Id = switch (conf.look) {
         .auto => null,
@@ -2949,8 +2962,14 @@ pub fn pickFocus(i: usize) void {
     if (i < focus_items.len) store("focus", @tagName(@as(settings.Focus, @enumFromInt(i))));
 }
 
+/// Leaving zen the usual way while Late-Night is on ends Late-Night.
 pub fn toggleZen() void {
+    if (conf.late_night) return toggleLateNight();
     store("zen", if (conf.zen) "off" else "on");
+}
+
+pub fn toggleLateNight() void {
+    store("late-night", if (conf.late_night) "off" else "on");
 }
 
 fn desaturate(c: *Rgb) void {
@@ -6446,6 +6465,8 @@ fn keyDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const code = msg(u16, ev, "keyCode", .{});
     // ⌥Z for Soft Wrap: menus only see option keys after the text has typed them.
     if (flags & (cmd_key | opt_key | ctrl_key) == opt_key and code == 6) return toggleWrap();
+    // ⌃⌘Z reaches here while Late-Night greys the Zen item: it leaves Late-Night.
+    if (flags & (cmd_key | opt_key | ctrl_key) == cmd_key | ctrl_key and code == 6 and conf.late_night) return toggleLateNight();
     // Command keys that the menu didn't take: only arrows and delete mean something.
     if (flags & cmd_key != 0) {
         if (std.mem.indexOfScalar(u16, &.{ 51, 117, 115, 119, 123, 124, 125, 126 }, code) == null) return;

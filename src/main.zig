@@ -180,6 +180,7 @@ fn buildMenu(delegate: Id) void {
     _ = item(edit, "Toggle Comment", "toggleComment:", "/", cmd);
 
     const v = submenu(bar, "View");
+    msg(void, v, "setAutoenablesItems:", .{false});
     _ = item(v, "Command Palette…", "commandPalette:", "k", cmd);
     _ = item(v, "Markdown Preview", "markdownPreview:", "m", cmd | shift);
     separator(v);
@@ -194,11 +195,13 @@ fn buildMenu(delegate: Id) void {
     view.pairs_item = item(v, "Auto-Close Brackets", "togglePairs:", "", 0);
     view.sidebar_item = item(v, "Sidebar", "toggleSidebar:", "\\", cmd);
     view.zen_item = item(v, "Zen Mode", "toggleZen:", "z", ctrl | cmd);
+    view.late_item = item(v, "Late-Night Focus", "toggleLateNight:", "n", ctrl | cmd);
     _ = item(v, "Show Next Tab", "nextTab:", "\t", ctrl);
     // ⇧Tab arrives as back tab, so that's the key to match.
     _ = item(v, "Show Previous Tab", "previousTab:", "\x19", ctrl | shift);
     view.typewriter_item = item(v, "Typewriter Scrolling", "toggleTypewriter:", "", 0);
     const focus = submenu(v, "Focus");
+    msg(void, focus, "setAutoenablesItems:", .{false});
     for ([_][]const u8{ "Off", "Line", "Sentence", "Paragraph" }, 0..) |title, i| {
         const it = item(focus, title, "pickFocus:", "", 0);
         msg(void, it, "setTag:", .{@as(isize, @intCast(i))});
@@ -210,6 +213,7 @@ fn buildMenu(delegate: Id) void {
     _ = item(v, "Next Card", "nextCard:", "]", cmd);
     _ = item(v, "Previous Card", "previousCard:", "[", cmd);
     const themes = submenu(v, "Theme");
+    msg(void, themes, "setAutoenablesItems:", .{false});
     msg(void, item(themes, "Appearance", "", "", 0), "setEnabled:", .{false});
     for ([_][]const u8{ "Auto", "Light", "Dark" }, 0..) |title, i| {
         const it = item(themes, title, "pickAppearance:", "", 0);
@@ -275,6 +279,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     d.method("togglePairs:", @ptrCast(act(view.togglePairs, .{})), "v@:@");
     d.method("toggleSidebar:", @ptrCast(act(view.toggleSidebar, .{})), "v@:@");
     d.method("toggleTypewriter:", @ptrCast(act(view.toggleTypewriter, .{})), "v@:@");
+    d.method("toggleLateNight:", @ptrCast(act(view.toggleLateNight, .{})), "v@:@");
     d.method("toggleZen:", @ptrCast(act(view.toggleZen, .{})), "v@:@");
     d.method("nextTab:", @ptrCast(act(view.stepTab, .{1})), "v@:@");
     d.method("previousTab:", @ptrCast(act(view.stepTab, .{-1})), "v@:@");

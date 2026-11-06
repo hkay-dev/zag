@@ -295,6 +295,15 @@ command palette still open their prompt line at the bottom. Drag the empty strip
 move the window. Turn Zen Mode off to bring the window back as it was. The choice applies to
 every window and is remembered; your sidebar, wrap and theme settings don't change.
 
+## Late-Night Focus
+
+**View > Late-Night Focus** (⌃⌘N) turns on Typewriter Scrolling, Focus on paragraph, Zen Mode and
+the Black theme in one step, in dark mode whatever the Mac is set to. They fade in together, and
+turning it off fades back. Your own Zen, Typewriter, Focus, appearance and theme settings aren't
+changed while it's on, so they come back exactly as they were when you turn it off. While it's on,
+those four menu items show what Late-Night set and are greyed out. Leaving Zen with ⌃⌘Z turns
+Late-Night Focus off. It applies to every window and is remembered.
+
 ## Status bar
 
 A thin strip along the bottom of each card, at its right, shows where the caret is as "Ln 120,
@@ -411,6 +420,7 @@ focus = off              # off, line, sentence or paragraph
 typewriter = off         # keep the caret's row in the middle
 line-numbers = on        # number the lines beside the text
 zen = off                # hide the chrome and center an 80-column grey page
+late-night = off         # zen, typewriter, paragraph focus and Black, without changing the settings above
 sidebar = on             # the folder's files on the left
 sidebar-width = 250      # in points, from 150 to 500
 appearance = auto        # auto, light or dark

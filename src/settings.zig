@@ -186,6 +186,9 @@ pub const Settings = struct {
     line_numbers: bool = true,
     /// Hides the window's chrome and centers an 80-column grey page.
     zen: bool = false,
+    /// Late-Night Focus. `load` applies `lateNight` on top of the fields
+    /// around it, so the file keeps what the user chose.
+    late_night: bool = false,
     /// The folder tree on the left of folder windows.
     sidebar: bool = true,
     sidebar_width: f64 = sidebar_default,
@@ -206,6 +209,19 @@ pub const Settings = struct {
         const n = if (std.mem.eql(u8, name, "system")) "" else name;
         s.font_len = @min(n.len, s.font_buf.len);
         @memcpy(s.font_buf[0..s.font_len], n[0..s.font_len]);
+    }
+
+    /// Zen, typewriter, paragraph focus, a dark look and the Black theme, whatever else was chosen.
+    pub fn lateNight(s: *Settings) void {
+        const i = schemeIndex("black").?;
+        s.zen = true;
+        s.typewriter = true;
+        s.focus = .paragraph;
+        s.look = .dark;
+        s.light_scheme = i;
+        s.dark_scheme = i;
+        s.light = black;
+        s.dark = black;
     }
 };
 
@@ -319,6 +335,8 @@ pub fn parse(text: []const u8) Settings {
             s.line_numbers = flag(val) orelse s.line_numbers;
         } else if (std.mem.eql(u8, key, "zen")) {
             s.zen = flag(val) orelse s.zen;
+        } else if (std.mem.eql(u8, key, "late-night")) {
+            s.late_night = flag(val) orelse s.late_night;
         } else if (std.mem.eql(u8, key, "sidebar")) {
             s.sidebar = flag(val) orelse s.sidebar;
         } else if (std.mem.eql(u8, key, "sidebar-width")) {
@@ -365,6 +383,8 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         \\line-numbers = {s}
         \\# Hide the window's chrome and center an 80-column grey page: on or off.
         \\zen = {s}
+        \\# Late-Night Focus turns on zen, typewriter, paragraph focus and the Black theme without changing the settings above: on or off.
+        \\late-night = {s}
         \\# Show the folder's files on the left of the window: on or off.
         \\sidebar = {s}
         \\# How wide the sidebar is, in points: drag its edge to change it.
@@ -392,6 +412,7 @@ pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         if (s.typewriter) "on" else "off",
         if (s.line_numbers) "on" else "off",
         if (s.zen) "on" else "off",
+        if (s.late_night) "on" else "off",
         if (s.sidebar) "on" else "off",
         decimal(&wbuf, s.sidebar_width),
         @tagName(s.look),
@@ -448,7 +469,9 @@ pub fn path(gpa: Allocator) ![:0]u8 {
 pub fn load(gpa: Allocator, p: [:0]const u8) Settings {
     const text = files.read(gpa, p) catch return .{};
     defer gpa.free(text);
-    return parse(text);
+    var s = parse(text);
+    if (s.late_night) s.lateNight();
+    return s;
 }
 
 /// Makes sure the file exists, writing every key from `s` when it doesn't.
@@ -558,4 +581,16 @@ test "every theme's muted text reads at 4.5:1 and its comments at 3:1 on the pag
         try t.expect(contrastRatio(sc.theme.muted, sc.theme.bg) >= 4.5);
         try t.expect(contrastRatio(sc.theme.kinds[3], sc.theme.bg) >= 3.0);
     }
+}
+
+test "late-night covers the saved look and is written back as a flag" {
+    var s = parse("late-night = on\nzen = off\nappearance = light\nlight-theme = paper\nfocus = line\n");
+    try t.expect(s.late_night and !s.zen and s.look == .light);
+    s.lateNight();
+    try t.expect(s.zen and s.typewriter and s.focus == .paragraph and s.look == .dark);
+    try t.expectEqual(black, s.light);
+    try t.expectEqual(black, s.dark);
+    const text = try render(t.allocator, &parse("late-night = on\n"));
+    defer t.allocator.free(text);
+    try t.expect(std.mem.indexOf(u8, text, "late-night = on\n") != null);
 }
