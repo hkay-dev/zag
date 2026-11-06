@@ -4183,7 +4183,7 @@ fn stuckRows(sy: f64, out: *[max_stuck]usize) usize {
 /// The tree row under `y`: a pinned folder, or a row in the list.
 fn sideRow(w: *const Win, y: f64) ?usize {
     for (w.stuck[0..w.nstuck], w.stuck_y[0..w.nstuck]) |i, sy| if (y >= sy and y < sy + side_h) return i;
-    if (y < listTop()) return null;
+    if (y < listTop() or y >= msg(Rect, w.view, "bounds", .{}).h - gap) return null;
     // Rows after a folding folder have slid up by how far it's shut, so a
     // click lands on the row it shows, in the tree's own numbering.
     var ly = y - listTop() + w.side_y;
@@ -4581,7 +4581,9 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
     if (shade > 0) fillA(ctx, th.fg, (if (contrast) @as(f64, 0.2) else 0.08) * shade, 12, low - 1, side_w - 24, 1);
     // With more rows below the list's end, its last points fade away.
     const more = std.math.clamp((f(rows.len) * side_h - moved - sy - view_h) / side_fade, 0, 1);
-    if (more > 0.01) fadeList(ctx, bg, chromeAlpha(dark, w.z.x), lt + view_h - side_fade, more * fade);
+    // Drawn at full strength: the band's height is what eases, and not while the
+    // sidebar slides, when its alpha would scale the repaint unevenly.
+    if (more * side_fade >= 1 and fade >= 1) fadeList(ctx, bg, chromeAlpha(dark, w.z.x), lt + view_h, more * side_fade);
     objc.CGContextRestoreGState(ctx);
 }
 
@@ -4594,16 +4596,11 @@ var fade_out: ?*anyopaque = null;
 var fade_in: ?*anyopaque = null;
 var fade_key: [4]f64 = undefined;
 
-const cg = struct {
-    extern fn CGGradientCreateWithColorComponents(space: ?*anyopaque, comps: [*]const f64, locs: ?[*]const f64, n: usize) ?*anyopaque;
-    extern fn CGContextDrawLinearGradient(ctx: Id, g: ?*anyopaque, from: Point, to: Point, opts: u32) void;
-};
-
-/// Fades the rows in the `side_fade` points from `y` down into the sidebar's
-/// background `bg` (painted at alpha `a` over the material), by `m` (0 to 1).
+/// Fades the rows in the `h` points above `end` into the sidebar's
+/// background `bg` (painted at alpha `a` over the material), fully.
 /// The rows are erased with a gradient, then the background goes back with
 /// the alpha that leaves the strip's empty parts as they were.
-fn fadeList(ctx: Id, bg: Rgb, a: f64, y: f64, m: f64) void {
+fn fadeList(ctx: Id, bg: Rgb, a: f64, end: f64, h: f64) void {
     const key = [4]f64{ bg[0], bg[1], bg[2], a };
     if (fade_out == null or !std.mem.eql(f64, &key, &fade_key)) {
         const space = objc.CGColorSpaceCreateDeviceRGB();
@@ -4611,7 +4608,7 @@ fn fadeList(ctx: Id, bg: Rgb, a: f64, y: f64, m: f64) void {
         if (fade_out) |g| objc.CFRelease(g);
         if (fade_in) |g| objc.CFRelease(g);
         const gone = [8]f64{ 0, 0, 0, 0, 0, 0, 0, 1 };
-        fade_out = cg.CGGradientCreateWithColorComponents(space, &gone, null, 2);
+        fade_out = objc.CGGradientCreateWithColorComponents(space, &gone, null, 2);
         var comps: [20]f64 = undefined;
         var locs: [5]f64 = undefined;
         for (0..5) |i| {
@@ -4620,18 +4617,18 @@ fn fadeList(ctx: Id, bg: Rgb, a: f64, y: f64, m: f64) void {
             comps[4 * i ..][0..3].* = bg;
             comps[4 * i + 3] = a * t / (1 - a + a * t);
         }
-        fade_in = cg.CGGradientCreateWithColorComponents(space, &comps, &locs, 5);
+        fade_in = objc.CGGradientCreateWithColorComponents(space, &comps, &locs, 5);
         fade_key = key;
     }
+    const y = end - h;
     const from = Point{ .y = y };
-    const to = Point{ .y = y + side_fade };
+    const to = Point{ .y = end };
     objc.CGContextSaveGState(ctx);
-    objc.CGContextClipToRect(ctx, .{ .y = y, .w = side_w, .h = side_fade });
-    objc.CGContextSetAlpha(ctx, m);
+    objc.CGContextClipToRect(ctx, .{ .y = y, .w = side_w - side_inset - 2, .h = h });
     objc.CGContextSetBlendMode(ctx, 23);
-    cg.CGContextDrawLinearGradient(ctx, fade_out, from, to, 0);
+    objc.CGContextDrawLinearGradient(ctx, fade_out, from, to, 0);
     objc.CGContextSetBlendMode(ctx, 0);
-    cg.CGContextDrawLinearGradient(ctx, fade_in, from, to, 0);
+    objc.CGContextDrawLinearGradient(ctx, fade_in, from, to, 0);
     objc.CGContextRestoreGState(ctx);
 }
 
@@ -6541,12 +6538,12 @@ fn hoverAt(w: *Win, p: Point) void {
 }
 
 /// Runs the hover hit test again from where the mouse sits now, for when
-    if (w.tdrag != null or !msg(bool, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "isActive", .{})) return;
-    const num = msg(isize, w.window, "windowNumber", .{});
-    if (msg(isize, objc.class("NSWindow"), "windowNumberAtPoint:belowWindowWithWindowNumber:", .{ msg(Point, objc.class("NSEvent"), "mouseLocation", .{}), @as(isize, 0) }) != num) return;
 /// rows or tabs have moved under a still mouse. Does nothing while the
 /// mouse is outside the window's view.
 fn hoverNow(w: *Win) void {
+    if (w.tdrag != null or !msg(bool, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "isActive", .{})) return;
+    const num = msg(isize, w.window, "windowNumber", .{});
+    if (msg(isize, objc.class("NSWindow"), "windowNumberAtPoint:belowWindowWithWindowNumber:", .{ msg(Point, objc.class("NSEvent"), "mouseLocation", .{}), @as(isize, 0) }) != num) return;
     const at = msg(Point, w.window, "mouseLocationOutsideOfEventStream", .{});
     const p = msg(Point, w.view, "convertPoint:fromView:", .{ at, @as(Id, null) });
     const b = msg(Rect, w.view, "bounds", .{});

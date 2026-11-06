@@ -118,6 +118,8 @@ pub extern fn CGColorCreateGenericGray(gray: f64, alpha: f64) ?*anyopaque;
 pub extern fn CGContextSetShadowWithColor(ctx: Id, offset: Size, blur: f64, color: ?*anyopaque) void;
 pub extern fn CGContextSetBlendMode(ctx: Id, mode: i32) void;
 pub extern fn CGColorSpaceCreateDeviceRGB() ?*anyopaque;
+pub extern fn CGGradientCreateWithColorComponents(space: ?*anyopaque, comps: [*]const f64, locs: ?[*]const f64, n: usize) ?*anyopaque;
+pub extern fn CGContextDrawLinearGradient(ctx: Id, g: ?*anyopaque, from: Point, to: Point, opts: u32) void;
 pub extern fn CGBitmapContextCreate(data: ?*anyopaque, w: usize, h: usize, bits: usize, row: usize, space: ?*anyopaque, info: u32) Id;
 pub extern fn CGBitmapContextCreateImage(ctx: Id) ?*anyopaque;
 pub extern fn CGImageCreateWithImageInRect(img: ?*anyopaque, rect: Rect) ?*anyopaque;
