@@ -5667,9 +5667,6 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
     k.flush();
 }
 
-extern fn CGGradientCreateWithColorComponents(space: ?*anyopaque, comps: [*]const f64, locs: ?[*]const f64, n: usize) ?*anyopaque;
-extern fn CGContextDrawLinearGradient(ctx: Id, g: ?*anyopaque, from: objc.Point, to: objc.Point, opts: u32) void;
-
 /// How far the tab row fades at an end that has tabs past it.
 const tab_fade = 16.0;
 /// The header's colour fading to clear, made on first use and again when
@@ -5688,14 +5685,14 @@ fn tabFade(ctx: Id, th: *const Theme, edge: f64, dir: f64, t: f64) void {
         defer if (space) |s| objc.CFRelease(s);
         const c = th.header;
         const comps = [8]f64{ c[0], c[1], c[2], 1, c[0], c[1], c[2], 0 };
-        tab_fade_grad = CGGradientCreateWithColorComponents(space, &comps, null, 2);
+        tab_fade_grad = objc.CGGradientCreateWithColorComponents(space, &comps, null, 2);
         tab_fade_rgb = th.header;
     }
     const hy = gap + head_h / 2;
     objc.CGContextSaveGState(ctx);
     objc.CGContextClipToRect(ctx, .{ .x = if (dir > 0) edge else edge - tab_fade, .y = hy - 12, .w = tab_fade, .h = 24 });
     if (t < 0.99) objc.CGContextSetAlpha(ctx, t);
-    CGContextDrawLinearGradient(ctx, tab_fade_grad, .{ .x = edge, .y = hy }, .{ .x = edge + dir * tab_fade, .y = hy }, 0);
+    objc.CGContextDrawLinearGradient(ctx, tab_fade_grad, .{ .x = edge, .y = hy }, .{ .x = edge + dir * tab_fade, .y = hy }, 0);
     objc.CGContextRestoreGState(ctx);
 }
 
