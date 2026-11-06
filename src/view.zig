@@ -140,18 +140,20 @@ fn bottom(d: *const Doc) f64 {
 }
 
 /// The window's own color around the card: the theme's background, a
-/// step darker. Zen leaves no edge around the card.
-fn chrome(th: *const Theme, dark: bool) Rgb {
-    if (conf.zen) return th.bg;
+/// step darker. Zen leaves no edge around the card, and z (0..1, the zen
+/// spring) eases between the two.
+fn chrome(th: *const Theme, dark: bool, z: f64) Rgb {
     const k: f64 = if (dark) 0.78 else 0.955;
-    return .{ th.bg[0] * k, th.bg[1] * k, th.bg[2] * k };
+    const m = 1 - (1 - k) * (1 - std.math.clamp(z, 0, 1));
+    return .{ th.bg[0] * m, th.bg[1] * m, th.bg[2] * m };
 }
 
 /// How much of the chrome color paints over the sidebar material: the rest
 /// shows through. Zen covers the material completely. (The material can't
 /// be hidden: Zag's view lives inside it.)
-fn chromeAlpha(dark: bool) f64 {
-    return if (conf.zen) 1 else if (dark) 0.7 else 0.6;
+fn chromeAlpha(dark: bool, z: f64) f64 {
+    const a: f64 = if (dark) 0.7 else 0.6;
+    return a + (1 - a) * std.math.clamp(z, 0, 1);
 }
 
 /// Font, size, colors and toggles, from the settings file.
@@ -4495,7 +4497,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, k: *Ink, dark: bool, key: bool, 
         const y = @min(lt + f(j) * side_h, lt + f(e) * side_h - sy - side_h);
         w.stuck_y[j] = y;
         objc.CGContextClearRect(ctx, .{ .y = y, .w = side_w, .h = side_h });
-        fillA(ctx, bg, chromeAlpha(dark), 0, y, side_w, side_h);
+        fillA(ctx, bg, chromeAlpha(dark, w.z.x), 0, y, side_w, side_h);
         var turn: ?f64 = null;
         for (vs[0..vn]) |v| if (v.at == a) {
             turn = v.p;
@@ -4697,7 +4699,7 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     objc.CGContextClearRect(ctx, .{ .w = r.w, .h = r.h });
     // Text upright for every draw: a strip-only one skips the cards, whose drawPane also sets it.
     objc.flipText(ctx);
-    fillA(ctx, chrome(th, dark), chromeAlpha(dark), 0, 0, r.w, r.h);
+    fillA(ctx, chrome(th, dark, w.z.x), chromeAlpha(dark, w.z.x), 0, 0, r.w, r.h);
     const key = msg(bool, w.window, "isKeyWindow", .{});
     const many = w.cards.pane == null;
     for (&w.hot_t, 1..) |*t, i| t.aim(if (w.hot == i) 1 else 0, now);
@@ -4735,8 +4737,8 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
             objc.CGContextSetAlpha(ctx, grown);
             objc.CGContextBeginTransparencyLayer(ctx, null);
         }
-        if (hits(dirty, body)) drawPane(d, ctx, th, dark, key, many, now) else if (!conf.zen) {
-            cardShadow(ctx, dark, 0.5 + 0.5 * w.key_a.at(now), gap, gap, d.size.x - 2 * gap, d.size.y - 2 * gap);
+        if (hits(dirty, body)) drawPane(d, ctx, th, dark, key, many, now) else if (w.z.x < 1) {
+            cardShadow(ctx, dark, (1 - std.math.clamp(w.z.x, 0, 1)) * (0.5 + 0.5 * w.key_a.at(now)), gap, gap, d.size.x - 2 * gap, d.size.y - 2 * gap);
         }
         if (grown < 1) objc.CGContextEndTransparencyLayer(ctx);
         objc.CGContextRestoreGState(ctx);
@@ -4752,7 +4754,7 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
         objc.CGContextClipToRect(ctx, .{ .w = side_w * slid, .h = r.h });
         objc.CGContextTranslateCTM(ctx, side_w * (slid - 1), 0);
         if (slid < 1) objc.CGContextSetAlpha(ctx, slid * slid);
-        drawSide(w, ctx, th, &k, dark, key, chrome(th, dark), if (slid < 1) slid * slid else 1, now);
+        drawSide(w, ctx, th, &k, dark, key, chrome(th, dark, w.z.x), if (slid < 1) slid * slid else 1, now);
         hoverPill(ctx, th, w.hot_t[1].at(now), if (w.press == 2) down else 0, side_w - gap - 20, hy);
         drawIcon(icon(.plus, dark, th), side_w - gap - 30, hy - 10, 20);
         objc.CGContextRestoreGState(ctx);
@@ -4814,7 +4816,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // inside its rounded corners.
     const lx = gap;
     const card: Rect = .{ .x = lx, .y = gap, .w = rightEdge(d) - lx, .h = r.h - 2 * gap };
-    if (!conf.zen) cardShadow(ctx, dark, 0.5 + 0.5 * d.win.key_a.at(now), card.x, card.y, card.w, card.h);
+    const zen_k = 1 - std.math.clamp(d.win.z.x, 0, 1);
+    if (zen_k > 0) cardShadow(ctx, dark, zen_k * (0.5 + 0.5 * d.win.key_a.at(now)), card.x, card.y, card.w, card.h);
     pill(ctx, th.bg, 1, card.x, card.y, card.w, card.h, card_radius);
     objc.CGContextSaveGState(ctx);
     clipRound(ctx, card.x, card.y, card.w, card.h, card_radius);
