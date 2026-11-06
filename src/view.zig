@@ -4725,7 +4725,9 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     const skip: usize = @intFromFloat(@max(@ceil(d.vx / cw), 0));
     const tx = lx + padL(d);
     const ox = tx + f(skip) * cw - d.vx;
-    const cols: usize = @intFromFloat(@max(@ceil((card.x + card.w - ox) / cw), 0));
+    // Text stops a whole column inside the same margin on the right as on
+    // the left, rather than running into the card's border.
+    const cols: usize = @intFromFloat(@max(@floor((card.x + card.w - pad_x - ox) / cw), 0));
     const s = d.ed.sel();
     const here = caretRow(d);
     const finding = (d.mode == .find or d.mode == .replace) and d.prompt.items.len > 0;
@@ -4769,6 +4771,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     if (band_on and d.band_on) d.band.aim(f(here.row) * lh, now) else d.band.snap(f(here.row) * lh);
     d.band_on = band_on;
     if (band_on) fill(ctx, th.line, lx, top_h + d.band.at(now) - d.vy, card.w, lh);
+    objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = ox + f(cols) * cw - card.x, .h = card.h });
 
     // A new selection fades in.
     const has_sel = s[0] != s[1];
