@@ -43,15 +43,52 @@ pub fn setRoot(dir: []const u8) void {
     for (tree.open.items) |o| gpa.free(o);
     tree.open.clearRetainingCapacity();
     for (wins.items) |w| w.side_y = 0;
+    dropSideLines();
     rebuildTree();
     for (wins.items) |w| msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
     refreshAll();
 }
 
 fn rebuildTree() void {
-    if (root) |r| tree.rebuild(gpa, r);
+    const r = root orelse return;
+    var kept: std.StringHashMapUnmanaged(usize) = .empty;
+    defer kept.deinit(gpa);
+    for (side_lines.items, 0..) |line, i| if (line.full != null) {
+        kept.put(gpa, tree.rows.items[i].rel, i) catch {
+            dropSideLines();
+            return rebuildTree();
+        };
+    };
+    if (kept.count() == 0) {
+        tree.rebuild(gpa, r);
+        tree_gen +%= 1;
+        dropSideLines();
+        return;
+    }
+    // The map borrows the old paths until every surviving line has moved.
+    var old_arena = tree.arena;
+    defer old_arena.deinit();
+    tree.arena = .init(gpa);
+    tree.rebuild(gpa, r);
     tree_gen +%= 1;
-    dropSideLines();
+    var old_lines = side_lines;
+    side_lines = .empty;
+    defer {
+        for (old_lines.items) |*line| freeSideLine(line);
+        old_lines.deinit(gpa);
+    }
+    for (wins.items) |w| {
+        freeSideLine(&w.bold);
+        freeSideLine(&w.bold_old);
+    }
+    side_lines.resize(gpa, tree.rows.items.len) catch return;
+    @memset(side_lines.items, .{});
+    for (tree.rows.items, side_lines.items) |row, *line| {
+        if (kept.get(row.rel)) |i| {
+            line.* = old_lines.items[i];
+            old_lines.items[i] = .{};
+        }
+    }
 }
 
 /// Counts tree rebuilds, so a window knows when to look up its selected row again.
@@ -903,6 +940,7 @@ fn flashStart(d: *Doc) void {
 /// Adds the bytes `lo..hi` of the text to the flash, up to `max_flash` spans.
 fn flashAdd(d: *Doc, lo: usize, hi: usize) void {
     if (lo >= hi or d.flash_n == max_flash) return;
+    if (d.flash_n == 0) msg(void, d.view, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("barHold:"), @as(Id, null), @max(d.flash_t0 + flash_hold - CACurrentMediaTime(), 0) });
     d.flash[d.flash_n] = .{ lo, hi };
     d.flash_n += 1;
 }
@@ -983,10 +1021,10 @@ fn scenery(d: *const Doc, now: f64) bool {
     return d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.band_a.moving(now) or now < d.focus_t0 + focus_time or d.focus_a.moving(now) or d.panel.moving(now) or d.lit.moving(now) or
         d.inked.moving(now) or
         d.gut.moving(now) or
-        d.prompt_t.moving(now) or d.pbar.moving(now) or now < d.shake_t0 + shake_time or now < d.card_shake_t0 + shake_time or d.hint.moving(now) or (d.blank_t0 >= 0 and now < d.blank_t0 + hint_delay) or
-        d.plus_t.moving(now) or !d.pick_s.settled() or tabsMoving(d, now) or
+        d.prompt_t.moving(now) or d.pbar.moving(now) or now < d.shake_t0 + shake_time or now < d.card_shake_t0 + shake_time or d.hint.moving(now) or
+        d.plus_t.moving(now) or !d.pick_s.settled() or (std.math.clamp(d.win.z.x, 0, 1) < 0.999 and tabsMoving(d, now)) or
         (d.pick_live and (now < d.rows_t0 + row_lag * 5 + row_fade or now < d.pick_t0 + xfade_time)) or
-        !d.pop.settled() or now < d.prev_t0 + fade_time or now < d.stag_t0 + stag_cap + fade_time or (d.flash_n > 0 and now < d.flash_t0 + flash_hold + flash_time) or
+        !d.pop.settled() or now < d.prev_t0 + fade_time or now < d.stag_t0 + stag_cap + fade_time or (d.flash_n > 0 and now >= d.flash_t0 + flash_hold and now < d.flash_t0 + flash_hold + flash_time) or
         now < d.load_t + loadDur(d) or (d.had_sel and now < d.sel_t0 + fade_time) or d.bar.moving(now) or
         d.sel_out.moving(now) or
         now < d.fresh_t0 + fade_time;
@@ -1042,8 +1080,11 @@ fn tick(self: Id, _: Sel, _: Id) callconv(.c) void {
     if (!gliding) msg(void, w.link, "setPaused:", .{true});
 }
 
-/// The scroll bar's hold is over: one redraw, and the fade out takes it from there.
-fn barHold(self: Id, _: Sel, _: Id) callconv(.c) void {
+/// A hold is over: one redraw, and any fade out takes it from there.
+fn barHold(self: Id, _: Sel, key: Id) callconv(.c) void {
+    for (docs.items) |d| if (d.view == self and d.caret == key) {
+        d.bar_due = false;
+    };
     msg(void, self, "setNeedsDisplay:", .{true});
 }
 
@@ -1232,6 +1273,7 @@ const Doc = struct {
     bar: Tween = .{ .dur = bar_time },
     bar_t0: f64 = 0,
     bar_vy: f64 = 0,
+    bar_due: bool = false,
     cx: Tween = .{ .dur = caret_time },
     cy: Tween = .{ .dur = caret_time },
     /// The caret tween is in page coordinates (else window coordinates).
@@ -3970,7 +4012,7 @@ pub const ax = struct {
         } else return false;
         if (tree.rows.items[i].dir) {
             startFold(i);
-            refreshAll();
+            for (wins.items) |win| redrawSide(win);
             return true;
         }
         const path = std.fmt.allocPrint(gpa, "{s}/{s}", .{ root orelse return false, want }) catch return false;
@@ -4671,7 +4713,7 @@ fn finishFold(o: *Fold) void {
     const now = CACurrentMediaTime();
     for (&folds) |*x| if (x != o) refindFold(x, now);
     for (wins.items) |w| hoverNow(w);
-    refreshAll();
+    for (wins.items) |w| redrawSide(w);
 }
 
 /// Shuts the closing folders whose rows have folded away.
@@ -4698,10 +4740,9 @@ fn selFill(ctx: Id, th: *const Theme, dark: bool, key: bool, fade: f64, x: f64, 
 /// `turn` is how far a folding folder's chevron has turned, 0 to 1. The file
 /// on show in the focused card has its name in bold, which fades in as the
 /// selection's highlight arrives and out as it leaves.
-fn drawRow(w: *Win, ctx: Id, th: *const Theme, dark: bool, i: usize, y: f64, turn: ?f64) void {
+fn drawRow(w: *Win, ctx: Id, th: *const Theme, dark: bool, i: usize, y: f64, turn: ?f64, sh: f64, now: f64) void {
     const row = tree.rows.items[i];
     const s = side_icon;
-    const now = CACurrentMediaTime();
     const x = 16 + f(row.depth) * 16;
     if (w.menu_row == i and w.menu_gen == tree_gen) {
         const ma = w.menu_a.at(now);
@@ -4726,15 +4767,16 @@ fn drawRow(w: *Win, ctx: Id, th: *const Theme, dark: bool, i: usize, y: f64, tur
         objc.CGContextSaveGState(ctx);
         objc.CGContextSetAlpha(ctx, 1 - 0.6 * lift);
     }
-    if (row.dir) drawIcon(icon(.folder, dark, th), x + 10, iy, s) else tileAt(iconFor(row.rel[row.base..]), x + 10, iy, s);
-    const nx = x + 10 + s + 8;
-    const room = side_w - nx - if (row.dir) @as(f64, 14) else 26;
     const sl = &side_lines.items[i];
     if (sl.full == null) sl.full = uiLine(row.rel[row.base..], side_font, 1e9);
+    if (!row.dir and sl.icon == null) sl.icon = iconFor(row.rel[row.base..]);
+    if (row.dir) drawIcon(icon(.folder, dark, th), x + 10, iy, s) else tileAt(sl.icon, x + 10, iy, s);
+    const nx = x + 10 + s + 8;
+    const room = side_w - nx - if (row.dir) @as(f64, 14) else 26;
     const plain = sideFit(sl, 2, room);
     // How far the selection's highlight is on this row, for the bold name.
-    const bp: f64 = if (row.dir or w.sel_row == null) 0 else (1 - std.math.clamp(@abs(w.sel.x - f(i) * side_h) / side_h, 0, 1)) * std.math.clamp(w.sel_a.at(now), 0, 1);
-    var nw = drawLineA(ctx, plain, th.fg, 1 - bp, nx, y + side_base);
+    const bp: f64 = if (row.dir or w.sel_row == null) 0 else (1 - std.math.clamp(@abs(w.sel.x - (f(i) * side_h - sh)) / side_h, 0, 1)) * std.math.clamp(w.sel_a.at(now), 0, 1);
+    var nw = if (1 - bp > 0.001) drawLineA(ctx, plain, th.fg, 1 - bp, nx, y + side_base) else if (plain == sl.full) sl.w else if (plain != null) objc.CTLineGetTypographicBounds(plain, null, null, null) else 0;
     if (bp > 0.001) {
         const selected = w.sel_row == i;
         if (selected and (w.bold.full == null or w.bold_row != i or w.bold_gen != tree_gen)) {
@@ -4838,7 +4880,9 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
         w.hov_last = i;
         w.hov_a.aim(1, now);
     } else w.hov_a.aim(0, now);
-    if (hov_a > 0.01) pill(ctx, th.fg, (if (contrast) @as(f64, 0.08) else if (dark) @as(f64, 0.035) else 0.025) * (if (key) @as(f64, 1) else 0.7) * hov_a * fade, side_inset, lt + w.hov.step(now) - sy, side_w - 2 * side_inset - 2, side_h, side_radius);
+    if (hov_a > 0.01) {
+        pill(ctx, th.fg, (if (contrast) @as(f64, 0.08) else if (dark) @as(f64, 0.035) else 0.025) * (if (key) @as(f64, 1) else 0.7) * hov_a * fade, side_inset, lt + w.hov.step(now) - sy, side_w - 2 * side_inset - 2, side_h, side_radius);
+    } else if (!w.hov.settled()) w.hov.snap(w.hov.to);
 
     // The selection hops from row to row with a little bounce, and rides
     // along when folders above it open or close.
@@ -4870,7 +4914,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
         objc.CGContextSetAlpha(ctx, sel_a * fade);
         selPill(ctx, th, dark, key, lt + w.sel.step(now) - sy);
         objc.CGContextRestoreGState(ctx);
-    }
+    } else if (!w.sel.settled()) w.sel.snap(w.sel.to);
 
     // A folding folder's own rows stay put and show only as far as it's
     // open, fading in or out, and the rows after them slide to match.
@@ -4884,7 +4928,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
             objc.CGContextSaveGState(ctx);
             objc.CGContextClipToRect(ctx, .{ .y = lt + f(v.at + 1) * side_h - sy - sh, .w = side_w, .h = f(v.n) * side_h - v.off });
             objc.CGContextSetAlpha(ctx, fade * v.p);
-            drawRow(w, ctx, th, dark, i, y, null);
+            drawRow(w, ctx, th, dark, i, y, null, sh, now);
             objc.CGContextRestoreGState(ctx);
             continue;
         }
@@ -4892,7 +4936,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
         for (vs[0..vn]) |v| if (v.at == i) {
             turn = v.p;
         };
-        drawRow(w, ctx, th, dark, i, y, turn);
+        drawRow(w, ctx, th, dark, i, y, turn, sh, now);
     }
 
     // Pinned folders, each held up by the end of its rows, the outer ones
@@ -4913,7 +4957,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
         for (vs[0..vn]) |v| if (v.at == a) {
             turn = v.p;
         };
-        drawRow(w, ctx, th, dark, a, y, turn);
+        drawRow(w, ctx, th, dark, a, y, turn, 0, now);
         low = @max(low, y + side_h);
     }
     // A hairline under whatever is pinned, once rows pass under it.
@@ -4979,7 +5023,7 @@ var side_head: Id = null;
 /// A row's whole name and its width, made once, and the name cut to the room
 /// it last had when it's wider than that: a width change remakes only a cut
 /// line.
-const SideLine = struct { full: Id = null, w: f64 = -1, cut: Id = null, cut_room: f64 = -1 };
+const SideLine = struct { full: Id = null, w: f64 = -1, cut: Id = null, cut_room: f64 = -1, icon: Id = null };
 var side_lines: std.ArrayList(SideLine) = .empty;
 /// The room `side_head` was cut to.
 var side_head_room: f64 = 0;
@@ -5191,7 +5235,8 @@ fn sideClick(w: *Win, p: Point, flags: usize) void {
     const row = tree.rows.items[i];
     if (row.dir) {
         startFold(i);
-        return refreshAll();
+        for (wins.items) |win| redrawSide(win);
+        return;
     }
     // A file opens when the mouse comes up, unless it's dragged to a card.
     const path = std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ root.?, row.rel }, 0) catch return;
@@ -5278,11 +5323,9 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     // redraws the window.
     var busy = w.side_a.moving(now) or cardsMoving(w.cards) or
         (w.hot_t[0].moving(now) and !toggleInSide(shown, slid)) or
-        w.pv_a.moving(now) or w.ghost_a.moving(now) or w.menu_a.moving(now) or w.fly != null or
+        w.pv_a.moving(now) or w.ghost_a.moving(now) or (w.menu_card != null and w.menu_a.moving(now)) or w.fly != null or
         !w.lift.settled() or w.key_a.moving(now) or !side_stretch.settled() or !w.z.settled();
     const dots_busy = sideDotsBusy(w, now) and shown;
-    const side_busy = w.side_t.moving(now) or foldsBusy(now) or !w.sel.settled() or w.sel_a.moving(now) or w.hot_t[1].moving(now) or !w.hov.settled() or w.hov_a.moving(now)
-        or dots_busy or (w.hot_t[0].moving(now) and toggleInSide(shown, slid));
     for (w.pv) |s| busy = busy or !s.settled();
     busy = busy or w.press_t.moving(now);
     const down = w.press_t.at(now);
@@ -5328,6 +5371,9 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
         hoverPill(ctx, th, w.hot_t[1].at(now), if (w.press == 2) down else 0, side_w - gap - 20, hy);
         drawIcon(icon(.plus, dark, th), side_w - gap - 30, hy - 10, 20);
         objc.CGContextRestoreGState(ctx);
+    } else {
+        if (!w.hov.settled()) w.hov.snap(w.hov.to);
+        if (!w.sel.settled()) w.sel.snap(w.sel.to);
     }
     // In zen it fades out with the lights, on the same spring.
     if (root != null and la > 0.01) {
@@ -5337,6 +5383,8 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
         if (la < 1) objc.CGContextSetAlpha(ctx, 1);
     }
     drawDrag(w, ctx, th, now);
+    const side_busy = w.side_t.moving(now) or foldsBusy(now) or !w.sel.settled() or w.sel_a.moving(now) or w.hot_t[1].moving(now) or !w.hov.settled() or w.hov_a.moving(now)
+        or dots_busy or (w.menu_card == null and w.menu_a.moving(now)) or (w.hot_t[0].moving(now) and toggleInSide(shown, slid));
     // Only the sidebar's strip moves when its rows' highlights are all that does.
     w.part = !busy and side_busy and shown and slid >= 1;
     w.busy = busy or side_busy or w.peek.moving(now);
@@ -5915,7 +5963,10 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // a restored session never flashes it, and out on the first key.
     const blank = isBlank(d) and d.mode == .edit and !d.closing;
     if (blank) {
-        if (d.blank_t0 < 0) d.blank_t0 = now;
+        if (d.blank_t0 < 0) {
+            d.blank_t0 = now;
+            msg(void, d.view, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("barHold:"), @as(Id, null), @as(f64, hint_delay) });
+        }
         if (now >= d.blank_t0 + hint_delay) {
             if (d.hint.to != 1) d.hint.dur = hint_in;
             d.hint.aim(1, now);
@@ -5983,7 +6034,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     d.busy = scenery(d, now);
     // The scroll bar's hold has no frames to draw: a one-shot timer redraws
     // when it's over, and the fade out takes it from there.
-    if (d.bar.to == 1 and !d.busy) {
+    if (d.bar.to == 1 and !d.busy and !d.bar_due) {
+        d.bar_due = true;
         holdRedraw(d.view, d.caret, @max(d.bar_t0 + bar_hold - now, 0) + 0.02);
     }
 }
@@ -7437,7 +7489,7 @@ fn markMenu(self: Id, w: *Win, m: Id, same: bool) Id {
     if (!same) w.menu_a.snap(0);
     w.menu_a.aim(1, CACurrentMediaTime());
     msg(void, m, "setDelegate:", .{self});
-    msg(void, self, "setNeedsDisplay:", .{true});
+    if (w.menu_card == null) redrawSide(w) else msg(void, self, "setNeedsDisplay:", .{true});
     return m;
 }
 
@@ -7445,7 +7497,7 @@ fn menuDidClose(_: Id, _: Sel, m: Id) callconv(.c) void {
     msg(void, m, "setDelegate:", .{@as(Id, null)});
     const w = menu_win orelse return;
     w.menu_a.aim(0, CACurrentMediaTime());
-    msg(void, w.view, "setNeedsDisplay:", .{true});
+    if (w.menu_card == null) redrawSide(w) else msg(void, w.view, "setNeedsDisplay:", .{true});
 }
 
 /// The right-click outline: a hairline ring in the accent over a faint
