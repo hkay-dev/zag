@@ -4695,6 +4695,8 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     place(w.cards, .{ .x = w.lx - gap, .w = r.w - w.lx + gap, .h = r.h }, .{ .x = end_lx - gap, .w = r.w - end_lx + gap, .h = r.h }, now);
     objc.CGContextClipToRect(ctx, dirty);
     objc.CGContextClearRect(ctx, .{ .w = r.w, .h = r.h });
+    // Text upright for every draw: a strip-only one skips the cards, whose drawPane also sets it.
+    objc.flipText(ctx);
     fillA(ctx, chrome(th, dark), chromeAlpha(dark), 0, 0, r.w, r.h);
     const key = msg(bool, w.window, "isKeyWindow", .{});
     const many = w.cards.pane == null;
