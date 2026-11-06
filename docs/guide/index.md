@@ -411,27 +411,54 @@ Zag remembers the font and size for next time.
 
 **Zag > Settings…** (⌘,) opens Zag's settings file in a Zag window. It lists every setting with a
 short note. Change a value and save, and every window picks it up at once. The file is
-`~/.config/ze/settings`, so you can also edit it in another app; Zag picks up the change when you
-come back to it.
+`~/.config/zag/config.toml`, plain TOML, so you can edit it in any other app too. Zag watches the
+file, so a change you save elsewhere applies right away, even while Zag is in the background and
+you never switch to it. Every setting is in the file: the first time Zag starts with a file that
+lacks one, it adds that line at the end with its note, and it leaves your own lines and notes alone.
+
+If you used an older Zag, its settings were in `~/.config/ze/settings`. The first time this Zag
+starts without a `config.toml`, it reads that file once and writes the same settings to the new
+one. The old file stays where it is, untouched.
 
 ```text
-font = system            # or a font's PostScript name, like Menlo-Regular
+# A font's PostScript name, like Menlo-Regular, or system for SF Mono.
+font = "system"
 size = 14
-line-height = 1.75       # as a multiple of the size
-wrap = off
-pairs = on               # auto-close brackets and quotes
-focus = off              # off, line, sentence or paragraph
-typewriter = off         # keep the caret's row in the middle
-line-numbers = on        # number the lines beside the text
-zen = off                # hide the chrome and center an 80-column grey page
-late-night = off         # zen, typewriter, paragraph focus and Black, without changing the settings above
-sidebar = on             # the folder's files on the left
-sidebar-width = 250      # in points, from 150 to 500
-appearance = auto        # auto, light or dark
-light-theme = paper      # paper, ayu-light, one-light, ink, ayu-dark, one-dark or black
-dark-theme = ink
-light.comment = #B3AEA3  # one color of the light theme, as #rrggbb
+# Line height, as a multiple of the size.
+line-height = 1.75
+# Wrap long lines at the window's edge: true or false.
+wrap = false
+# Close brackets and quotes as you type them: true or false.
+pairs = true
+# Fade text outside the caret's range: off, line, sentence or paragraph.
+focus = "off"
+# Keep the caret's row in the middle as you type: true or false.
+typewriter = false
+# Number the lines beside the text: true or false.
+line-numbers = true
+# Hide the window's chrome and center an 80-column grey page: true or false.
+zen = false
+# Late-Night Focus: zen, typewriter, paragraph focus and Black on top of the above: true or false.
+late-night = false
+# Show the folder's files on the left of the window: true or false.
+sidebar = true
+# How wide the sidebar is, in points: drag its edge to change it.
+sidebar-width = 250
+
+# Light or dark: auto follows the Mac, light or dark keeps Zag in that mode.
+appearance = "auto"
+# The theme for each mode: paper, ayu-light, one-light,
+# ink, ayu-dark, one-dark or black.
+light-theme = "paper"
+dark-theme = "ink"
+
+# Change one color of a theme with a line like light.keyword = "#9C3D26".
+light.comment = "#B3AEA3"
 ```
+
+Text is in quotes, flags are `true` or `false` and numbers stand bare. Zag still reads the older
+forms too: `on` and `off`, text without quotes, and a color without quotes, and it ignores a
+` # note` after a value.
 
 A `light.` or `dark.` line changes one color of that mode's theme, whichever theme it is. The
 names are `background` (the card; the window around it is a step darker), `text`, `muted` (the
@@ -440,7 +467,8 @@ header's fainter words), `keyword`, `string`, `comment`, `number`, `function`, `
 open list), `rule` (the line under the header and above the prompt line and the quick open list)
 and `header` (the card's header, a step lighter than the text on dark themes and a few steps
 darker on light ones, so it stands apart from the text).
-Either mode can also use any theme from the file, so `light-theme = one-dark` keeps Zag dark all
+Either mode can also use any theme from the file, so `light-theme = "one-dark"` keeps Zag dark all
 the time. A line Zag doesn't understand is skipped, and a missing line keeps its default. The menus,
 the size shortcuts and the Font panel rewrite their own line in the file and leave the rest of it
-alone.
+alone. Tabs, splits, the sidebar's folder and full screen belong to each window, so they aren't
+settings.

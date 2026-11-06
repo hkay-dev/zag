@@ -2785,7 +2785,7 @@ fn sameStamp(a: ?files.Stamp, b: ?files.Stamp) bool {
 
 /// When Zag comes forward: picks up settings and files that other apps changed.
 pub fn recheckAll() void {
-    if (conf_path) |p| if (!sameStamp(files.stamp(p), conf_stamp)) loadSettings();
+    recheckSettings();
     for (docs.items) |d| checkOutside(d);
     // The rows and their cached lines stay unless a read folder moved on
     // disk or the open set changed (see `Tree.fresh`).
@@ -2911,6 +2911,7 @@ pub fn loadSettings() void {
         if (crossfade) fadeTheme(w);
         w.side_find = true;
         msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
+        msg(void, w.view, "setNeedsDisplay:", .{true});
     }
     for (docs.items) |d| {
         d.dark = null;
@@ -2931,6 +2932,71 @@ fn store(key: []const u8, value: []const u8) void {
     for (docs.items) |d| if (d.path != null and std.mem.eql(u8, d.path.?, conf_path.?)) checkOutside(d);
 }
 
+// ---- the settings file, watched ----
+
+extern var _dispatch_source_type_vnode: anyopaque;
+extern fn dispatch_source_create(kind: *anyopaque, handle: usize, mask: usize, queue: *anyopaque) ?*anyopaque;
+extern fn dispatch_source_set_event_handler_f(src: *anyopaque, f: *const fn (?*anyopaque) callconv(.c) void) void;
+extern fn dispatch_source_set_cancel_handler_f(src: *anyopaque, f: *const fn (?*anyopaque) callconv(.c) void) void;
+extern fn dispatch_set_context(obj: *anyopaque, ctx: ?*anyopaque) void;
+extern fn dispatch_resume(obj: *anyopaque) void;
+extern fn dispatch_source_cancel(src: *anyopaque) void;
+extern fn dispatch_release(obj: *anyopaque) void;
+
+/// DISPATCH_VNODE_DELETE | WRITE | EXTEND | RENAME | REVOKE.
+const vnode_events: usize = 0x1 | 0x2 | 0x4 | 0x20 | 0x40;
+/// The sources on the settings file and on its folder; null when not open.
+var conf_watch: [2]?*anyopaque = .{ null, null };
+
+fn closeWatchFd(ctx: ?*anyopaque) callconv(.c) void {
+    _ = std.c.close(@intCast(@intFromPtr(ctx)));
+}
+
+/// A vnode source on `p` that runs `confChanged` on the main queue, or null.
+fn watchPath(p: [*:0]const u8) ?*anyopaque {
+    const fd = std.c.open(p, .{ .EVTONLY = true, .CLOEXEC = true });
+    if (fd < 0) return null;
+    const src = dispatch_source_create(&_dispatch_source_type_vnode, @intCast(fd), vnode_events, &_dispatch_main_q) orelse {
+        _ = std.c.close(fd);
+        return null;
+    };
+    dispatch_set_context(src, @ptrFromInt(@as(usize, @intCast(fd))));
+    dispatch_source_set_event_handler_f(src, confChanged);
+    dispatch_source_set_cancel_handler_f(src, closeWatchFd);
+    dispatch_resume(src);
+    return src;
+}
+
+/// Watches the settings file, for edits in place, and its folder, for saves
+/// that replace the file. A replaced or deleted file ends its own watch, so
+/// every event opens both again. Nothing runs while the file doesn't change.
+fn watchConf() void {
+    const p = conf_path orelse return;
+    for (&conf_watch) |*w| if (w.*) |src| {
+        dispatch_source_cancel(src);
+        dispatch_release(src);
+        w.* = null;
+    };
+    files.makeParent(p) catch return;
+    var buf: [std.c.PATH_MAX]u8 = undefined;
+    const dir = std.fmt.bufPrintSentinel(&buf, "{s}", .{std.fs.path.dirname(p) orelse return}, 0) catch return;
+    conf_watch = .{ watchPath(dir), watchPath(p) };
+}
+
+fn confChanged(_: ?*anyopaque) callconv(.c) void {
+    watchConf();
+    recheckSettings();
+}
+
+/// Applies the settings file if it changed since Zag last read or wrote it,
+/// so Zag's own writes don't apply twice. A deleted file keeps the current
+/// settings until it comes back.
+fn recheckSettings() void {
+    const p = conf_path orelse return;
+    const now = files.stamp(p) orelse return;
+    if (!sameStamp(now, conf_stamp)) loadSettings();
+}
+
 pub fn openSettings() void {
     const p = conf_path orelse return;
     settings.ensure(gpa, p, &conf_saved) catch return alert("Couldn't write the settings file.", p);
@@ -2939,19 +3005,19 @@ pub fn openSettings() void {
 }
 
 pub fn toggleWrap() void {
-    store("wrap", if (conf.wrap) "off" else "on");
+    store("wrap", if (conf.wrap) "false" else "true");
 }
 
 pub fn toggleLineNumbers() void {
-    store("line-numbers", if (conf.line_numbers) "off" else "on");
+    store("line-numbers", if (conf.line_numbers) "false" else "true");
 }
 
 pub fn togglePairs() void {
-    store("pairs", if (conf.pairs) "off" else "on");
+    store("pairs", if (conf.pairs) "false" else "true");
 }
 
 pub fn toggleSidebar() void {
-    store("sidebar", if (conf.sidebar) "off" else "on");
+    store("sidebar", if (conf.sidebar) "false" else "true");
 }
 
 /// What the menu's validation says: Late-Night greys the items it has set.
@@ -2964,7 +3030,7 @@ pub fn allowed(it: Id) bool {
 
 pub fn toggleTypewriter() void {
     if (conf.late_night) return;
-    store("typewriter", if (conf.typewriter) "off" else "on");
+    store("typewriter", if (conf.typewriter) "false" else "true");
 }
 
 pub fn pickFocus(i: usize) void {
@@ -2975,11 +3041,11 @@ pub fn pickFocus(i: usize) void {
 /// Leaving zen the usual way while Late-Night is on ends Late-Night.
 pub fn toggleZen() void {
     if (conf.late_night) return toggleLateNight();
-    store("zen", if (conf.zen) "off" else "on");
+    store("zen", if (conf.zen) "false" else "true");
 }
 
 pub fn toggleLateNight() void {
-    store("late-night", if (conf.late_night) "off" else "on");
+    store("late-night", if (conf.late_night) "false" else "true");
 }
 
 fn desaturate(c: *Rgb) void {
@@ -7494,7 +7560,10 @@ fn changeFont(_: Id, _: Sel, sender: Id) callconv(.c) void {
 /// Registers the view class and loads the font. Call once at launch.
 pub fn setup() void {
     contrast = msg(bool, msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{}), "accessibilityDisplayShouldIncreaseContrast", .{});
+    conf_path = settings.path(gpa) catch null;
+    if (conf_path) |p| settings.prepare(gpa, p);
     loadSettings();
+    watchConf();
     const c = objc.ClassBuilder.begin("NSView", "ZeView");
     c.ivar("win");
     c.method("drawRect:", @ptrCast(&drawRect), "v@:{CGRect=dddd}");

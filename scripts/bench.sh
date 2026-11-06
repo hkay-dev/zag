@@ -86,6 +86,7 @@ case ${1:-} in
         mkdir -p "$home/Library/Application Support/ze"
         cp -R "$HOME/Library/Application Support/ze/Drafts" "$home/Library/Application Support/ze/" 2>/dev/null || true
         cp -R "$HOME/.config/ze" "$home/.config/" 2>/dev/null || { mkdir -p "$home/.config" && cp -R "$HOME/.config/ze" "$home/.config/"; }
+        cp -R "$HOME/.config/zag" "$home/.config/" 2>/dev/null || true
         open -W -g -j -n "$app" --env HOME="$home" --env ZE_BENCH="$out" --env ZE_BENCH_LAUNCH_ONLY=1 \
           --stdout "$out/log.txt" --stderr "$out/log.txt"
       else

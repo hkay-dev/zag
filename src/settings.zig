@@ -1,7 +1,8 @@
-//! The settings file, `~/.config/ze/settings`: font, size, line height, soft
-//! wrap, auto-closing pairs, zen mode, the sidebar, light or dark, and the colors of both themes, as `key = value`
-//! lines. Zag writes every key into it the first time it's opened, and menu
-//! toggles rewrite just their own line.
+//! The settings file, `~/.config/zag/config.toml`: font, size, line height, soft
+//! wrap, auto-closing pairs, zen mode, the sidebar, light or dark, and the colors of both themes, as TOML
+//! `key = value` lines. Zag adds every missing key at launch, menu toggles
+//! rewrite just their own line, and the older `~/.config/ze/settings` is read
+//! once to start the file and never written.
 const std = @import("std");
 const files = @import("files.zig");
 const Allocator = std.mem.Allocator;
@@ -287,13 +288,23 @@ pub fn decimal(buf: *[24]u8, v: f64) []const u8 {
 
 const Entry = struct { key: []const u8, val: []const u8 };
 
-/// The next `key = value` line, skipping blanks, comments and nonsense.
+/// The next `key = value` line, skipping blanks, comments and nonsense. The
+/// value loses one pair of quotes, or else a trailing ` # comment`.
 fn nextEntry(it: *std.mem.SplitIterator(u8, .scalar)) ?Entry {
     while (it.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '#') continue;
         const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-        return .{ .key = std.mem.trim(u8, line[0..eq], " \t"), .val = std.mem.trim(u8, line[eq + 1 ..], " \t") };
+        var val = std.mem.trim(u8, line[eq + 1 ..], " \t");
+        if (val.len > 0 and (val[0] == '"' or val[0] == '\'')) {
+            val = if (std.mem.indexOfScalarPos(u8, val, 1, val[0])) |end| val[1..end] else val[1..];
+        } else {
+            for (val, 0..) |ch, i| if (ch == '#' and i > 0 and (val[i - 1] == ' ' or val[i - 1] == '\t')) {
+                val = std.mem.trimEnd(u8, val[0..i], " \t");
+                break;
+            };
+        }
+        return .{ .key = std.mem.trim(u8, line[0..eq], " \t"), .val = val };
     }
     return null;
 }
@@ -354,77 +365,91 @@ pub fn parse(text: []const u8) Settings {
     return s;
 }
 
-/// The whole file for `s`, with a comment on each group. Colors are written
-/// only where they differ from the chosen theme.
+const Opt = enum { font, size, @"line-height", wrap, pairs, focus, typewriter, @"line-numbers", zen, @"late-night", sidebar, @"sidebar-width", appearance, @"light-theme", @"dark-theme" };
+const Kind = enum { string, flag, number };
+
+/// One line of the file: its comment above it, and a blank line before the
+/// comment when `gap`. `render` and the launch-time fill-in share this list.
+const Row = struct { opt: Opt, kind: Kind, gap: bool = false, note: []const u8 };
+
+const options = [_]Row{
+    .{ .opt = .font, .kind = .string, .note = "# A font's PostScript name, like Menlo-Regular, or system for SF Mono.\n" },
+    .{ .opt = .size, .kind = .number, .note = "" },
+    .{ .opt = .@"line-height", .kind = .number, .note = "# Line height, as a multiple of the size.\n" },
+    .{ .opt = .wrap, .kind = .flag, .note = "# Wrap long lines at the window's edge: true or false.\n" },
+    .{ .opt = .pairs, .kind = .flag, .note = "# Close brackets and quotes as you type them: true or false.\n" },
+    .{ .opt = .focus, .kind = .string, .note = "# Fade text outside the caret's range: off, line, sentence or paragraph.\n" },
+    .{ .opt = .typewriter, .kind = .flag, .note = "# Keep the caret's row in the middle as you type: true or false.\n" },
+    .{ .opt = .@"line-numbers", .kind = .flag, .note = "# Number the lines beside the text: true or false.\n" },
+    .{ .opt = .zen, .kind = .flag, .note = "# Hide the window's chrome and center an 80-column grey page: true or false.\n" },
+    .{ .opt = .@"late-night", .kind = .flag, .note = "# Late-Night Focus: zen, typewriter, paragraph focus and Black on top of the above: true or false.\n" },
+    .{ .opt = .sidebar, .kind = .flag, .note = "# Show the folder's files on the left of the window: true or false.\n" },
+    .{ .opt = .@"sidebar-width", .kind = .number, .note = "# How wide the sidebar is, in points: drag its edge to change it.\n" },
+    .{ .opt = .appearance, .kind = .string, .gap = true, .note = "# Light or dark: auto follows the Mac, light or dark keeps Zag in that mode.\n" },
+    .{ .opt = .@"light-theme", .kind = .string, .note = "# The theme for each mode: paper, ayu-light, one-light,\n# ink, ayu-dark, one-dark or black.\n" },
+    .{ .opt = .@"dark-theme", .kind = .string, .note = "" },
+};
+
+fn kindOf(key: []const u8) Kind {
+    for (options) |row| if (std.mem.eql(u8, key, @tagName(row.opt))) return row.kind;
+    return .string;
+}
+
+fn flagText(v: bool) []const u8 {
+    return if (v) "true" else "false";
+}
+
+/// What `s` holds for `opt`, as the file writes it (before any quotes).
+fn valueText(s: *const Settings, opt: Opt, buf: *[24]u8) []const u8 {
+    return switch (opt) {
+        .font => if (s.font_len == 0) "system" else s.font(),
+        .size => decimal(buf, s.size),
+        .@"line-height" => decimal(buf, s.spacing),
+        .wrap => flagText(s.wrap),
+        .pairs => flagText(s.pairs),
+        .focus => @tagName(s.focus),
+        .typewriter => flagText(s.typewriter),
+        .@"line-numbers" => flagText(s.line_numbers),
+        .zen => flagText(s.zen),
+        .@"late-night" => flagText(s.late_night),
+        .sidebar => flagText(s.sidebar),
+        .@"sidebar-width" => decimal(buf, s.sidebar_width),
+        .appearance => @tagName(s.look),
+        .@"light-theme" => schemes[s.light_scheme].key,
+        .@"dark-theme" => schemes[s.dark_scheme].key,
+    };
+}
+
+fn writeOption(gpa: Allocator, out: *std.ArrayList(u8), s: *const Settings, row: Row) !void {
+    var buf: [24]u8 = undefined;
+    if (row.gap) try out.append(gpa, '\n');
+    try out.appendSlice(gpa, row.note);
+    const q: []const u8 = if (row.kind == .string) "\"" else "";
+    try out.print(gpa, "{s} = {s}{s}{s}\n", .{ @tagName(row.opt), q, valueText(s, row.opt, &buf), q });
+}
+
+/// The whole file for `s`, in TOML, with a comment on each group. Colors are
+/// written only where they differ from the chosen theme.
 pub fn render(gpa: Allocator, s: *const Settings) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
-    var a: [24]u8 = undefined;
-    var b: [24]u8 = undefined;
-    var wbuf: [24]u8 = undefined;
-    try out.print(gpa,
-        \\# Zag settings. Save this file and every window picks up the change.
+    try out.appendSlice(gpa, "# Zag settings. Save this file and every window picks up the change.\n\n");
+    for (options) |row| try writeOption(gpa, &out, s, row);
+    try out.appendSlice(gpa,
         \\
-        \\# A font's PostScript name, like Menlo-Regular, or system for SF Mono.
-        \\font = {s}
-        \\size = {s}
-        \\# Line height, as a multiple of the size.
-        \\line-height = {s}
-        \\# Wrap long lines at the window's edge: on or off.
-        \\wrap = {s}
-        \\# Close brackets and quotes as you type them: on or off.
-        \\pairs = {s}
-        \\# Fade text outside the caret's range: off, line, sentence or paragraph.
-        \\focus = {s}
-        \\# Keep the caret's row in the middle as you type: on or off.
-        \\typewriter = {s}
-        \\# Number the lines beside the text: on or off.
-        \\line-numbers = {s}
-        \\# Hide the window's chrome and center an 80-column grey page: on or off.
-        \\zen = {s}
-        \\# Late-Night Focus: zen, typewriter, paragraph focus and Black on top of the above: on or off.
-        \\late-night = {s}
-        \\# Show the folder's files on the left of the window: on or off.
-        \\sidebar = {s}
-        \\# How wide the sidebar is, in points: drag its edge to change it.
-        \\sidebar-width = {s}
-        \\
-        \\# Light or dark: auto follows the Mac, light or dark keeps Zag in that mode.
-        \\appearance = {s}
-        \\# The theme for each mode: paper, ayu-light, one-light,
-        \\# ink, ayu-dark, one-dark or black.
-        \\light-theme = {s}
-        \\dark-theme = {s}
-        \\
-        \\# Change one color of a theme with a line like light.keyword = #9C3D26.
+        \\# Change one color of a theme with a line like light.keyword = "#9C3D26".
         \\# The names are background, text, muted, keyword, string, comment,
         \\# number, function, type, selection, line, caret, match, panel, rule
         \\# and header.
         \\
-    , .{
-        if (s.font_len == 0) "system" else s.font(),
-        decimal(&a, s.size),
-        decimal(&b, s.spacing),
-        if (s.wrap) "on" else "off",
-        if (s.pairs) "on" else "off",
-        @tagName(s.focus),
-        if (s.typewriter) "on" else "off",
-        if (s.line_numbers) "on" else "off",
-        if (s.zen) "on" else "off",
-        if (s.late_night) "on" else "off",
-        if (s.sidebar) "on" else "off",
-        decimal(&wbuf, s.sidebar_width),
-        @tagName(s.look),
-        schemes[s.light_scheme].key,
-        schemes[s.dark_scheme].key,
-    });
+    );
     for ([_][]const u8{ "light", "dark" }, 0..) |name, n| {
         var th = if (n == 0) s.light else s.dark;
         var base = schemes[if (n == 0) s.light_scheme else s.dark_scheme].theme;
         for (colors) |c| {
             const v = slot(&th, c).?.*;
             if (std.mem.eql(f64, &v, &slot(&base, c).?.*)) continue;
-            try out.print(gpa, "{s}.{s} = #{X:0>2}{X:0>2}{X:0>2}\n", .{ name, c, byte(v[0]), byte(v[1]), byte(v[2]) });
+            try out.print(gpa, "{s}.{s} = \"#{X:0>2}{X:0>2}{X:0>2}\"\n", .{ name, c, byte(v[0]), byte(v[1]), byte(v[2]) });
         }
     }
     return out.toOwnedSlice(gpa);
@@ -435,9 +460,11 @@ fn byte(v: f64) u8 {
 }
 
 /// `text` with the `key` line set to `value`, added at the end when missing.
+/// Flags (`true`, `false`) and numbers are written bare, everything else quoted.
 pub fn setLine(gpa: Allocator, text: []const u8, key: []const u8, value: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
+    const quote: []const u8 = if (kindOf(key) == .string) "\"" else "";
     var done = false;
     var it = std.mem.splitScalar(u8, text, '\n');
     var first = true;
@@ -447,19 +474,49 @@ pub fn setLine(gpa: Allocator, text: []const u8, key: []const u8, value: []const
         const line = std.mem.trim(u8, raw, " \t\r");
         const eq = std.mem.indexOfScalar(u8, line, '=');
         if (!done and line.len > 0 and line[0] != '#' and eq != null and std.mem.eql(u8, std.mem.trim(u8, line[0..eq.?], " \t"), key)) {
-            try out.print(gpa, "{s} = {s}", .{ key, value });
+            try out.print(gpa, "{s} = {s}{s}{s}", .{ key, quote, value, quote });
             done = true;
         } else try out.appendSlice(gpa, raw);
     }
     if (!done) {
         if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') try out.append(gpa, '\n');
-        try out.print(gpa, "{s} = {s}\n", .{ key, value });
+        try out.print(gpa, "{s} = {s}{s}{s}\n", .{ key, quote, value, quote });
     }
     return out.toOwnedSlice(gpa);
 }
 
-/// `~/.config/ze/settings`. Owned by gpa.
+/// `text` with every option it lacks added at the end, each under its
+/// comment, with the value `parse` gives it. Null when none is missing.
+fn withMissing(gpa: Allocator, text: []const u8) !?[]u8 {
+    const s = parse(text);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.appendSlice(gpa, text);
+    if (text.len > 0 and text[text.len - 1] != '\n') try out.append(gpa, '\n');
+    const base = out.items.len;
+    for (options) |row| {
+        var it = std.mem.splitScalar(u8, text, '\n');
+        const present = while (nextEntry(&it)) |e| {
+            if (std.mem.eql(u8, e.key, @tagName(row.opt))) break true;
+        } else false;
+        if (!present) try writeOption(gpa, &out, &s, row);
+    }
+    if (out.items.len == base) {
+        out.deinit(gpa);
+        return null;
+    }
+    return try out.toOwnedSlice(gpa);
+}
+
+/// `~/.config/zag/config.toml`. Owned by gpa.
 pub fn path(gpa: Allocator) ![:0]u8 {
+    const home = std.mem.span(std.c.getenv("HOME") orelse return error.NoHome);
+    return std.fmt.allocPrintSentinel(gpa, "{s}/.config/zag/config.toml", .{home}, 0);
+}
+
+/// The file older Zags used, `~/.config/ze/settings`. It is read once to
+/// start the new file and never written. Owned by gpa.
+fn oldPath(gpa: Allocator) ![:0]u8 {
     const home = std.mem.span(std.c.getenv("HOME") orelse return error.NoHome);
     return std.fmt.allocPrintSentinel(gpa, "{s}/.config/ze/settings", .{home}, 0);
 }
@@ -471,13 +528,35 @@ pub fn load(gpa: Allocator, p: [:0]const u8) Settings {
     return parse(text);
 }
 
-/// Makes sure the file exists, writing every key from `s` when it doesn't.
+/// Makes sure the file exists. It starts from the old settings file when
+/// there is one (an old file that can't be read stops the write, so the new
+/// file never starts from defaults over it), else from `s`.
 pub fn ensure(gpa: Allocator, p: [:0]const u8, s: *const Settings) !void {
     if (files.exists(p)) return;
     try files.makeParent(p);
-    const text = try render(gpa, s);
+    const old = try oldPath(gpa);
+    defer gpa.free(old);
+    var from = s.*;
+    if (files.exists(old)) {
+        const old_text = try files.read(gpa, old);
+        defer gpa.free(old_text);
+        from = parse(old_text);
+    }
+    const text = try render(gpa, &from);
     defer gpa.free(text);
     try files.write(p, text);
+}
+
+/// At launch: creates the file (from the old one if it exists) and adds the
+/// options it lacks. Existing lines and comments stay as they are; a file
+/// that can't be read is left alone.
+pub fn prepare(gpa: Allocator, p: [:0]const u8) void {
+    ensure(gpa, p, &.{}) catch return;
+    const text = files.read(gpa, p) catch return;
+    defer gpa.free(text);
+    const next = (withMissing(gpa, text) catch return) orelse return;
+    defer gpa.free(next);
+    files.write(p, next) catch {};
 }
 
 /// Rewrites one line of the file, creating the file from `s` first if needed.
@@ -535,13 +614,96 @@ test "a written file reads back as the same settings" {
     try t.expectEqual(s.light, back.light);
 }
 
-test "setting a key rewrites only its line, or adds it" {
-    const a = try setLine(t.allocator, "# size = 1\nsize = 14\nwrap = off\n", "size", "16");
+test "setting a key rewrites only its line, or adds it, in TOML" {
+    const a = try setLine(t.allocator, "# size = 1\nsize = 14\nwrap = false\n", "size", "16");
     defer t.allocator.free(a);
-    try t.expectEqualStrings("# size = 1\nsize = 16\nwrap = off\n", a);
-    const b = try setLine(t.allocator, "wrap = off", "pairs", "on");
+    try t.expectEqualStrings("# size = 1\nsize = 16\nwrap = false\n", a);
+    const b = try setLine(t.allocator, "wrap = false", "pairs", "true");
     defer t.allocator.free(b);
-    try t.expectEqualStrings("wrap = off\npairs = on\n", b);
+    try t.expectEqualStrings("wrap = false\npairs = true\n", b);
+    const c = try setLine(t.allocator, "focus = \"line\"\n", "focus", "paragraph");
+    defer t.allocator.free(c);
+    try t.expectEqualStrings("focus = \"paragraph\"\n", c);
+}
+
+test "the reader takes quotes, trailing comments and the old forms" {
+    const s = parse(
+        \\font = "Menlo-Regular"  # my font
+        \\size = 18 # big
+        \\wrap = true
+        \\pairs = "off"
+        \\focus = 'line'
+        \\light.keyword = "#102030" # rust
+        \\dark.keyword = #010203
+    );
+    try t.expectEqualStrings("Menlo-Regular", s.font());
+    try t.expectEqual(@as(f64, 18), s.size);
+    try t.expect(s.wrap and !s.pairs);
+    try t.expectEqual(Focus.line, s.focus);
+    try t.expectEqual(@as(f64, 0x10) / 255, s.light.kinds[1][0]);
+    try t.expectEqual(@as(f64, 3) / 255, s.dark.kinds[1][2]);
+}
+
+test "old settings migrate to TOML and read back equal" {
+    const old =
+        \\font = Menlo-Regular
+        \\size = 19
+        \\line-height = 2.25
+        \\wrap = on
+        \\pairs = off
+        \\focus = sentence
+        \\typewriter = on
+        \\line-numbers = off
+        \\zen = on
+        \\late-night = on
+        \\sidebar = off
+        \\sidebar-width = 333
+        \\appearance = dark
+        \\light-theme = one-light
+        \\dark-theme = ayu-dark
+        \\light.keyword = #102030
+        \\dark.caret = #FF0000
+    ;
+    const a = parse(old);
+    const text = try render(t.allocator, &a);
+    defer t.allocator.free(text);
+    const b = parse(text);
+    try t.expectEqualStrings("Menlo-Regular", b.font());
+    try t.expectEqual(a.size, b.size);
+    try t.expectEqual(a.spacing, b.spacing);
+    try t.expectEqual(a.wrap, b.wrap);
+    try t.expectEqual(a.pairs, b.pairs);
+    try t.expectEqual(a.focus, b.focus);
+    try t.expectEqual(a.typewriter, b.typewriter);
+    try t.expectEqual(a.line_numbers, b.line_numbers);
+    try t.expectEqual(a.zen, b.zen);
+    try t.expectEqual(a.late_night, b.late_night);
+    try t.expectEqual(a.sidebar, b.sidebar);
+    try t.expectEqual(a.sidebar_width, b.sidebar_width);
+    try t.expectEqual(a.look, b.look);
+    try t.expectEqual(a.light_scheme, b.light_scheme);
+    try t.expectEqual(a.dark_scheme, b.dark_scheme);
+    try t.expectEqual(a.light, b.light);
+    try t.expectEqual(a.dark, b.dark);
+    try t.expect(a.size == 19 and a.spacing == 2.25 and !a.pairs and a.light_scheme == 2 and a.dark_scheme == 4);
+    try t.expect(std.mem.indexOf(u8, text, "size = 19\n") != null);
+    try t.expect(std.mem.indexOf(u8, text, "late-night = true\n") != null);
+    try t.expect(std.mem.indexOf(u8, text, "font = \"Menlo-Regular\"\n") != null);
+    try t.expect(std.mem.indexOf(u8, text, "dark.caret = \"#FF0000\"\n") != null);
+}
+
+test "launch adds every missing key and keeps the lines and comments there" {
+    const text = try withMissing(t.allocator, "# mine\nsize = 16 # keep\n") orelse return error.TestUnexpectedResult;
+    defer t.allocator.free(text);
+    try t.expect(std.mem.startsWith(u8, text, "# mine\nsize = 16 # keep\n"));
+    for (options) |row| {
+        var line: [40]u8 = undefined;
+        const want = try std.fmt.bufPrint(&line, "\n{s} = ", .{@tagName(row.opt)});
+        if (row.opt != .size) try t.expect(std.mem.indexOf(u8, text, want) != null);
+    }
+    try t.expectEqual(@as(?usize, null), std.mem.indexOf(u8, text[24..], "size = "));
+    try t.expect(std.mem.indexOf(u8, text, "# Number the lines beside the text") != null);
+    try t.expectEqual(@as(?[]u8, null), try withMissing(t.allocator, text));
 }
 
 test "a single color applies on top of the chosen theme wherever its line sits" {
@@ -555,7 +717,7 @@ test "a single color applies on top of the chosen theme wherever its line sits" 
     try t.expectEqual(@as(f64, 3) / 255, s.dark.kinds[1][2]);
     const text = try render(t.allocator, &s);
     defer t.allocator.free(text);
-    try t.expect(std.mem.indexOf(u8, text, "dark-theme = one-dark\n") != null);
+    try t.expect(std.mem.indexOf(u8, text, "dark-theme = \"one-dark\"\n") != null);
     try t.expect(std.mem.indexOf(u8, text, "dark.background") == null);
     try t.expectEqual(s.dark, parse(text).dark);
 }
@@ -588,5 +750,5 @@ test "late-night covers the saved look and is written back as a flag" {
     try t.expectEqual(black, s.dark);
     const text = try render(t.allocator, &parse("late-night = on\n"));
     defer t.allocator.free(text);
-    try t.expect(std.mem.indexOf(u8, text, "late-night = on\n") != null);
+    try t.expect(std.mem.indexOf(u8, text, "late-night = true\n") != null);
 }
