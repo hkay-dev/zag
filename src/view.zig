@@ -4955,9 +4955,9 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     w.side_seen = true;
     // Zen eases in: the lights follow it, the margin and header in drawPane.
     _ = w.z.step(now);
-    w.peek.aim(if (conf.zen and (w.peek_in or now < w.peek_out)) 1 else 0, now);
+    w.peek.aim(if (full or w.peek_in or now < w.peek_out) 1 else 0, now);
     const la = 1 - std.math.clamp(w.z.x, 0, 1);
-    const lit: f64 = if (full) 1 else @max(la, w.peek.at(now));
+    const lit = @max(la, w.peek.at(now));
     if (lit != w.lights_a) {
         setLights(w, lit);
         w.lights_a = lit;
@@ -5050,8 +5050,7 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     drawDrag(w, ctx, th, now);
     // Only the sidebar's strip moves when its rows' highlights are all that does.
     w.part = !busy and side_busy and shown and slid >= 1;
-    w.busy = busy or side_busy or
-        w.peek.moving(now) or now < w.peek_out;
+    w.busy = busy or side_busy or w.peek.moving(now);
     if (w.busy or gliding) msg(void, w.link, "setPaused:", .{false});
 }
 
@@ -5680,11 +5679,15 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // The scroll bar's hold has no frames to draw: a one-shot timer redraws
     // when it's over, and the fade out takes it from there.
     if (d.bar.to == 1 and !d.busy) {
-        const left = @max(d.bar_t0 + bar_hold - now, 0) + 0.02;
-        const sel = objc.sel_registerName("barHold:");
-        msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:selector:object:", .{ d.view, sel, d.caret });
-        msg(void, d.view, "performSelector:withObject:afterDelay:", .{ sel, d.caret, left });
+        holdRedraw(d.view, d.caret, @max(d.bar_t0 + bar_hold - now, 0) + 0.02);
     }
+}
+
+/// A one-shot redraw of `view` after `delay`, replacing `key`'s earlier one.
+fn holdRedraw(view: Id, key: Id, delay: f64) void {
+    const sel = objc.sel_registerName("barHold:");
+    msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:selector:object:", .{ view, sel, key });
+    msg(void, view, "performSelector:withObject:afterDelay:", .{ sel, key, delay });
 }
 
 /// The sidebar button by the traffic lights, or the + at the sidebar's
@@ -6490,7 +6493,7 @@ fn keyDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     if (code < 123 or code > 126) {
         msg(void, objc.class("NSCursor"), "setHiddenUntilMouseMoves:", .{true});
         // Typing fades Zen's peeking lights out at once.
-        if (winOf(self)) |w| if (w.peek.to != 0) peekTo(w, false, 0);
+        peekTo(d.win, false, 0);
     }
     const arr = msg(Id, objc.class("NSArray"), "arrayWithObject:", .{ev});
     msg(void, self, "interpretKeyEvents:", .{arr});
@@ -6773,8 +6776,8 @@ fn resizeSide(w: *Win, x: f64) void {
 fn mouseMoved(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
     const p = local(self, ev);
-    // The corner is the lights' span (as fitTitlebar measured) plus a margin.
-    if (conf.zen and w.peek_in != (p.x < toggle_x - 11 and p.y < gap + head_h / 2 + 21)) peekTo(w, !w.peek_in, 0.6);
+    // The corner is the header's strip up to where its tabs start, past the lights.
+    if (w.peek_in != (p.x < tabs_from and p.y < top_h)) peekTo(w, !w.peek_in, 0.6);
     hoverAt(w, p);
 }
 
@@ -6837,7 +6840,7 @@ fn setHover(d: *Doc, id: u32, shut: bool, plus: bool) void {
 
 fn mouseExited(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
-    if (w.peek.to != 0) peekTo(w, false, 0.6);
+    peekTo(w, false, 0.6);
     if (w.hot != 0) {
         redrawHot(w, w.hot);
         w.hot = 0;
@@ -6853,8 +6856,8 @@ fn mouseExited(self: Id, _: Sel, _: Id) callconv(.c) void {
 /// corner, and fade out a hold after it leaves.
 fn peekTo(w: *Win, in: bool, hold: f64) void {
     w.peek_in = in;
-    w.peek_out = if (in) 0 else CACurrentMediaTime() + hold;
-    msg(void, w.view, "setNeedsDisplay:", .{true});
+    w.peek_out = CACurrentMediaTime() + hold;
+    holdRedraw(w.view, w.window, hold);
 }
 
 /// The mouse lets go of a button it pressed: the button's fill fades.
