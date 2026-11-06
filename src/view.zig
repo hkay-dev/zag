@@ -735,10 +735,14 @@ fn moveCaret(d: *Doc, now: f64) void {
         y -= d.vy;
     }
     const visible = d.shown and (!d.c_text or (x >= gap + padL(d) - 2 and x < rightEdge(d) and y >= top_h - 2 and y + lh - 4 <= bottom(d)));
+    const frame = Rect{ .x = d.org.x + x, .y = d.org.y + y, .w = 2, .h = lh - 4 };
+    if (d.caret_at) |was| if (std.meta.eql(was, frame) and d.caret_off == !visible) return;
+    d.caret_at = frame;
+    d.caret_off = !visible;
     const t = objc.class("CATransaction");
     msg(void, t, "begin", .{});
     msg(void, t, "setDisableActions:", .{true});
-    msg(void, d.caret, "setFrame:", .{Rect{ .x = d.org.x + x, .y = d.org.y + y, .w = 2, .h = lh - 4 }});
+    msg(void, d.caret, "setFrame:", .{frame});
     msg(void, d.caret, "setHidden:", .{!visible});
     msg(void, t, "commit", .{});
 }
@@ -1195,6 +1199,10 @@ const Doc = struct {
     /// The caret is a Core Animation layer, so its glide and blink run in
     /// the window server instead of redrawing the text.
     caret: Id = null,
+    /// The frame and hidden state the caret layer was last given; null when
+    /// the layer was changed some other way, so the next move lands.
+    caret_at: ?Rect = null,
+    caret_off: bool = true,
     /// What the caret last stood for: mode, then row and column or prompt width.
     spot: [3]usize = .{ std.math.maxInt(usize), 0, 0 },
     shown: bool = false,
@@ -1937,6 +1945,7 @@ fn foldCard(d: *Doc) void {
     d.closing = true;
     d.shown = false;
     msg(void, d.caret, "setHidden:", .{true});
+    d.caret_at = null;
     focus(firstPane(up.kids[1 - g]));
     msg(void, d.window, "invalidateCursorRectsForView:", .{d.view});
 }
@@ -4940,24 +4949,21 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
                 return o + (f(colAt(line, g.start, g.col, p) - g.col) - f(sk)) * cw;
             }
         }.x;
-        if (has_sel and s[0] <= ls + l.len and s[1] > ls) {
-            const lo = std.math.clamp(@max(s[0], ls) - ls, sg.start, sg.end);
-            const hi = std.math.clamp(@min(s[1], ls + l.len) - ls, sg.start, sg.end);
-            const tail: f64 = if (s[1] > ls + l.len and sg.end == l.len) 0.6 * cw else 0;
-            const x0 = xat(l, sg, lo, ox, skip);
-            const w = xat(l, sg, hi, ox, skip) - x0 + tail;
-            if (w > 0) fillA(ctx, th.sel, sel_a, x0, y, w, lh);
-        }
-        if (flash_a > 0) for (d.flash[0..d.flash_n]) |fr| {
-            if (fr[0] <= ls + l.len and fr[1] > ls) {
-                const lo = std.math.clamp(@max(fr[0], ls) - ls, sg.start, sg.end);
-                const hi = std.math.clamp(@min(fr[1], ls + l.len) - ls, sg.start, sg.end);
-                const tail: f64 = if (fr[1] > ls + l.len and sg.end == l.len) 0.6 * cw else 0;
-                const x0 = xat(l, sg, lo, ox, skip);
-                const w = xat(l, sg, hi, ox, skip) - x0 + tail;
-                if (w > 0) fillA(ctx, th.caret, flash_a, x0, y, w, lh);
+        // Fills the part of `r` that falls on this row, with a tail past the
+        // line's end when `r` runs on to the next line.
+        const span = struct {
+            fn fill(c: Id, col: Rgb, a: f64, r: [2]usize, ls_: usize, line: []const u8, g: Seg, o: f64, sk: usize, y_: f64) void {
+                if (r[0] > ls_ + line.len or r[1] <= ls_) return;
+                const lo = std.math.clamp(@max(r[0], ls_) - ls_, g.start, g.end);
+                const hi = std.math.clamp(@min(r[1], ls_ + line.len) - ls_, g.start, g.end);
+                const tail: f64 = if (r[1] > ls_ + line.len and g.end == line.len) 0.6 * cw else 0;
+                const x0 = xat(line, g, lo, o, sk);
+                const w = xat(line, g, hi, o, sk) - x0 + tail;
+                if (w > 0) fillA(c, col, a, x0, y_, w, lh);
             }
-        };
+        }.fill;
+        if (has_sel) span(ctx, th.sel, sel_a, s, ls, l, sg, ox, skip, y);
+        if (flash_a > 0) for (d.flash[0..d.flash_n]) |fr| span(ctx, th.caret, flash_a, fr, ls, l, sg, ox, skip, y);
         if (pills.len > 0) {
             // Opening find on prefilled text fades the matches in, the nearest first.
             const dist = if (row > here.row) row - here.row else here.row - row;
