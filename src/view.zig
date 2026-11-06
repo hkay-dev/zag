@@ -6641,7 +6641,7 @@ fn resetCursorRects(self: Id, _: Sel) callconv(.c) void {
 fn toolTip(self: Id, _: Sel, _: Id, _: isize, p: Point, _: ?*anyopaque) callconv(.c) Id {
     const w = winOf(self) orelse return null;
     const t = toolAt(w, p) orelse return null;
-    return objc.str(if (t == .sidebar) objc.utf8(msg(Id, sidebar_item, "title", .{})) else "New Tab");
+    return if (t == .sidebar) msg(Id, sidebar_item, "title", .{}) else objc.str("New Tab");
 }
 
 /// Also the window delegate's key and resign key calls, so the caret shows
