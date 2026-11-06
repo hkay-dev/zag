@@ -4983,14 +4983,14 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
                 return o + (f(colAt(line, g.start, g.col, p) - g.col) - f(sk)) * cw;
             }
         }.x;
-        // Fills the part of `r` that falls on this row, with a tail past the
-        // line's end when `r` runs on to the next line.
+        // Fills the part of `rg` that falls on this row, with a tail past the
+        // line's end when `rg` runs on to the next line.
         const span = struct {
-            fn fill(c: Id, col: Rgb, a: f64, r: [2]usize, ls_: usize, line: []const u8, g: Seg, o: f64, sk: usize, y_: f64) void {
-                if (r[0] > ls_ + line.len or r[1] <= ls_) return;
-                const lo = std.math.clamp(@max(r[0], ls_) - ls_, g.start, g.end);
-                const hi = std.math.clamp(@min(r[1], ls_ + line.len) - ls_, g.start, g.end);
-                const tail: f64 = if (r[1] > ls_ + line.len and g.end == line.len) 0.6 * cw else 0;
+            fn fill(c: Id, col: Rgb, a: f64, rg: [2]usize, ls_: usize, line: []const u8, g: Seg, o: f64, sk: usize, y_: f64) void {
+                if (rg[0] > ls_ + line.len or rg[1] <= ls_) return;
+                const lo = std.math.clamp(@max(rg[0], ls_) - ls_, g.start, g.end);
+                const hi = std.math.clamp(@min(rg[1], ls_ + line.len) - ls_, g.start, g.end);
+                const tail: f64 = if (rg[1] > ls_ + line.len and g.end == line.len) 0.6 * cw else 0;
                 const x0 = xat(line, g, lo, o, sk);
                 const w = xat(line, g, hi, o, sk) - x0 + tail;
                 if (w > 0) fillA(c, col, a, x0, y_, w, lh);
