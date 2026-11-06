@@ -4021,18 +4021,20 @@ fn iconFor(name: []const u8) Id {
     var low: [16]u8 = undefined;
     const ext = if (dot > 0 and name.len - dot - 1 <= low.len) name[dot + 1 ..] else "";
     const key = std.ascii.lowerString(low[0..ext.len], ext);
-    if (kind_icons.get(key)) |img| return img;
+    for (kind_icons.items) |e| if (std.mem.eql(u8, e.key[0..e.len], key)) return e.img;
     const ut = objc.class("UTType");
     const ty = if (key.len > 0) msg(Id, ut, "typeWithFilenameExtension:", .{objc.str(key)}) else null;
     const ws = msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{});
     const img = msg(Id, msg(Id, ws, "iconForContentType:", .{ty orelse msg(Id, ut, "typeWithIdentifier:", .{objc.str("public.plain-text")})}), "retain", .{});
-    const owned = gpa.dupe(u8, key) catch return img;
-    kind_icons.put(gpa, owned, img) catch gpa.free(owned);
+    var e: KindIcon = .{ .key = undefined, .len = @intCast(key.len), .img = img };
+    @memcpy(e.key[0..key.len], key);
+    kind_icons.append(gpa, e) catch {};
     return img;
 }
 
+const KindIcon = struct { key: [16]u8, len: u8, img: Id };
 /// By lowercase extension, "" for none.
-var kind_icons: std.StringHashMapUnmanaged(Id) = .empty;
+var kind_icons: std.ArrayList(KindIcon) = .empty;
 
 fn icon(which: Icon, dark: bool, th: *const Theme) Id {
     const slot = &icons[@intFromBool(dark)][@intFromEnum(which)];
