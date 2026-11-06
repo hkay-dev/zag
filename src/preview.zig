@@ -12,6 +12,7 @@ var owner: Id = null;
 var source: Id = null;
 var path: Id = null;
 var theme: settings.Theme = undefined;
+var fade = false;
 
 fn color(rgb: settings.Rgb) Id {
     return msg(Id, objc.class("NSColor"), "colorWithSRGBRed:green:blue:alpha:", .{ rgb[0], rgb[1], rgb[2], @as(f64, 1) });
@@ -28,6 +29,7 @@ fn closed(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     owner = null;
     window = null;
     text = null;
+    fade = false;
 }
 pub fn close(w: Id) void {
     if (owner == w) msg(void, window, "close", .{});
@@ -70,6 +72,7 @@ pub fn update(d: anytype, conf: *const settings.Settings) void {
         msg(void, source, "release", .{});
         source = msg(Id, objc.str(bytes), "retain", .{});
     }
+    fade = fade or !std.meta.eql(theme, th.*);
     theme = th.*;
     msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:", .{target});
     msg(void, target, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("render:"), @as(Id, null), @as(f64, 0.15) });
@@ -175,6 +178,15 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     }
     const clip = msg(Id, msg(Id, text, "enclosingScrollView", .{}), "contentView", .{});
     const position = msg(objc.Rect, clip, "bounds", .{});
+    if (fade) {
+        // The same crossfade as view.zig's fadeTheme, on the scroll view's layer.
+        const t = msg(Id, objc.class("CATransition"), "animation", .{});
+        msg(void, t, "setType:", .{objc.str("fade")});
+        msg(void, t, "setDuration:", .{@as(f64, 0.25)});
+        msg(void, t, "setTimingFunction:", .{msg(Id, objc.class("CAMediaTimingFunction"), "functionWithName:", .{objc.str("easeInEaseOut")})});
+        msg(void, msg(Id, msg(Id, window, "contentView", .{}), "layer", .{}), "addAnimation:forKey:", .{ t, objc.str("theme") });
+        fade = false;
+    }
     msg(void, text, "setBackgroundColor:", .{color(theme.bg)});
     msg(void, window, "setBackgroundColor:", .{color(theme.bg)});
     msg(void, text, "setLinkTextAttributes:", .{msg(Id, objc.class("NSDictionary"), "dictionaryWithObject:forKey:", .{ color(theme.kinds[5]), objc.str("NSColor") })});
