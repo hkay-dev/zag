@@ -3539,7 +3539,8 @@ const Seg = struct { k: usize = 0, start: usize = 0, col: usize = 0, end: usize 
 /// Rows wrap at the card's width once it's done springing, so a card that
 /// grows or shrinks doesn't rewrap every frame.
 fn wrapCols(d: *const Doc) usize {
-    const cols = @max(@as(usize, @intFromFloat((d.fin.x - 2 * gap - 2 * pad_x - gutter(d)) / cw)), 8);
+    const room = @max(d.fin.x - 2 * gap - 2 * pad_x - gutter(d), 8 * cw);
+    const cols: usize = @intFromFloat(room / cw);
     return if (conf.zen) @min(cols, 80) else cols;
 }
 
@@ -3551,15 +3552,17 @@ fn layout(d: *Doc) void {
         d.vfirst.clearAndFree(gpa);
         return;
     }
-    const cols = wrapCols(d);
-    if (cols != d.cols or b.wraps.items.len != b.lines() or d.vfirst.items.len != b.lines() + 1) {
-        d.cols = cols;
+    const cols = if (d.closing and d.cols >= 8) d.cols else wrapCols(d);
+    d.cols = cols;
+    const stale = d.vfirst.items.len != b.lines() + 1;
+    if (cols != b.wraps_cols or b.wraps.items.len != b.lines()) {
         b.wraps.resize(gpa, b.lines()) catch return;
+        b.wraps_cols = cols;
         @memset(b.wraps.items, 0);
         b.wraps_from = 0;
     }
-    if (b.wraps_from == std.math.maxInt(usize)) return;
-    var from = b.wraps_from;
+    if (b.wraps_from == std.math.maxInt(usize) and !stale) return;
+    var from = @min(b.wraps_from, b.lines());
     b.wraps_from = std.math.maxInt(usize);
     for (b.wraps.items[from..], from..) |*w, i| {
         if (w.* == 0) w.* = @intCast(editor.rowCount(b.line(i), cols));

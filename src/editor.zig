@@ -555,6 +555,7 @@ pub fn rowEnd(line: []const u8, start: usize, col: usize, cols: usize) RowEnd {
 
 /// How many screen rows `line` takes at `cols` cells a row.
 pub fn rowCount(line: []const u8, cols: usize) usize {
+    if (line.len <= cols and std.mem.indexOfScalar(u8, line, '\t') == null) return 1;
     var n: usize = 1;
     var r: RowEnd = .{ .end = 0, .col = 0 };
     while (true) {
@@ -701,6 +702,33 @@ test "rows break after the last space that fits, or mid-word" {
     try t_.expectEqual(@as(usize, 3), rowCount(l, 9));
     try t_.expectEqual(@as(usize, 1), rowCount("", 9));
     try t_.expectEqual(@as(usize, 1), rowCount("abc", 9));
+}
+
+test "short tab-free lines fit by bytes, but tabs can overflow" {
+    try t_.expectEqual(@as(usize, 1), rowCount("abcdefgh", 8));
+    try t_.expectEqual(@as(usize, 1), rowCount("漢😀a", 8));
+    try t_.expectEqual(@as(usize, 1), rowCount("\xff", 1));
+    try t_.expect(rowCount("a\tb", 3) > 1);
+}
+
+test "newline keeps untouched wrap counts and incremental counts match a full count" {
+    var e = try Editor.init(gpa_t, "abcdefghijklmnop\nabcde fghij\nabcdefghijklmnopqrst");
+    defer e.deinit(gpa_t);
+    const b = &e.buf;
+    b.wraps_cols = 8;
+    try b.wraps.resize(gpa_t, b.lines());
+    for (b.wraps.items, 0..) |*w, i| w.* = @intCast(rowCount(b.line(i), b.wraps_cols));
+    try t_.expectEqualSlices(u32, &.{ 2, 2, 3 }, b.wraps.items);
+    e.moveTo(b.starts.items[1] + 5, false);
+    try e.insert(gpa_t, "\n");
+    try t_.expectEqualSlices(u32, &.{ 2, 0, 0, 3 }, b.wraps.items);
+    try t_.expectEqual(@as(usize, 1), b.wraps_from);
+    for (b.wraps.items[b.wraps_from..], b.wraps_from..) |*w, i| {
+        if (w.* == 0) w.* = @intCast(rowCount(b.line(i), b.wraps_cols));
+    }
+    for (b.wraps.items, 0..) |w, i| {
+        try t_.expectEqual(@as(u32, @intCast(rowCount(b.line(i), b.wraps_cols))), w);
+    }
 }
 
 test "reload keeps the caret and undoes back to the old text" {

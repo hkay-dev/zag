@@ -29,6 +29,8 @@ pub const Buffer = struct {
     /// wrap is off. An edit zeroes the lines it touches, and `wraps_from` is
     /// the first line zeroed since the view last caught up.
     wraps: std.ArrayList(u32) = .empty,
+    /// Column width the cached row counts were measured at.
+    wraps_cols: usize = 0,
     wraps_from: usize = std.math.maxInt(usize),
 
     pub fn init(gpa: Allocator, bytes: []const u8) !Buffer {
