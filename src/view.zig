@@ -4917,6 +4917,11 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     }
     const flash_a = flashAlpha(d, now);
 
+    // The other matches' pills stay while the find bar slides away, fading with it.
+    const closing_find = d.mode == .edit and (d.held_mode == .find or d.held_mode == .replace) and d.pbar.at(now) > 0.002;
+    const pills: []const u8 = if (finding) d.prompt.items else if (closing_find) d.held.items else "";
+    const pills_a: f64 = if (finding) 1 else d.pbar.at(now);
+
     // Backgrounds: selection, find matches.
     for (vis[0..nvis], first..) |v, row| {
         const y = top_h + f(row) * lh - d.vy;
@@ -4946,20 +4951,19 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
                 if (w > 0) fillA(ctx, th.caret, flash_a, x0, y, w, lh);
             }
         };
-        if (finding) {
-            const q = d.prompt.items;
+        if (pills.len > 0) {
             // Opening find on prefilled text fades the matches in, the nearest first.
             const dist = if (row > here.row) row - here.row else here.row - row;
-            const m_a = std.math.clamp((now - d.stag_t0 - @min(stag_row * f(dist), stag_cap)) / fade_time, 0, 1);
-            var j = sg.start -| (q.len - 1);
-            while (j < sg.end and j + q.len <= l.len) : (j += 1) if (editor.matchAt(l, j, q)) {
+            const m_a = std.math.clamp((now - d.stag_t0 - @min(stag_row * f(dist), stag_cap)) / fade_time, 0, 1) * pills_a;
+            var j = sg.start -| (pills.len - 1);
+            while (j < sg.end and j + pills.len <= l.len) : (j += 1) if (editor.matchAt(l, j, pills)) {
                 const lo = @max(j, sg.start);
-                const hi = @min(j + q.len, sg.end);
+                const hi = @min(j + pills.len, sg.end);
                 if (lo < hi and ls + j != s[0]) {
                     const x0 = xat(l, sg, lo, ox, skip);
                     pill(ctx, th.match, match_alpha * m_a, x0, y + 2, xat(l, sg, hi, ox, skip) - x0, lh - 4, 3);
                 }
-                j += q.len - 1;
+                j += pills.len - 1;
             };
         }
     }
