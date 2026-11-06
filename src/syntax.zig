@@ -145,6 +145,11 @@ pub fn syncStates(gpa: std.mem.Allocator, lang: *const Lang, b: *Buffer, states:
         } else {
             var i = first;
             while (i + 1 < states.items.len and i < b.lines()) : (i += 1) {
+                // Past what this frame needs: drop the rest rather than lex to the end.
+                if (i >= upto) {
+                    states.shrinkRetainingCapacity(i + 1);
+                    break;
+                }
                 const before = states.items[i + 1];
                 const after = lexLine(lang, b.line(i), states.items[i], null);
                 states.items[i + 1] = after;
