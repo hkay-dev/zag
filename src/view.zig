@@ -3000,13 +3000,33 @@ fn loadSettings() void {
     conf_saved = settings.load(gpa, p);
     conf = conf_saved;
     if (conf.late_night) conf.lateNight();
-    const fonts_changed = old_conf.size != conf.size or old_conf.spacing != conf.spacing or !std.mem.eql(u8, old_conf.font(), conf.font());
-    const text_moves = fonts_changed or conf.wrap != old_conf.wrap or conf.zen != old_conf.zen or
-        conf.line_numbers != old_conf.line_numbers or conf.sidebar != old_conf.sidebar or
-        conf.sidebar_width != old_conf.sidebar_width or conf.typewriter != old_conf.typewriter;
+    var fonts_changed = false;
+    var text_moves = false;
+    var side_moves = false;
+    var zen_changed = false;
+    var look_changed = false;
+    for (std.enums.values(settings.Opt)) |o| if (!settings.same(&old_conf, &conf, o)) switch (o) {
+        .font, .size, .@"line-height" => {
+            fonts_changed = true;
+            text_moves = true;
+            side_moves = true;
+        },
+        .sidebar, .@"sidebar-width" => {
+            text_moves = true;
+            side_moves = true;
+        },
+        .wrap, .@"line-numbers", .typewriter => text_moves = true,
+        .zen => {
+            text_moves = true;
+            zen_changed = true;
+        },
+        .@"late-night", .appearance => look_changed = true,
+        // Colors, Focus and bracket pairs leave every line where it is.
+        .pairs, .focus, .@"light-theme", .@"dark-theme" => {},
+    };
     buildThemes();
     // A theme or appearance pick crossfades, and so does Late-Night; zen's own change doesn't.
-    const crossfade = conf.late_night != old_conf.late_night or conf.look != old_conf.look or (conf.zen == old_conf.zen and !std.meta.eql(old_themes, themes));
+    const crossfade = look_changed or (!zen_changed and !std.meta.eql(old_themes, themes));
     side_w = conf.sidebar_width;
     conf_stamp = files.stamp(p);
     if (font == null or fonts_changed) setFont();
@@ -3046,7 +3066,7 @@ fn loadSettings() void {
     msg(void, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "setAppearance:", .{look});
     for (wins.items) |w| {
         if (crossfade) fadeTheme(w);
-        if (fonts_changed or conf.sidebar != old_conf.sidebar or conf.sidebar_width != old_conf.sidebar_width) w.side_find = true;
+        if (side_moves) w.side_find = true;
         msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
     }
     for (docs.items) |d| {
@@ -3907,7 +3927,7 @@ pub const ax = struct {
     }
 };
 
-// ---- drawing ----
+// ---- syntax colors ----
 
 fn syncStates(d: *Doc, upto: usize) void {
     const invalid = syntax.syncStates(gpa, d.file.lang, &d.file.ed.buf, &d.states, upto) catch {
@@ -4010,7 +4030,7 @@ fn retitleNow(self: Id, _: Sel, _: Id) callconv(.c) void {
     for (docs.items) |d| if (d.win.view == self) retitle(d);
 }
 
-// ---- sidebar ----
+// ---- icons ----
 
 const Icon = enum { closed, opened, sidebar, plus, close, folder, parents, crumb, check };
 /// SF Symbols, which come with macOS, so they cost Zag no size.
@@ -4110,6 +4130,8 @@ fn hoverPill(ctx: Id, th: *const Theme, a: f64, down: f64, cx: f64, cy: f64) voi
     const alpha = @max(0.08 * a, 0.14 * down);
     if (alpha > 0.001) pill(ctx, th.fg, alpha, cx - 14, cy - 14, 28, 28, 14);
 }
+
+// ---- the header's folder ----
 
 /// At most this many chevrons in the header's folder.
 const max_marks = 8;
@@ -4218,6 +4240,8 @@ fn drawIconIn(img: Id, x: f64, y: f64, w: f64, h: f64, a: f64) void {
     const r: Rect = .{ .x = @round(x + (w - size.x) / 2), .y = @round(y + (h - size.y) / 2), .w = size.x, .h = size.y };
     msg(void, img, "drawInRect:fromRect:operation:fraction:respectFlipped:hints:", .{ r, Rect{}, @as(usize, 2), a, true, @as(Id, null) });
 }
+
+// ---- palette and quick open rows ----
 
 /// The palette and quick open rows: 26pt tall, with the list 4pt in from
 /// its top and bottom.
@@ -4336,6 +4360,8 @@ fn panelRow(ctx: Id, d: *const Doc, th: *const Theme, dark: bool, p: usize, left
     const nw = rowText(ctx, path[slash..], panel_font, ink, left, y, right - left);
     _ = rowText(ctx, path[0..slash], panel_small, dim, left + nw + 8, y, right - left - nw - 8);
 }
+
+// ---- sidebar ----
 
 /// How much of `rel`'s unsaved dot shows (0 to 1), from whichever card holds it.
 fn rowDot(w: *const Win, rel: []const u8, now: f64) f64 {
@@ -4842,6 +4868,31 @@ fn fadeList(ctx: Id, bg: Rgb, a: f64, end: f64, h: f64) void {
     objc.CGContextRestoreGState(ctx);
 }
 
+/// A folder opens or closes; a file shows in the focused card, or with ⌘
+/// in a new window.
+fn sideClick(w: *Win, p: Point, flags: usize) void {
+    finishFolds(CACurrentMediaTime());
+    const i = sideRow(w, p.y) orelse return;
+    // A pinned folder scrolls back to where its rows start.
+    if (std.mem.indexOfScalar(usize, w.stuck[0..w.nstuck], i) != null and p.y < listTop() + f(w.nstuck) * side_h) {
+        w.side_t.snap(w.side_y);
+        w.side_y = f(i) * side_h;
+        w.side_t.aim(w.side_y, CACurrentMediaTime());
+        return redrawSide(w);
+    }
+    const row = tree.rows.items[i];
+    if (row.dir) {
+        startFold(i);
+        return;
+    }
+    // A file opens when the mouse comes up, unless it's dragged to a card.
+    const path = std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ root.?, row.rel }, 0) catch return;
+    const ix = rowIconX(row.depth);
+    w.tdrag = .{ .from = null, .file = path, .cmd = flags & objc.cmd_key != 0, .down = p, .at = p, .grab = p.x - ix + tab_pad, .row = i };
+}
+
+// ---- text lines for the sidebar and status line ----
+
 /// The sidebar's text as CoreText lines in the system font, made on first
 /// draw: the folder's name, then one per tree row. Dropped when the tree or
 /// the font changes; drawing one costs no layout.
@@ -5038,28 +5089,7 @@ fn paintLine(ctx: Id, line: Id, c: Rgb, a: f64, x: f64, y: f64) void {
     objc.flipText(ctx);
 }
 
-/// A folder opens or closes; a file shows in the focused card, or with ⌘
-/// in a new window.
-fn sideClick(w: *Win, p: Point, flags: usize) void {
-    finishFolds(CACurrentMediaTime());
-    const i = sideRow(w, p.y) orelse return;
-    // A pinned folder scrolls back to where its rows start.
-    if (std.mem.indexOfScalar(usize, w.stuck[0..w.nstuck], i) != null and p.y < listTop() + f(w.nstuck) * side_h) {
-        w.side_t.snap(w.side_y);
-        w.side_y = f(i) * side_h;
-        w.side_t.aim(w.side_y, CACurrentMediaTime());
-        return redrawSide(w);
-    }
-    const row = tree.rows.items[i];
-    if (row.dir) {
-        startFold(i);
-        return;
-    }
-    // A file opens when the mouse comes up, unless it's dragged to a card.
-    const path = std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ root.?, row.rel }, 0) catch return;
-    const ix = rowIconX(row.depth);
-    w.tdrag = .{ .from = null, .file = path, .cmd = flags & objc.cmd_key != 0, .down = p, .at = p, .grab = p.x - ix + tab_pad, .row = i };
-}
+// ---- drawing a window ----
 
 /// Whether the window's look is dark, asked of AppKit again only after
 /// `lookChanged` forgets the answer.
@@ -5846,6 +5876,8 @@ fn drawRing(d: *Doc, ctx: Id, th: *const Theme, dark: bool, card: Rect, zt: f64,
         if (lit > 0.01) ring(ctx, th.caret, 0.55 * lit * calm, card.x, card.y, card.w, card.h, card_radius);
     }
 }
+
+// ---- header buttons and tabs ----
 
 fn headY() f64 {
     return gap + head_h / 2;

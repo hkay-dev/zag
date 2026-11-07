@@ -432,6 +432,27 @@ fn valueText(s: *const Settings, opt: Opt, buf: *[24]u8) []const u8 {
     };
 }
 
+/// Whether `a` and `b` hold the same value for `opt`.
+pub fn same(a: *const Settings, b: *const Settings, opt: Opt) bool {
+    return switch (opt) {
+        .font => std.mem.eql(u8, a.font(), b.font()),
+        .size => a.size == b.size,
+        .@"line-height" => a.spacing == b.spacing,
+        .wrap => a.wrap == b.wrap,
+        .pairs => a.pairs == b.pairs,
+        .focus => a.focus == b.focus,
+        .typewriter => a.typewriter == b.typewriter,
+        .@"line-numbers" => a.line_numbers == b.line_numbers,
+        .zen => a.zen == b.zen,
+        .@"late-night" => a.late_night == b.late_night,
+        .sidebar => a.sidebar == b.sidebar,
+        .@"sidebar-width" => a.sidebar_width == b.sidebar_width,
+        .appearance => a.look == b.look,
+        .@"light-theme" => a.light_scheme == b.light_scheme,
+        .@"dark-theme" => a.dark_scheme == b.dark_scheme,
+    };
+}
+
 fn writeOption(gpa: Allocator, out: *std.ArrayList(u8), s: *const Settings, row: Row) !void {
     var buf: [24]u8 = undefined;
     if (row.gap) try out.append(gpa, '\n');
