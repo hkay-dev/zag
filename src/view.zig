@@ -266,20 +266,6 @@ var conf_saved: settings.Settings = .{};
 var themes: [2]Theme = .{ settings.paper, settings.ink };
 var conf_path: ?[:0]u8 = null;
 var conf_stamp: ?files.Stamp = null;
-/// View menu items that show a checkmark, set by the menu builder.
-pub var wrap_item: Id = null;
-pub var lines_item: Id = null;
-pub var pairs_item: Id = null;
-pub var sidebar_item: Id = null;
-pub var focus_items: [4]Id = @splat(null);
-pub var typewriter_item: Id = null;
-pub var zen_item: Id = null;
-pub var late_item: Id = null;
-/// View > Theme items, in `settings.schemes` order.
-pub var scheme_items: [settings.schemes.len]Id = @splat(null);
-/// View > Theme's Appearance items: Auto, Light, Dark.
-pub var look_items: [3]Id = @splat(null);
-
 var font: Id = null;
 var bold: Id = null;
 var cw: f64 = 8;
@@ -3030,32 +3016,12 @@ fn loadSettings() void {
     side_w = conf.sidebar_width;
     conf_stamp = files.stamp(p);
     if (font == null or fonts_changed) setFont();
-    const checks = [_]struct { Id, bool }{
-        .{ wrap_item, conf.wrap },
-        .{ pairs_item, conf.pairs },
-        .{ sidebar_item, conf.sidebar },
-        .{ lines_item, conf.line_numbers },
-        .{ typewriter_item, conf.typewriter },
-        .{ zen_item, conf.zen },
-        // Late-Night's own checkmark; its other items get theirs from the effective values above.
-        .{ late_item, conf.late_night },
-    };
-    for (checks) |c| if (c[0] != null) msg(void, c[0], "setState:", .{@as(isize, @intFromBool(c[1]))});
-    for (focus_items, 0..) |it, i| {
-        if (it != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(i == @intFromEnum(conf.focus)))});
-    }
     // The icons take the size and the caret and muted colors.
     for (old_themes, themes) |a, b| {
         if (old_conf.size != conf.size or !std.mem.eql(f64, &a.caret, &b.caret) or !std.mem.eql(f64, &a.muted, &b.muted)) {
             dropIcons();
             break;
         }
-    }
-    for (scheme_items, 0..) |it, i| {
-        if (it != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(i == conf.light_scheme or i == conf.dark_scheme))});
-    }
-    for (look_items, 0..) |it, i| {
-        if (it != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(i == @intFromEnum(conf.look)))});
     }
     // Auto leaves it to the Mac; Light and Dark pin every window.
     const look: Id = switch (conf.look) {
@@ -3181,21 +3147,13 @@ pub fn flip(comptime opt: settings.Opt) void {
     store(opt, if (@field(conf_saved, &name)) "false" else "true");
 }
 
-/// What the menu's validation says: Late-Night greys the items it has set.
-pub fn allowed(_: Id, _: Sel, it: Id) callconv(.c) bool {
-    if (!conf.late_night) return true;
-    const name = std.mem.span(objc.sel_getName(msg(Sel, it, "action", .{})));
-    for ([_][]const u8{ "toggleTypewriter:", "toggleZen:", "pickFocus:", "pickScheme:", "pickAppearance:" }) |n| if (std.mem.eql(u8, name, n)) return false;
-    return true;
-}
-
 pub fn toggleTypewriter() void {
     if (!conf.late_night) flip(.typewriter);
 }
 
 pub fn pickFocus(i: usize) void {
     if (conf.late_night) return;
-    if (i < focus_items.len) store(.focus, @tagName(@as(settings.Focus, @enumFromInt(i))));
+    if (i < std.enums.values(settings.Focus).len) store(.focus, @tagName(@as(settings.Focus, @enumFromInt(i))));
 }
 
 /// Leaving zen the usual way while Late-Night is on ends Late-Night.
@@ -3212,7 +3170,7 @@ pub fn pickScheme(i: usize) void {
 
 /// View > Theme > Appearance: 0 Auto, 1 Light, 2 Dark.
 pub fn pickLook(i: usize) void {
-    if (i >= look_items.len or conf.late_night) return;
+    if (i >= std.enums.values(settings.Look).len or conf.late_night) return;
     store(.appearance, @tagName(@as(settings.Look, @enumFromInt(i))));
 }
 
@@ -3337,7 +3295,7 @@ fn addCommands(menu: Id, prefix: []const u8) void {
         if (act == palette_sel) continue;
         const name = (if (section.len > 0) std.fmt.allocPrint(a, "{s}: {s}", .{ section, title }) else a.dupe(u8, title)) catch return;
         cmd_names.append(a, name) catch return;
-        cmds.append(a, .{ .item = it, .keys = keysOf(a, it) catch "", .on = msg(isize, it, "state", .{}) == 1 }) catch return;
+        cmds.append(a, .{ .item = it, .keys = keysOf(a, it) catch "", .on = isChecked(it) }) catch return;
     }
 }
 
@@ -7159,7 +7117,7 @@ fn resetCursorRects(self: Id, _: Sel) callconv(.c) void {
 fn toolTip(self: Id, _: Sel, _: Id, _: isize, p: Point, _: ?*anyopaque) callconv(.c) Id {
     const w = winOf(self) orelse return null;
     const t = toolAt(w, p) orelse return null;
-    return if (t == .sidebar) msg(Id, sidebar_item, "title", .{}) else objc.str("New Tab");
+    return if (t == .sidebar) objc.str(sidebar_title) else objc.str("New Tab");
 }
 
 /// Window key and full-screen changes invalidate the titlebar layout.
@@ -7234,10 +7192,7 @@ pub fn menuItem(menu: Id, title: []const u8, sel: [:0]const u8, key: []const u8,
 }
 
 pub fn clipboardItems(m: Id) void {
-    _ = menuItem(m, "Cut", "cut:", "x", objc.cmd_key);
-    _ = menuItem(m, "Copy", "copy:", "c", objc.cmd_key);
-    _ = menuItem(m, "Paste", "paste:", "v", objc.cmd_key);
-    _ = menuItem(m, "Select All", "selectAll:", "a", objc.cmd_key);
+    fillMenu(m, clipboard, null);
 }
 
 pub fn separator(m: Id) void {
@@ -7509,6 +7464,270 @@ fn action(comptime run: anytype, comptime args: anytype) *const anyopaque {
     }.imp);
 }
 
+/// A menu action thunk: calls `run` with `args` and drops its result.
+pub fn appAction(comptime run: anytype, comptime args: anytype) *const anyopaque {
+    return @ptrCast(&struct {
+        fn thunk(_: Id, _: Sel, _: Id) callconv(.c) void {
+            _ = @call(.auto, run, args);
+        }
+    }.thunk);
+}
+
+/// A menu action thunk for items that carry their index in `tag`.
+fn appPick(comptime run: fn (usize) void) *const anyopaque {
+    return @ptrCast(&struct {
+        fn thunk(_: Id, _: Sel, sender: Id) callconv(.c) void {
+            run(@intCast(msg(isize, sender, "tag", .{})));
+        }
+    }.thunk);
+}
+
+// ---- the menu bar ----
+//
+// One list builds the menus, binds each command's handler and says which
+// commands grey out or show a checkmark, so a selector is written once.
+// An entry is a separator (`.sep`), a greyed heading (`.heading`), a menu or
+// inline group (`.items`, a menu when it has a `.menu` title), a command
+// (`.title` and `.sel`), a run of picks that carry their index in `tag`
+// (`.titles`, or `.schemes` for the built-in themes).
+
+/// Who handles a command: the app delegate (needs no window), the key
+/// window's view, or AppKit itself (`.fonts` is the font manager).
+const Target = enum { app, view, system, fonts };
+
+/// The setting a command's checkmark shows. Picks compare their tag.
+const Check = enum { wrap, pairs, sidebar, line_numbers, typewriter, zen, late_night, focus, scheme, look };
+
+/// `e`'s field `name` as a `T`, or `default` when the entry has none.
+fn pluck(comptime T: type, comptime e: anytype, comptime name: []const u8, comptime default: T) T {
+    return if (@hasField(@TypeOf(e), name)) @as(T, @field(e, name)) else default;
+}
+
+/// The View menu item that shows or hides the sidebar; its sidebar button's tooltip says the same.
+const sidebar_title = "Sidebar";
+
+const clipboard = .{
+    .{ .title = "Cut", .sel = "cut:", .key = "x", .mods = objc.cmd_key, .to = .view, .run = cut },
+    .{ .title = "Copy", .sel = "copy:", .key = "c", .mods = objc.cmd_key, .to = .view, .run = copy },
+    .{ .title = "Paste", .sel = "paste:", .key = "v", .mods = objc.cmd_key, .to = .view, .run = paste },
+    .{ .title = "Select All", .sel = "selectAll:", .key = "a", .mods = objc.cmd_key, .to = .view, .run = selectAll },
+};
+
+const menu_bar = .{
+    .{ .menu = "Zag", .items = .{
+        .{ .title = "About Zag", .sel = "orderFrontStandardAboutPanel:" },
+        .{ .sep = true },
+        .{ .title = "Settings…", .sel = "openSettings:", .key = ",", .mods = objc.cmd_key, .to = .app, .run = openSettings },
+        .{ .sep = true },
+        .{ .title = "Hide Zag", .sel = "hide:", .key = "h", .mods = objc.cmd_key },
+        .{ .title = "Hide Others", .sel = "hideOtherApplications:", .key = "h", .mods = objc.cmd_key | objc.opt_key },
+        .{ .title = "Show All", .sel = "unhideAllApplications:" },
+        .{ .sep = true },
+        .{ .title = "Quit Zag", .sel = "terminate:", .key = "q", .mods = objc.cmd_key },
+    } },
+    .{ .menu = "File", .items = .{
+        .{ .title = "New", .sel = "newDocument:", .key = "n", .mods = objc.cmd_key, .to = .app, .run = newDoc },
+        .{ .title = "New Tab", .sel = "newTab:", .key = "t", .mods = objc.cmd_key, .to = .view, .run = newTab },
+        .{ .title = "Open…", .sel = "openDocument:", .key = "o", .mods = objc.cmd_key, .to = .app, .run = openPanel },
+        // The delegate fills it each time it opens.
+        .{ .menu = "Open Recent", .delegate = true, .items = .{} },
+        .{ .title = "Quick Open…", .sel = "quickOpen:", .key = "p", .mods = objc.cmd_key, .to = .view, .run = startPrompt, .args = .{Mode.open} },
+        .{ .sep = true },
+        .{ .title = "Close Tab", .sel = "closeTab:", .key = "w", .mods = objc.cmd_key, .to = .view, .run = closeActive },
+        .{ .title = "Close Window", .sel = "performClose:", .key = "w", .mods = objc.cmd_key | objc.shift_key },
+        .{ .title = "Save", .sel = "saveDocument:", .key = "s", .mods = objc.cmd_key, .to = .view, .run = save, .args = .{false} },
+        .{ .title = "Save As…", .sel = "saveDocumentAs:", .key = "s", .mods = objc.cmd_key | objc.shift_key, .to = .view, .run = save, .args = .{true} },
+    } },
+    .{ .menu = "Edit", .items = .{
+        .{ .title = "Undo", .sel = "undo:", .key = "z", .mods = objc.cmd_key, .to = .view, .run = stepHistory, .args = .{false} },
+        .{ .title = "Redo", .sel = "redo:", .key = "z", .mods = objc.cmd_key | objc.shift_key, .to = .view, .run = stepHistory, .args = .{true} },
+        .{ .sep = true },
+        .{ .items = clipboard },
+        .{ .sep = true },
+        .{ .title = "Find…", .sel = "findText:", .key = "f", .mods = objc.cmd_key, .to = .view, .run = startPrompt, .args = .{Mode.find} },
+        .{ .title = "Find and Replace…", .sel = "findAndReplace:", .key = "f", .mods = objc.cmd_key | objc.opt_key, .to = .view, .run = startPrompt, .args = .{Mode.replace} },
+        .{ .title = "Find Next", .sel = "findNext:", .key = "g", .mods = objc.cmd_key, .to = .view, .run = findAgain, .args = .{false} },
+        .{ .title = "Find Previous", .sel = "findPrevious:", .key = "g", .mods = objc.cmd_key | objc.shift_key, .to = .view, .run = findAgain, .args = .{true} },
+        .{ .title = "Go to Line…", .sel = "gotoLine:", .key = "l", .mods = objc.cmd_key, .to = .view, .run = startPrompt, .args = .{Mode.line} },
+        .{ .title = "Toggle Comment", .sel = "toggleComment:", .key = "/", .mods = objc.cmd_key, .to = .view, .run = comment },
+    } },
+    .{ .menu = "View", .items = .{
+        .{ .title = "Command Palette…", .sel = "commandPalette:", .key = "k", .mods = objc.cmd_key, .to = .view, .run = startPrompt, .args = .{Mode.command} },
+        .{ .title = "Markdown Preview", .sel = "markdownPreview:", .key = "m", .mods = objc.cmd_key | objc.shift_key, .to = .view, .run = markdownPreview },
+        .{ .sep = true },
+        .{ .title = "Font…", .sel = "orderFrontFontPanel:", .key = "t", .mods = objc.cmd_key | objc.shift_key, .to = .fonts },
+        .{ .title = "Bigger", .sel = "zoomIn:", .key = "=", .mods = objc.cmd_key, .to = .view, .run = zoom, .args = .{1} },
+        .{ .title = "Smaller", .sel = "zoomOut:", .key = "-", .mods = objc.cmd_key, .to = .view, .run = zoom, .args = .{-1} },
+        .{ .title = "Actual Size", .sel = "zoomReset:", .key = "0", .mods = objc.cmd_key, .to = .view, .run = zoom, .args = .{0} },
+        .{ .sep = true },
+        .{ .title = "Soft Wrap", .sel = "toggleWrap:", .key = "z", .mods = objc.opt_key, .to = .app, .run = flip, .args = .{.wrap}, .check = .wrap },
+        .{ .title = "Line Numbers", .sel = "toggleLineNumbers:", .key = "l", .mods = objc.cmd_key | objc.shift_key, .to = .app, .run = flip, .args = .{.@"line-numbers"}, .check = .line_numbers },
+        .{ .title = "Auto-Close Brackets", .sel = "togglePairs:", .to = .app, .run = flip, .args = .{.pairs}, .check = .pairs },
+        .{ .title = sidebar_title, .sel = "toggleSidebar:", .key = "\\", .mods = objc.cmd_key, .to = .app, .run = flip, .args = .{.sidebar}, .check = .sidebar },
+        .{ .title = "Zen Mode", .sel = "toggleZen:", .key = "z", .mods = objc.ctrl_key | objc.cmd_key, .to = .app, .run = toggleZen, .check = .zen, .grey = true },
+        // Late-Night's own checkmark reads its flag; the items it sets show the effective values.
+        .{ .title = "Late-Night Focus", .sel = "toggleLateNight:", .key = "n", .mods = objc.ctrl_key | objc.cmd_key, .to = .app, .run = flip, .args = .{.@"late-night"}, .check = .late_night },
+        .{ .title = "Show Next Tab", .sel = "nextTab:", .key = "\t", .mods = objc.ctrl_key, .to = .view, .run = stepTab, .args = .{1} },
+        // ⇧Tab arrives as back tab, so that's the key to match.
+        .{ .title = "Show Previous Tab", .sel = "previousTab:", .key = "\x19", .mods = objc.ctrl_key | objc.shift_key, .to = .view, .run = stepTab, .args = .{-1} },
+        .{ .title = "Typewriter Scrolling", .sel = "toggleTypewriter:", .to = .app, .run = toggleTypewriter, .check = .typewriter, .grey = true },
+        .{ .menu = "Focus", .items = .{
+            .{ .titles = .{ "Off", "Line", "Sentence", "Paragraph" }, .sel = "pickFocus:", .to = .app, .run = pickFocus, .check = .focus, .grey = true },
+        } },
+        .{ .sep = true },
+        .{ .title = "Split Right", .sel = "splitRight:", .key = "d", .mods = objc.cmd_key, .to = .view, .run = split, .args = .{false} },
+        .{ .title = "Split Down", .sel = "splitDown:", .key = "d", .mods = objc.cmd_key | objc.shift_key, .to = .view, .run = split, .args = .{true} },
+        .{ .title = "Next Card", .sel = "nextCard:", .key = "]", .mods = objc.cmd_key, .to = .view, .run = stepCard, .args = .{1} },
+        .{ .title = "Previous Card", .sel = "previousCard:", .key = "[", .mods = objc.cmd_key, .to = .view, .run = stepCard, .args = .{-1} },
+        .{ .menu = "Theme", .items = .{
+            .{ .heading = "Appearance" },
+            .{ .titles = .{ "Auto", "Light", "Dark" }, .indent = 1, .sel = "pickAppearance:", .to = .app, .run = pickLook, .check = .look, .grey = true },
+            .{ .schemes = true, .indent = 1, .sel = "pickScheme:", .to = .app, .run = pickScheme, .check = .scheme, .grey = true },
+        } },
+        .{ .sep = true },
+        .{ .title = "Enter Full Screen", .sel = "toggleFullScreen:", .key = "f", .mods = objc.cmd_key | objc.ctrl_key },
+    } },
+    .{ .menu = "Window", .items = .{
+        .{ .title = "Minimize", .sel = "performMiniaturize:", .key = "m", .mods = objc.cmd_key },
+        .{ .title = "Zoom", .sel = "performZoom:" },
+    } },
+    .{ .menu = "Help", .items = .{} },
+};
+
+fn submenu(bar: Id, title: []const u8) Id {
+    const m = msg(Id, msg(Id, objc.class("NSMenu"), "alloc", .{}), "initWithTitle:", .{objc.str(title)});
+    const it = menuItem(bar, title, "", "", 0);
+    msg(void, it, "setSubmenu:", .{m});
+    msg(void, m, "release", .{});
+    return m;
+}
+
+/// Adds the items of `entries` to `menu`; `delegate` goes to menus that ask for one.
+fn fillMenu(menu: Id, comptime entries: anytype, delegate: Id) void {
+    inline for (entries) |e| {
+        const T = @TypeOf(e);
+        if (@hasField(T, "sep")) {
+            separator(menu);
+        } else if (@hasField(T, "heading")) {
+            msg(void, menuItem(menu, e.heading, "", "", 0), "setEnabled:", .{false});
+        } else if (@hasField(T, "items")) {
+            if (@hasField(T, "menu")) {
+                const m = submenu(menu, e.menu);
+                if (pluck(bool, e, "delegate", false)) msg(void, m, "setDelegate:", .{delegate});
+                fillMenu(m, e.items, delegate);
+            } else fillMenu(menu, e.items, delegate);
+        } else if (@hasField(T, "schemes")) {
+            for (settings.schemes, 0..) |sc, i| {
+                if (i == 0 or sc.dark != settings.schemes[i - 1].dark) {
+                    separator(menu);
+                    msg(void, menuItem(menu, if (sc.dark) "Dark Mode" else "Light Mode", "", "", 0), "setEnabled:", .{false});
+                }
+                pick(menu, sc.title, e.sel, i, pluck(isize, e, "indent", 0));
+            }
+        } else if (@hasField(T, "titles")) {
+            inline for (e.titles, 0..) |title, i| pick(menu, title, e.sel, i, pluck(isize, e, "indent", 0));
+        } else {
+            const it = menuItem(menu, e.title, e.sel, pluck([]const u8, e, "key", ""), pluck(usize, e, "mods", 0));
+            if (pluck(Target, e, "to", .system) == .fonts) {
+                msg(void, it, "setTarget:", .{msg(Id, objc.class("NSFontManager"), "sharedFontManager", .{})});
+            }
+        }
+    }
+}
+
+/// A pick item: its index rides in `tag`.
+fn pick(menu: Id, title: []const u8, sel: [:0]const u8, i: usize, indent: isize) void {
+    const it = menuItem(menu, title, sel, "", 0);
+    msg(void, it, "setTag:", .{@as(isize, @intCast(i))});
+    if (indent != 0) msg(void, it, "setIndentationLevel:", .{indent});
+}
+
+/// Builds the menu bar and installs it. `delegate` fills Open Recent.
+pub fn buildMenu(delegate: Id) void {
+    const nsapp = msg(Id, objc.class("NSApplication"), "sharedApplication", .{});
+    const bar = objc.new("NSMenu");
+    inline for (menu_bar) |e| {
+        const m = submenu(bar, e.menu);
+        fillMenu(m, e.items, delegate);
+        if (comptime std.mem.eql(u8, e.menu, "Window")) msg(void, nsapp, "setWindowsMenu:", .{m});
+        if (comptime std.mem.eql(u8, e.menu, "Help")) msg(void, nsapp, "setHelpMenu:", .{m});
+    }
+    msg(void, nsapp, "setMainMenu:", .{bar});
+    msg(void, bar, "release", .{});
+}
+
+/// Binds the handlers of the commands `to` handles onto class `c`.
+fn bind(comptime entries: anytype, comptime to: Target, c: objc.ClassBuilder) void {
+    inline for (entries) |e| {
+        const T = @TypeOf(e);
+        if (@hasField(T, "items")) {
+            bind(e.items, to, c);
+        } else if (comptime @hasField(T, "run") and pluck(Target, e, "to", .system) == to) {
+            const args = comptime if (@hasField(T, "args")) e.args else .{};
+            const picks = @hasField(T, "titles") or @hasField(T, "schemes");
+            switch (to) {
+                .view => c.method(e.sel, action(e.run, args), "v@:@"),
+                .app => c.method(e.sel, if (picks) appPick(e.run) else appAction(e.run, args), "v@:@"),
+                .system, .fonts => unreachable,
+            }
+        }
+    }
+}
+
+/// Binds the app delegate's menu commands, the ones that work with no window.
+pub fn bindApp(d: objc.ClassBuilder) void {
+    bind(menu_bar, .app, d);
+}
+
+const Rule = struct { check: ?Check, grey: bool };
+
+/// The checkmark and greying rule of the command with selector `name`.
+fn ruleFor(comptime entries: anytype, name: []const u8) ?Rule {
+    inline for (entries) |e| {
+        const T = @TypeOf(e);
+        if (@hasField(T, "items")) {
+            if (ruleFor(e.items, name)) |r| return r;
+        } else if (@hasField(T, "sel")) {
+            if (std.mem.eql(u8, e.sel, name)) return .{ .check = pluck(?Check, e, "check", null), .grey = pluck(bool, e, "grey", false) };
+        }
+    }
+    return null;
+}
+
+fn ruleOf(it: Id) ?Rule {
+    return ruleFor(menu_bar, std.mem.span(objc.sel_getName(msg(Sel, it, "action", .{}))));
+}
+
+/// Whether setting `c` is on; a pick is on when its `tag` is the chosen one.
+fn checked(c: Check, tag: usize) bool {
+    return switch (c) {
+        .wrap => conf.wrap,
+        .pairs => conf.pairs,
+        .sidebar => conf.sidebar,
+        .line_numbers => conf.line_numbers,
+        .typewriter => conf.typewriter,
+        .zen => conf.zen,
+        .late_night => conf.late_night,
+        .focus => tag == @intFromEnum(conf.focus),
+        .scheme => tag == conf.light_scheme or tag == conf.dark_scheme,
+        .look => tag == @intFromEnum(conf.look),
+    };
+}
+
+/// Whether a menu item shows a checkmark now, whether or not its menu was opened.
+fn isChecked(it: Id) bool {
+    const c = (ruleOf(it) orelse return false).check orelse return false;
+    return checked(c, @intCast(msg(isize, it, "tag", .{})));
+}
+
+/// What the menu's validation says: sets the checkmark and greys what
+/// Late-Night has set.
+pub fn validate(_: Id, _: Sel, it: Id) callconv(.c) bool {
+    const r = ruleOf(it) orelse return true;
+    if (r.check != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(isChecked(it)))});
+    return !(r.grey and conf.late_night);
+}
+
 fn pasteboard() Id {
     return msg(Id, objc.class("NSPasteboard"), "generalPasteboard", .{});
 }
@@ -7659,37 +7878,7 @@ pub fn setup() void {
     c.method("copyPath:", @ptrCast(&copyPath), "v@:@");
     c.method("runCommand:", @ptrCast(&runCommand), "v@:@");
     access.addViewMethods(c);
-    const actions = .{
-        .{ "copy:", copy, .{} },
-        .{ "cut:", cut, .{} },
-        .{ "paste:", paste, .{} },
-        .{ "selectAll:", selectAll, .{} },
-        .{ "undo:", stepHistory, .{false} },
-        .{ "redo:", stepHistory, .{true} },
-        .{ "saveDocument:", save, .{false} },
-        .{ "saveDocumentAs:", save, .{true} },
-        .{ "findText:", startPrompt, .{Mode.find} },
-        .{ "findNext:", findAgain, .{false} },
-        .{ "findPrevious:", findAgain, .{true} },
-        .{ "gotoLine:", startPrompt, .{Mode.line} },
-        .{ "quickOpen:", startPrompt, .{Mode.open} },
-        .{ "toggleComment:", comment, .{} },
-        .{ "zoomIn:", zoom, .{1} },
-        .{ "zoomOut:", zoom, .{-1} },
-        .{ "zoomReset:", zoom, .{0} },
-        .{ "findAndReplace:", startPrompt, .{Mode.replace} },
-        .{ "commandPalette:", startPrompt, .{Mode.command} },
-        .{ "newTab:", newTab, .{} },
-        .{ "closeTab:", closeActive, .{} },
-        .{ "splitRight:", split, .{false} },
-        .{ "splitDown:", split, .{true} },
-        .{ "nextTab:", stepTab, .{1} },
-        .{ "previousTab:", stepTab, .{-1} },
-        .{ "nextCard:", stepCard, .{1} },
-        .{ "previousCard:", stepCard, .{-1} },
-        .{ "markdownPreview:", markdownPreview, .{} },
-    };
-    inline for (actions) |a| c.method(a[0], action(a[1], a[2]), "v@:@");
+    bind(menu_bar, .view, c);
     view_class = c.finish();
     win_ivar = objc.ivarOffset(view_class, "win");
 }
