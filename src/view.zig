@@ -7557,6 +7557,12 @@ fn comment(d: *Doc) void {
     d.file.ed.toggleComment(gpa, d.file.lang.line_comment) catch {};
 }
 
+fn formatJson(d: *Doc) void {
+    if (d.mode != .edit) return;
+    const ok = d.file.ed.formatJson(gpa) catch return;
+    if (!ok) d.note = if (d.file.ed.hasSel()) "selection isn't valid JSON" else "not valid JSON";
+}
+
 fn zoom(_: *Doc, by: f64) void {
     const size = if (by == 0) settings.default_size else std.math.clamp(conf.size + by, settings.size_min, settings.size_max);
     var buf: [24]u8 = undefined;
@@ -7642,6 +7648,7 @@ const menu_bar = .{
         .{ .title = "Find Previous", .sel = "findPrevious:", .key = "g", .mods = objc.cmd_key | objc.shift_key, .to = .view, .run = findAgain, .args = .{true} },
         .{ .title = "Go to Line…", .sel = "gotoLine:", .key = "l", .mods = objc.cmd_key, .to = .view, .run = startPrompt, .args = .{Mode.line} },
         .{ .title = "Toggle Comment", .sel = "toggleComment:", .key = "/", .mods = objc.cmd_key, .to = .view, .run = comment },
+        .{ .title = "Format JSON", .sel = "formatJson:", .key = "j", .mods = objc.cmd_key | objc.opt_key, .to = .view, .run = formatJson },
     } },
     .{ .menu = "View", .items = .{
         .{ .title = "Command Palette…", .sel = "commandPalette:", .key = "k", .mods = objc.cmd_key, .to = .view, .run = startPrompt, .args = .{Mode.command} },

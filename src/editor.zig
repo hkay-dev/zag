@@ -170,6 +170,71 @@ pub const Editor = struct {
         if (prefix.len > 0) try e.eachLine(gpa, .{ .comment = prefix });
     }
 
+    /// Lays out the selection, or the whole file, as indented JSON in one
+    /// undo step, keeping key order and how each number and string is
+    /// written. Returns false, changing nothing, when it isn't valid JSON.
+    pub fn formatJson(e: *Editor, gpa: Allocator) !bool {
+        const t = e.text();
+        const r = if (e.hasSel()) e.sel() else [2]usize{ 0, t.len };
+        const ws = " \t\r\n";
+        const a = r[1] - std.mem.trimStart(u8, t[r[0]..r[1]], ws).len;
+        const z = r[0] + std.mem.trimEnd(u8, t[r[0]..r[1]], ws).len;
+        if (a >= z or !try std.json.validate(gpa, t[a..z])) return false;
+
+        // Nested lines start from the indent of the line the JSON starts on.
+        const ls = e.buf.lineStart(e.buf.lineOf(a));
+        const base = t[ls .. ls + leadingWs(t[ls..a])];
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(gpa);
+        var depth: usize = 0;
+        var i = a;
+        while (i < z) : (i += 1) {
+            const c = t[i];
+            switch (c) {
+                ' ', '\t', '\r', '\n' => {},
+                '"' => {
+                    const s = i;
+                    i += 1;
+                    while (t[i] != '"') i += if (t[i] == '\\') 2 else 1;
+                    try out.appendSlice(gpa, t[s .. i + 1]);
+                },
+                '{', '[' => {
+                    var j = i + 1;
+                    while (std.mem.indexOfScalar(u8, ws, t[j]) != null) j += 1;
+                    if (t[j] == c + 2) {
+                        try out.appendSlice(gpa, &.{ c, c + 2 });
+                        i = j;
+                    } else {
+                        try out.append(gpa, c);
+                        depth += 1;
+                        try e.breakLine(gpa, &out, base, depth);
+                    }
+                },
+                '}', ']' => {
+                    depth -= 1;
+                    try e.breakLine(gpa, &out, base, depth);
+                    try out.append(gpa, c);
+                },
+                ',' => {
+                    try out.append(gpa, c);
+                    try e.breakLine(gpa, &out, base, depth);
+                },
+                ':' => try out.appendSlice(gpa, ": "),
+                else => try out.append(gpa, c),
+            }
+        }
+        if (std.mem.eql(u8, out.items, t[a..z])) return true;
+        try e.buf.replace(gpa, a, z, out.items, e.cur, false);
+        if (e.hasSel()) e.select(a, a + out.items.len) else e.select(@min(e.cur, a), @min(e.cur, a));
+        return true;
+    }
+
+    fn breakLine(e: *const Editor, gpa: Allocator, out: *std.ArrayList(u8), base: []const u8, depth: usize) !void {
+        try out.appendSlice(gpa, e.eol);
+        try out.appendSlice(gpa, base);
+        for (0..depth) |_| try out.appendSlice(gpa, e.indent);
+    }
+
     const LineOp = union(enum) { indent, outdent, comment: []const u8 };
 
     /// Rewrites every line the selection touches as one undo step, and
@@ -683,6 +748,25 @@ test "comment toggle adds at the shallowest indent and removes again" {
     try t_.expectEqualStrings("  // a\n\n  //   b\n", e.text());
     try e.toggleComment(gpa_t, "//");
     try t_.expectEqualStrings("  a\n\n    b\n", e.text());
+}
+
+test "format JSON indents nesting and keeps keys, numbers and strings as written" {
+    var e = try Editor.init(gpa_t, "\n{\"b\":[1.50,{},[ ]],\"a\":\"x\\\"{,\"}\n");
+    defer e.deinit(gpa_t);
+    try t_.expect(try e.formatJson(gpa_t));
+    try t_.expectEqualStrings("\n{\n    \"b\": [\n        1.50,\n        {},\n        []\n    ],\n    \"a\": \"x\\\"{,\"\n}\n", e.text());
+    _ = try e.undo(gpa_t);
+    try t_.expectEqualStrings("\n{\"b\":[1.50,{},[ ]],\"a\":\"x\\\"{,\"}\n", e.text());
+}
+
+test "format JSON leaves text that isn't JSON alone and works on a selection" {
+    var e = try Editor.init(gpa_t, "x = {\"a\":1}\n{oops}");
+    defer e.deinit(gpa_t);
+    try t_.expect(!try e.formatJson(gpa_t));
+    try t_.expectEqualStrings("x = {\"a\":1}\n{oops}", e.text());
+    e.select(4, 11);
+    try t_.expect(try e.formatJson(gpa_t));
+    try t_.expectEqualStrings("x = {\n    \"a\": 1\n}\n{oops}", e.text());
 }
 
 test "indent and outdent a block, skipping a line the selection only touches" {

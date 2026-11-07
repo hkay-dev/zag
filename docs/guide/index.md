@@ -237,6 +237,9 @@ keys, ⌥⌫ to delete a word, and the Control-key shortcuts (⌃A, ⌃E, ⌃K a
 - Return keeps the line's indentation. Tab indents, or indents every selected line; ⇧Tab
   takes one level of indentation off.
 - ⌘/ comments or uncomments the selected lines.
+- ⌥⌘J (**Edit > Format JSON**) lays out the selection as indented JSON, or the whole file when
+  nothing's selected. Keys stay in their order and numbers and strings stay as you wrote them.
+  If the text isn't valid JSON, nothing changes and the status bar says so. ⌘Z puts it back.
 - ⌘Z and ⇧⌘Z undo and redo. A run of typing undoes as one step.
 - Undo, redo, Replace All and big pastes (several lines, or over 40 characters) flash the text
   they changed. The flash fades out, and your next keypress clears it.
