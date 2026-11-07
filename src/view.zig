@@ -1034,7 +1034,7 @@ fn scenery(d: *const Doc, now: f64) bool {
         d.plus_t.moving(now) or !d.pick_s.settled() or (zen(d.win) < 0.999 and tabsMoving(d, now)) or
         (d.pick_live and (now < d.rows_t0 + row_lag * 5 + row_fade or now < d.pick_t0 + xfade_time)) or
         !d.pop.settled() or now < d.prev_t0 + fade_time or now < d.stag_t0 + stag_cap + fade_time or (d.flash_n > 0 and now >= d.flash_t0 + flash_hold and now < d.flash_t0 + flash_hold + flash_time) or
-        d.load.moving(now) or d.sel_in.moving(now) or d.bar.moving(now) or
+        d.load.moving(now) or (d.had_sel and d.sel_in.moving(now)) or d.bar.moving(now) or
         d.sel_out.moving(now) or
         now < d.fresh_t0 + fade_time;
 }
@@ -3003,7 +3003,7 @@ fn loadSettings() void {
     const fonts_changed = old_conf.size != conf.size or old_conf.spacing != conf.spacing or !std.mem.eql(u8, old_conf.font(), conf.font());
     const text_moves = fonts_changed or conf.wrap != old_conf.wrap or conf.zen != old_conf.zen or
         conf.line_numbers != old_conf.line_numbers or conf.sidebar != old_conf.sidebar or
-        conf.sidebar_width != old_conf.sidebar_width or conf.typewriter != old_conf.typewriter or conf.focus != old_conf.focus;
+        conf.sidebar_width != old_conf.sidebar_width or conf.typewriter != old_conf.typewriter;
     buildThemes();
     // A theme or appearance pick crossfades, and so does Late-Night; zen's own change doesn't.
     const crossfade = conf.late_night != old_conf.late_night or conf.look != old_conf.look or (conf.zen == old_conf.zen and !std.meta.eql(old_themes, themes));
