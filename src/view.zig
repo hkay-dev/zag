@@ -3014,6 +3014,9 @@ fn loadSettings() void {
     conf = conf_saved;
     if (conf.late_night) conf.lateNight();
     const fonts_changed = old_conf.size != conf.size or old_conf.spacing != conf.spacing or !std.mem.eql(u8, old_conf.font(), conf.font());
+    const text_moves = fonts_changed or conf.wrap != old_conf.wrap or conf.zen != old_conf.zen or
+        conf.line_numbers != old_conf.line_numbers or conf.sidebar != old_conf.sidebar or
+        conf.sidebar_width != old_conf.sidebar_width or conf.typewriter != old_conf.typewriter or conf.focus != old_conf.focus;
     buildThemes();
     // A theme or appearance pick crossfades, and so does Late-Night; zen's own change doesn't.
     const crossfade = conf.late_night != old_conf.late_night or conf.look != old_conf.look or (conf.zen == old_conf.zen and !std.meta.eql(old_themes, themes));
@@ -3061,14 +3064,16 @@ fn loadSettings() void {
     }
     for (docs.items) |d| {
         d.dark = null;
-        for (0..tabCount(d)) |j| {
-            const pg = tabPage(d, j);
-            pg.sy = pg.sy / old_lh * lh;
+        if (text_moves) {
+            for (0..tabCount(d)) |j| {
+                const pg = tabPage(d, j);
+                pg.sy = pg.sy / old_lh * lh;
+            }
+            d.ys.snap(d.file.sy);
+            d.band_on = false;
+            d.snap = true;
+            reveal(d);
         }
-        d.ys.snap(d.file.sy);
-        d.band_on = false;
-        d.snap = true;
-        reveal(d);
         refresh(d);
     }
 }
@@ -3166,7 +3171,7 @@ pub fn flip(comptime opt: settings.Opt) void {
         std.mem.replaceScalar(u8, chars[0..], '-', '_');
         break :blk chars;
     };
-    store(opt, if (@field(conf, &name)) "false" else "true");
+    store(opt, if (@field(conf_saved, &name)) "false" else "true");
 }
 
 /// What the menu's validation says: Late-Night greys the items it has set.
@@ -3227,8 +3232,6 @@ fn startPrompt(d: *Doc, m: Mode) void {
         },
         .open => {
             d.palette = false;
-            if (quick) |*l| l.deinit();
-            quick = null;
             // Without a folder, quick open lists the folder of the file on screen.
             const r = root orelse blk: {
                 const p = d.file.path orelse {
@@ -3254,7 +3257,7 @@ fn startPrompt(d: *Doc, m: Mode) void {
 /// The names quick open or the palette picks from, while it's open.
 fn listing(d: *const Doc) ?[]const []const u8 {
     return switch (d.mode) {
-        .open => if (quick) |l| l.paths.items else null,
+        .open => if (quick) |*l| l.paths.items else null,
         .command => cmd_names.items,
         else => null,
     };
@@ -3427,7 +3430,7 @@ fn accept(d: *Doc) void {
             if (d.npicks == 0) return;
             d.mode = .edit;
             const it = cmds.items[d.picks[d.pick]].item;
-            msg(void, d.win.view, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("runCommand:"), it, @as(f64, 0) });
+            objc.later(d.win.view, "runCommand:", it, 0);
         },
         .replace => {
             remember(d);
@@ -3758,7 +3761,7 @@ fn refresh(d: *Doc) void {
     trackFocus(d);
     msg(void, d.win.view, "setNeedsDisplay:", .{true});
     if (d.file.path == null) untitledChanged(d);
-    preview.update(d, &themes, isDark(d.win));
+    preview.update(d, themeOf(d.win));
     var edited = false;
     for (docs.items) |o| if (o.win == d.win and o.dirty()) {
         edited = true;
@@ -3905,12 +3908,9 @@ pub const ax = struct {
         const want = buf[0..rel.len];
         // Shutting a folder rebuilds the rows, so look the row up after.
         for (&folds) |*o| if (o.closing) finishFold(o);
-        const i = for (tree.rows.items, 0..) |row, k| {
-            if (std.mem.eql(u8, row.rel, want)) break k;
-        } else return false;
+        const i = tree.rowOf(want) orelse return false;
         if (tree.rows.items[i].dir) {
             startFold(i);
-            for (wins.items) |win| redrawSide(win);
             return true;
         }
         const path = std.fmt.allocPrint(gpa, "{s}/{s}", .{ root orelse return false, want }) catch return false;
@@ -4428,9 +4428,18 @@ fn stuckRows(sy: f64, out: *[max_stuck]usize) usize {
     return n;
 }
 
+/// The pinned folder under `y`, if any.
+fn pinnedAt(w: *const Win, y: f64) ?usize {
+    for (w.stuck[0..w.nstuck], w.stuck_y[0..w.nstuck]) |i, sy| if (y >= sy and y < sy + side_h) return i;
+    return null;
+}
+
 /// The tree row under `y`: a pinned folder, or a row in the list.
 fn sideRow(w: *const Win, y: f64) ?usize {
-    for (w.stuck[0..w.nstuck], w.stuck_y[0..w.nstuck]) |i, sy| if (y >= sy and y < sy + side_h) return i;
+    return pinnedAt(w, y) orelse listRow(w, y);
+}
+
+fn listRow(w: *const Win, y: f64) ?usize {
     if (y < listTop() or y >= msg(Rect, w.view, "bounds", .{}).h - gap) return null;
     // Rows after a folding folder have slid up by how far it's shut, so a
     // click lands on the row it shows, in the tree's own numbering.
@@ -4521,12 +4530,11 @@ fn foldsBusy(now: f64) bool {
 /// gone from the list stops folding.
 fn refindFold(o: *Fold, now: f64) void {
     if (!o.closing and !o.t.moving(now)) return;
-    const rows = tree.rows.items;
-    for (rows, 0..) |row, i| if (std.mem.eql(u8, row.rel, o.rel[0..o.len])) {
+    if (tree.rowOf(o.rel[0..o.len])) |i| {
         o.at = i;
         o.n = tree.end(i) - i - 1;
         return;
-    };
+    }
     o.closing = false;
     o.t.snap(1);
 }
@@ -4535,6 +4543,7 @@ fn refindFold(o: *Fold, now: f64) void {
 /// turns around from where it got to; one still closing keeps going on
 /// its own record.
 fn startFold(i: usize) void {
+    defer for (wins.items) |w| redrawSide(w);
     const now = CACurrentMediaTime();
     var rel_buf: [std.fs.max_path_bytes]u8 = undefined;
     const rel = rel_buf[0..tree.rows.items[i].rel.len];
@@ -4554,9 +4563,7 @@ fn startFold(i: usize) void {
             hit = o;
         };
         finishFold(hit orelse break);
-        at = for (tree.rows.items, 0..) |row, j| {
-            if (std.mem.eql(u8, row.rel, rel)) break j;
-        } else return;
+        at = tree.rowOf(rel) orelse return;
     }
     const shut = tree.isOpen(rel);
     if (folds[0].closing and folds[0].t.moving(now)) folds[1] = folds[0];
@@ -4602,6 +4609,10 @@ fn selFill(ctx: Id, th: *const Theme, dark: bool, key: bool, fade: f64, x: f64, 
     if (contrast) ring(ctx, th.fg, 0.4 * fade, x, y, w, h, radius);
 }
 
+fn rowIconX(depth: u16) f64 {
+    return 26 + f(depth) * 16;
+}
+
 /// One row of the tree with its top at `y`: chevron, icon, name and dot.
 /// `turn` is how far a folding folder's chevron has turned, 0 to 1. The file
 /// on show in the focused card has its name in bold, which fades in as the
@@ -4609,7 +4620,7 @@ fn selFill(ctx: Id, th: *const Theme, dark: bool, key: bool, fade: f64, x: f64, 
 fn drawRow(w: *Win, ctx: Id, th: *const Theme, dark: bool, i: usize, y: f64, turn: ?f64, sh: f64, now: f64) void {
     const row = tree.rows.items[i];
     const s = side_icon;
-    const x = 16 + f(row.depth) * 16;
+    const x = rowIconX(row.depth) - 10;
     if (w.menu_row == i and w.menu_gen == tree_gen) {
         const ma = w.menu_a.at(now);
         if (ma > 0.01) menuMark(ctx, th, ma, side_inset, y, side_w - 2 * side_inset - 2, side_h, side_radius);
@@ -4676,13 +4687,12 @@ fn sideScroll(w: *Win, cur: ?[]const u8, view_h: f64, shut: f64, now: f64) f64 {
     var glide = false;
     if (w.side_find) {
         w.side_find = false;
-        if (cur) |c| for (rows, 0..) |row, i| if (std.mem.eql(u8, row.rel, c)) {
+        if (cur) |c| if (tree.rowOf(c)) |i| {
             const y = f(i) * side_h;
             if (y < w.side_y or y + side_h > w.side_y + view_h) {
                 w.side_y = y - view_h / 3;
                 glide = w.side_drawn;
             }
-            break;
         };
     }
     w.side_drawn = true;
@@ -4722,12 +4732,8 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
 
     objc.CGContextSaveGState(ctx);
     objc.CGContextClipToRect(ctx, .{ .y = top_h - 6, .w = side_w - 2, .h = full_h - top_h + 6 });
-    if (side_head == null or side_head_room != side_w - 32 - 14) {
-        if (side_head) |l| objc.CFRelease(l);
-        side_head_room = side_w - 32 - 14;
-        side_head = uiLine(std.fs.path.basename(root.?), name_font, side_head_room);
-    }
-    const hw = drawLineA(ctx, side_head, th.fg, 1, 16, top_h + side_base);
+    if (side_head.full == null) side_head.full = uiLine(std.fs.path.basename(root.?), name_font, 1e9);
+    const hw = drawLineA(ctx, sideFit(&side_head, name_font, side_w - 46), th.fg, 1, 16, top_h + side_base);
     drawIcon(icon(.parents, dark, th), 16 + hw + 5, top_h + (side_h - 12) / 2, 12);
 
     objc.CGContextClipToRect(ctx, .{ .y = lt, .w = side_w - 2, .h = view_h });
@@ -4750,11 +4756,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
     if (w.sel.gen != tree_gen or w.sel_id != w.focus.file.id) {
         w.sel.gen = tree_gen;
         w.sel_id = w.focus.file.id;
-        w.sel.row = null;
-        if (cur) |c| for (rows, 0..) |row, i| if (std.mem.eql(u8, row.rel, c)) {
-            w.sel.row = i;
-            break;
-        };
+        w.sel.row = if (cur) |c| tree.rowOf(c) else null;
     }
     if (w.sel.row) |i| {
         const ty = f(i) * side_h - shiftOf(vs[0..vn], i);
@@ -4858,7 +4860,7 @@ fn fadeList(ctx: Id, bg: Rgb, a: f64, end: f64, h: f64) void {
 /// The sidebar's text as CoreText lines in the system font, made on first
 /// draw: the folder's name, then one per tree row. Dropped when the tree or
 /// the font changes; drawing one costs no layout.
-var side_head: Id = null;
+var side_head: SideLine = .{};
 /// A row's whole name and its width, made once, and the name cut to the room
 /// it last had when it's wider than that: a width change remakes only a cut
 /// line.
@@ -4884,8 +4886,6 @@ const Mark = struct {
 const Bold = struct { line: SideLine = .{}, row: usize = 0, gen: u32 = 0 };
 
 var side_lines: std.ArrayList(SideLine) = .empty;
-/// The room `side_head` was cut to.
-var side_head_room: f64 = 0;
 /// The unsaved dot after a file's name, one line shared by every row.
 var side_dot: Id = null;
 
@@ -4895,10 +4895,7 @@ fn dropSideLines() void {
     for (wins.items) |w| {
         for (&w.bold) |*b| freeSideLine(&b.line);
     }
-    if (side_head) |l| {
-        objc.CFRelease(l);
-        side_head = null;
-    }
+    freeSideLine(&side_head);
     for (side_lines.items) |*l| freeSideLine(l);
     side_lines.clearRetainingCapacity();
 }
@@ -5065,12 +5062,11 @@ fn sideClick(w: *Win, p: Point, flags: usize) void {
     const row = tree.rows.items[i];
     if (row.dir) {
         startFold(i);
-        for (wins.items) |win| redrawSide(win);
         return;
     }
     // A file opens when the mouse comes up, unless it's dragged to a card.
     const path = std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ root.?, row.rel }, 0) catch return;
-    const ix = 16 + f(row.depth) * 16 + 10;
+    const ix = rowIconX(row.depth);
     w.tdrag = .{ .from = null, .file = path, .cmd = flags & objc.cmd_key != 0, .down = p, .at = p, .grab = p.x - ix + tab_pad, .row = i };
 }
 
@@ -5082,6 +5078,10 @@ fn isDark(w: *Win) bool {
     const dk = std.mem.indexOf(u8, name, "Dark") != null;
     w.dark = dk;
     return dk;
+}
+
+fn themeOf(w: *Win) *const Theme {
+    return &themes[@intFromBool(isDark(w))];
 }
 
 const VRow = struct { line: usize, seg: Seg, kinds: ?[]const syntax.Kind = null, reach: u8 = 0 };
@@ -5234,7 +5234,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     if (d.dark != dark) {
         d.dark = dark;
         msg(void, d.caret, "setBackgroundColor:", .{msg(Id, nscolor(th.caret), "CGColor", .{})});
-        preview.update(d, &themes, dark);
+        preview.update(d, th);
     }
     const card = cardRect(d);
     const zt = std.math.clamp(d.win.z.x, 0, 1);
@@ -6990,12 +6990,7 @@ fn hoverNow(w: *Win) void {
 /// while something's dragged.
 fn sideHover(w: *Win, p: Point) void {
     var row: ?usize = null;
-    if (sideShown(w) and p.x < side_w - edge_grab and p.y >= listTop() and w.tdrag == null) {
-        const pinned = for (w.stuck_y[0..w.nstuck]) |y| {
-            if (p.y >= y and p.y < y + side_h) break true;
-        } else false;
-        if (!pinned) row = sideRow(w, p.y);
-    }
+    if (sideShown(w) and p.x < side_w - edge_grab and p.y >= listTop() and w.tdrag == null and pinnedAt(w, p.y) == null) row = listRow(w, p.y);
     if (row == w.hov.row and w.hov.gen == tree_gen) return;
     w.hov.row = row;
     w.hov.gen = tree_gen;
@@ -7173,7 +7168,7 @@ pub fn contrastChanged(_: Id, _: Sel, _: Id) callconv(.c) void {
     buildThemes();
     dropIcons();
     for (wins.items) |w| msg(void, w.view, "setNeedsDisplay:", .{true});
-    for (docs.items) |d| preview.update(d, &themes, isDark(d.win));
+    for (docs.items) |d| preview.update(d, themeOf(d.win));
 }
 
 extern const NSPasteboardTypeFileURL: Id;
@@ -7549,7 +7544,7 @@ fn closeActive(d: *Doc) void {
     closeTab(d, d.at);
 }
 
-fn previewText(id: u32) ?[]const u8 {
+pub fn previewText(id: u32) ?[]const u8 {
     for (docs.items) |d| {
         if (d.closing) continue;
         for (0..tabCount(d)) |j| {
@@ -7561,7 +7556,7 @@ fn previewText(id: u32) ?[]const u8 {
 }
 
 fn markdownPreview(d: *Doc) void {
-    preview.toggle(d, &previewText, &themes[@intFromBool(isDark(d.win))]);
+    preview.toggle(d, themeOf(d.win));
 }
 
 fn comment(d: *Doc) void {

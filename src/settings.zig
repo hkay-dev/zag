@@ -345,7 +345,7 @@ pub fn parse(text: []const u8) Settings {
     while (nextEntry(&it)) |e| {
         const key = e.key;
         const val = e.val;
-        switch (optOf(key) orelse {
+        switch (enumOf(Opt, key) orelse {
             const dot = std.mem.indexOfScalar(u8, key, '.') orelse continue;
             const theme = if (std.mem.eql(u8, key[0..dot], "light")) &s.light else if (std.mem.eql(u8, key[0..dot], "dark")) &s.dark else continue;
             const c = parseHex(val) orelse continue;
@@ -402,16 +402,8 @@ comptime {
     for (options, 0..) |row, i| std.debug.assert(@intFromEnum(row.opt) == i);
 }
 
-fn optOf(key: []const u8) ?Opt {
-    for (options) |row| if (std.mem.eql(u8, key, @tagName(row.opt))) return row.opt;
-    return null;
-}
-
 fn enumOf(comptime E: type, s: []const u8) ?E {
-    const info = @typeInfo(E).@"enum";
-    inline for (info.field_names, info.field_values) |name, value| {
-        if (std.mem.eql(u8, s, name)) return @enumFromInt(value);
-    }
+    for (@typeInfo(E).@"enum".field_names, std.enums.values(E)) |name, v| if (std.mem.eql(u8, s, name)) return v;
     return null;
 }
 

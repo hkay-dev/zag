@@ -69,10 +69,15 @@ pub const Tree = struct {
         return opened;
     }
 
+    /// The row for `rel`, when it's on the list.
+    pub fn rowOf(t: *const Tree, rel: []const u8) ?usize {
+        for (t.rows.items, 0..) |r, i| if (std.mem.eql(u8, r.rel, rel)) return i;
+        return null;
+    }
+
     /// Whether a row for `rel` is on the list.
     pub fn has(t: *const Tree, rel: []const u8) bool {
-        for (t.rows.items) |r| if (std.mem.eql(u8, r.rel, rel)) return true;
-        return false;
+        return t.rowOf(rel) != null;
     }
 
     /// The row after `i` and all of its descendants.

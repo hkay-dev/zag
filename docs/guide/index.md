@@ -422,6 +422,10 @@ file, so a change you save elsewhere applies right away, even while Zag is in th
 you never switch to it. Every setting is in the file: the first time Zag starts with a file that
 lacks one, it adds that line at the end with its note, and it leaves your own lines and notes alone.
 
+Changing a theme, Appearance or Auto-Close Brackets keeps your scroll position, even when the
+caret is off screen. Changes to the font, text size, line height, Soft Wrap, Zen Mode, Line
+Numbers, sidebar visibility or width, Typewriter Scrolling or Focus bring the caret back into view.
+
 ```text
 # A font's PostScript name, like Menlo-Regular, or system for SF Mono.
 font = "system"

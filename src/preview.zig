@@ -17,7 +17,6 @@ var fade = false;
 /// The doc and edit count last scheduled or rendered.
 var seen_id: u32 = std.math.maxInt(u32);
 var seen_changes: u64 = 0;
-var text_of: *const fn (u32) ?[]const u8 = undefined;
 /// The text last rendered, kept so a theme change still repaints after its tab closes.
 var source: Id = null;
 /// Fonts and paragraph styles don't depend on the theme, so each is made once and kept.
@@ -73,27 +72,22 @@ fn resized(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     const w = msg(objc.Rect, text, "frame", .{}).w;
     msg(void, text, "setTextContainerInset:", .{objc.Point{ .x = @max(28, @floor((w - column) / 2)), .y = 24 }});
 }
-/// `themes` are the ones the editor draws with (light, dark): zen's grey and Increase Contrast included.
-pub fn update(d: anytype, themes: *const [2]settings.Theme, dark: bool) void {
+/// `th` is the theme the editor draws with: zen's grey and Increase Contrast included.
+pub fn update(d: anytype, th: *const settings.Theme) void {
     if (owner != d.win.window) return;
     // A caret move or scroll changes nothing: `changes` counts every edit, undo and redo.
-    const unchanged = seen_id == d.file.id and seen_changes == d.file.ed.buf.changes;
-    const th = &themes[@intFromBool(dark)];
+    const changed = (seen_id != d.file.id or seen_changes != d.file.ed.buf.changes) and std.mem.eql(u8, objc.utf8(path), d.file.path orelse "");
     const same_theme = std.meta.eql(theme, th.*);
-    if (unchanged and same_theme) return;
-    const active = unchanged or std.mem.eql(u8, objc.utf8(path), d.file.path orelse "");
-    var edited = !same_theme;
-    if (active and !unchanged) {
+    if (!changed and same_theme) return;
+    if (changed) {
         seen_id = d.file.id;
         seen_changes = d.file.ed.buf.changes;
-        edited = true;
     }
-    if (!edited) return;
     fade = fade or !same_theme;
     theme = th.*;
     objc.later(target, "render:", null, 0.15);
 }
-pub fn toggle(d: anytype, getter: *const fn (u32) ?[]const u8, th: *const settings.Theme) void {
+pub fn toggle(d: anytype, th: *const settings.Theme) void {
     if (window != null) { msg(void, window, "close", .{}); return; }
     if (target == null) {
         const c = objc.ClassBuilder.begin("NSObject", "ZePreview");
@@ -108,7 +102,6 @@ pub fn toggle(d: anytype, getter: *const fn (u32) ?[]const u8, th: *const settin
     seen_id = d.file.id;
     seen_changes = d.file.ed.buf.changes;
     theme = th.*;
-    text_of = getter;
     const frame: objc.Rect = .{ .w = 620, .h = 700 };
     window = msg(Id, msg(Id, objc.class("NSWindow"), "alloc", .{}), "initWithContentRect:styleMask:backing:defer:", .{ frame, @as(usize, 1 | 2 | 4 | 8), @as(usize, 2), false });
     retitle();
@@ -165,7 +158,7 @@ fn style(flags: usize) Id {
     return slot.*;
 }
 fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
-    if (text_of(seen_id)) |bytes| {
+    if (view.previewText(seen_id)) |bytes| {
         msg(void, source, "release", .{});
         source = msg(Id, objc.str(bytes), "retain", .{});
     }
