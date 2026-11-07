@@ -195,7 +195,7 @@ fn rightEdge(d: *const Doc) f64 {
 /// From the card's left edge to the text. Zen pads it so an 80-column page
 /// sits in the middle of the card.
 fn padL(d: *const Doc) f64 {
-    const z = std.math.clamp(d.win.z.x, 0, 1);
+    const z = zen(d.win);
     return pad_x + (@max(pad_x, (d.size.x - 80 * cw) / 2 - gap) - pad_x) * z + d.gw;
 }
 
@@ -227,7 +227,11 @@ fn bottom(d: *const Doc) f64 {
 /// The status strip along the card's bottom, easing away with Zen.
 const strip_h = 22.0;
 fn stripH(d: *const Doc) f64 {
-    return strip_h * (1 - std.math.clamp(d.win.z.x, 0, 1));
+    return strip_h * (1 - zen(d.win));
+}
+
+fn zen(w: *const Win) f64 {
+    return std.math.clamp(w.z.x, 0, 1);
 }
 
 /// The window's own color around the card: the theme's background, a
@@ -285,22 +289,19 @@ var ascii: [2][95]u16 = undefined;
 const Fallback = struct { font: Id, glyph: u16 };
 const FallbackEntry = struct { cp: u21, fb: Fallback };
 var fallbacks: std.ArrayList(FallbackEntry) = .empty;
-/// The sidebar's fonts: the system font for file names, a heavier one for
-/// the folder's name and the card's header, and a small one for the line
-/// above the folder. Rows are `side_h` tall, with the baseline that centers
-/// the text in one.
+/// The sidebar's fonts: the system font for file names and a heavier one
+/// for the folder's name and the card's header. Rows are `side_h` tall,
+/// with the baseline that centers the text in one.
 var side_font: Id = null;
 var name_font: Id = null;
-var head_font: Id = null;
 var side_h: f64 = 30;
 var side_base: f64 = 19;
 /// From the header's middle line down to the baseline of its text.
 var name_off: f64 = 4;
-/// The header's fonts: tab names regular, the active one medium, with every
-/// tab as wide as its medium name so switching never moves a tab; the
-/// folder after a lone tab's name small and regular, `path_off` above its
-/// baseline like `name_off`.
-var tab_font: Id = null;
+/// The header's fonts: tab names regular in `side_font`, the active one
+/// medium, with every tab as wide as its medium name so switching never
+/// moves a tab; the folder after a lone tab's name small and regular,
+/// `path_off` above its baseline like `name_off`.
 var tab_bold: Id = null;
 var path_font: Id = null;
 var path_off: f64 = 3;
@@ -314,7 +315,7 @@ fn setFont() void {
     dropAttrs();
     for (fallbacks.items) |e| if (e.fb.font != font) objc.CFRelease(e.fb.font.?);
     fallbacks.clearRetainingCapacity();
-    for ([_]*Id{ &font, &bold, &side_font, &name_font, &head_font, &tab_font, &tab_bold, &path_font }) |p| if (p.* != null) msg(void, p.*, "release", .{});
+    for ([_]*Id{ &font, &bold, &side_font, &name_font, &tab_bold, &path_font }) |p| if (p.* != null) msg(void, p.*, "release", .{});
     const NSFont = objc.class("NSFont");
     font = null;
     bold = null;
@@ -338,20 +339,16 @@ fn setFont() void {
     _ = objc.CTFontGetGlyphsForCharacters(bold, &chars, &ascii[1], 95);
     const zero = [1]u16{ascii[0]['0' - 0x20]};
     cw = objc.CTFontGetAdvancesForGlyphs(font, 0, &zero, null, 1);
-    const asc = objc.CTFontGetAscent(font);
-    const desc = objc.CTFontGetDescent(font);
     lh = @round(conf.size * conf.spacing);
-    baseline = @round((lh - asc - desc) / 2 + asc);
+    baseline = baseIn(font, lh);
     side_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:", .{conf.size - 1}), "retain", .{});
     name_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 1, @as(f64, 0.3) }), "retain", .{});
-    head_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 3, @as(f64, 0.3) }), "retain", .{});
     side_h = @round((conf.size - 1) * 2.3);
-    side_base = @round((side_h - objc.CTFontGetAscent(side_font) - objc.CTFontGetDescent(side_font)) / 2 + objc.CTFontGetAscent(side_font));
-    name_off = (objc.CTFontGetAscent(name_font) - objc.CTFontGetDescent(name_font)) / 2;
-    tab_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 1, @as(f64, 0) }), "retain", .{});
+    side_base = baseIn(side_font, side_h);
+    name_off = midOff(name_font);
     tab_bold = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 1, @as(f64, 0.23) }), "retain", .{});
     path_font = msg(Id, msg(Id, NSFont, "systemFontOfSize:weight:", .{ conf.size - 3, @as(f64, 0) }), "retain", .{});
-    path_off = (objc.CTFontGetAscent(path_font) - objc.CTFontGetDescent(path_font)) / 2;
+    path_off = midOff(path_font);
     dropSideLines();
     for (docs.items) |d| {
         dropHead(d);
@@ -452,7 +449,7 @@ const Ink = struct {
                     const at = k.offset + i;
                     if (at < k.selected[0] or at >= k.selected[1]) {
                         const a = fo.dim(at >= fo.new[0] and at < fo.new[1], at >= fo.old[0] and at < fo.old[1]);
-                        for (&paint, th.bg) |*v, bg| v.* = bg + (v.* - bg) * a;
+                        paint = mixRgb(th.bg, paint, a);
                     }
                 }
                 k.put(glyph(c.cp, kind == .keyword), paint, x + f(rel - skip) * cw, y);
@@ -500,27 +497,22 @@ fn hair() f64 {
     return dev_px;
 }
 
-extern fn CGContextMoveToPoint(ctx: Id, x: f64, y: f64) void;
-extern fn CGContextAddLineToPoint(ctx: Id, x: f64, y: f64) void;
-extern fn CGContextAddCurveToPoint(ctx: Id, c1x: f64, c1y: f64, c2x: f64, c2y: f64, x: f64, y: f64) void;
-extern fn CGContextClosePath(ctx: Id) void;
-
 /// Adds a rounded rectangle to the context's path, with no path object made.
 fn roundPath(ctx: Id, x: f64, y: f64, w: f64, h: f64, radius: f64) void {
     const r = @max(0, @min(radius, w / 2, h / 2));
     const o = r * 0.4477152502; // a quarter circle's bezier handle, from the corner
     const x1 = x + w;
     const y1 = y + h;
-    CGContextMoveToPoint(ctx, x + r, y);
-    CGContextAddLineToPoint(ctx, x1 - r, y);
-    CGContextAddCurveToPoint(ctx, x1 - o, y, x1, y + o, x1, y + r);
-    CGContextAddLineToPoint(ctx, x1, y1 - r);
-    CGContextAddCurveToPoint(ctx, x1, y1 - o, x1 - o, y1, x1 - r, y1);
-    CGContextAddLineToPoint(ctx, x + r, y1);
-    CGContextAddCurveToPoint(ctx, x + o, y1, x, y1 - o, x, y1 - r);
-    CGContextAddLineToPoint(ctx, x, y + r);
-    CGContextAddCurveToPoint(ctx, x, y + o, x + o, y, x + r, y);
-    CGContextClosePath(ctx);
+    objc.CGContextMoveToPoint(ctx, x + r, y);
+    objc.CGContextAddLineToPoint(ctx, x1 - r, y);
+    objc.CGContextAddCurveToPoint(ctx, x1 - o, y, x1, y + o, x1, y + r);
+    objc.CGContextAddLineToPoint(ctx, x1, y1 - r);
+    objc.CGContextAddCurveToPoint(ctx, x1, y1 - o, x1 - o, y1, x1 - r, y1);
+    objc.CGContextAddLineToPoint(ctx, x + r, y1);
+    objc.CGContextAddCurveToPoint(ctx, x + o, y1, x, y1 - o, x, y1 - r);
+    objc.CGContextAddLineToPoint(ctx, x, y + r);
+    objc.CGContextAddCurveToPoint(ctx, x, y + o, x + o, y, x + r, y);
+    objc.CGContextClosePath(ctx);
 }
 
 /// A rounded rectangle: the card, the sidebar's selection, the icon tiles.
@@ -713,8 +705,8 @@ const Spring = struct {
     v: f64 = 0,
     to: f64 = 0,
     t: f64 = 0,
-    k: f64 = 300,
-    c: f64 = 24,
+    k: f64,
+    c: f64,
     /// Close enough to call it settled.
     eps: f64 = 0.002,
 
@@ -1010,8 +1002,7 @@ fn pillOver(k: *Ink, th: *const Theme, dark: bool, l: []const u8, ls: usize, sg:
         objc.CGContextTranslateCTM(ctx, -cx, -cy);
     }
     pill(ctx, if (dark) find_dark else find_light, a, sp.x0 - 2, y + 1, sp.x1 - sp.x0 + 4, lh - 2, 3);
-    var ink: Rgb = undefined;
-    for (&ink, th.fg, find_ink) |*c, fg, dk| c.* = fg + (dk - fg) * a;
+    const ink = mixRgb(th.fg, find_ink, a);
     const was = k.focus;
     k.focus = null;
     _ = k.run(l, sp.lo, sp.hi, sp.col, null, th, ink, sp.x0, y + baseline, 0, 1 << 16);
@@ -1033,11 +1024,6 @@ fn haptic(kind: enum { alignment, level }) void {
     msg(void, p, "performFeedbackPattern:performanceTime:", .{ pattern, @as(usize, 2) });
 }
 
-/// How long the file on show fades in: a fresh one rises slower than a tab switch.
-fn loadDur(d: *const Doc) f64 {
-    return if (d.file.rise) load_time else fade_time;
-}
-
 /// True while scrolling, the line band, a selection fade or the quick open
 /// list still has frames to draw.
 fn scenery(d: *const Doc, now: f64) bool {
@@ -1045,10 +1031,10 @@ fn scenery(d: *const Doc, now: f64) bool {
         d.inked.moving(now) or
         d.gut.moving(now) or
         d.prompt_t.moving(now) or d.pbar.moving(now) or now < d.shake_t0 + shake_time or now < d.card_shake_t0 + shake_time or d.hint.moving(now) or
-        d.plus_t.moving(now) or !d.pick_s.settled() or (std.math.clamp(d.win.z.x, 0, 1) < 0.999 and tabsMoving(d, now)) or
+        d.plus_t.moving(now) or !d.pick_s.settled() or (zen(d.win) < 0.999 and tabsMoving(d, now)) or
         (d.pick_live and (now < d.rows_t0 + row_lag * 5 + row_fade or now < d.pick_t0 + xfade_time)) or
         !d.pop.settled() or now < d.prev_t0 + fade_time or now < d.stag_t0 + stag_cap + fade_time or (d.flash_n > 0 and now >= d.flash_t0 + flash_hold and now < d.flash_t0 + flash_hold + flash_time) or
-        now < d.load_t + loadDur(d) or (d.had_sel and now < d.sel_t0 + fade_time) or d.bar.moving(now) or
+        d.load.moving(now) or d.sel_in.moving(now) or d.bar.moving(now) or
         d.sel_out.moving(now) or
         now < d.fresh_t0 + fade_time;
 }
@@ -1261,7 +1247,7 @@ const Doc = struct {
     gut: Tween = .{ .dur = tab_time },
     gw: f64 = 0,
     had_sel: bool = false,
-    sel_t0: f64 = 0,
+    sel_in: Tween = .{ .dur = fade_time, .from = 1, .to = 1 },
     /// The selection as last drawn and the buffer's change count then: when the
     /// selection collapses with the text untouched, `sel_last` fades out on
     /// `sel_out` (1 to 0) instead of cutting.
@@ -1383,10 +1369,9 @@ const Doc = struct {
     shown: bool = false,
     /// Place the caret without gliding (mouse drags).
     snap: bool = false,
-    /// When the card's file was last swapped in, for its text to fade in:
-    /// rising when it was just read from disk, else a plain fade. The caret
-    /// fades in with it.
-    load_t: f64 = -1,
+    /// The card's fade-in: rising when its file was just read from disk, else
+    /// a plain fade. The caret fades in with it.
+    load: Tween = .{ .dur = load_time, .from = 1, .to = 1 },
     caret_fade: bool = false,
     /// An empty card's hint: its opacity, and since when the card has
     /// been blank (-1 when it isn't).
@@ -1516,7 +1501,7 @@ const Win = struct {
     fly: ?Fly = null,
     /// Zen blended in, 0 to 1: the text's margin, the header and the
     /// traffic lights follow it. And the lights' alpha as last set.
-    z: Spring = .{ .k = 200, .c = 28, .eps = 0.002 },
+    z: Spring = .{ .k = 200, .c = 28 },
     lights_a: f64 = 1,
     /// The lights peeking back in Zen: 1 while the mouse is in the window's
     /// top-left corner and for a hold after it leaves (`peek_out`).
@@ -1786,7 +1771,9 @@ fn install(d: *Doc, pg: Page) void {
     d.pop.snap(0);
     d.flash_n = 0;
     d.gut.snap(gutCols(d));
-    d.load_t = CACurrentMediaTime();
+    const now = CACurrentMediaTime();
+    d.load.snap(if (pg.rise) 0 else swap_from);
+    d.load.aimOver(1, if (pg.rise) load_time else fade_time, now);
     d.caret_fade = true;
     var rebuilt = false;
     if (d.file.path) |p| if (relOf(p)) |rel| {
@@ -4169,9 +4156,7 @@ fn headLine(d: *const Doc, room: f64) Head {
     if (n == 0) return head;
     std.mem.reverse([]const u8, parts[0..n]);
     const sep = "    ";
-    const sep_line = uiLine(sep, path_font, 1e9);
-    const sep_w = lineW(sep_line);
-    if (sep_line) |l| objc.CFRelease(l);
+    const sep_w = textW(sep, path_font);
     // Drop folders from the start until the rest fits, down to the last one.
     var from: usize = if (dropped) 1 else 0;
     var tbuf: [std.fs.max_path_bytes + 64]u8 = undefined;
@@ -4211,9 +4196,7 @@ fn headLine(d: *const Doc, room: f64) Head {
         const lw = lineW(line);
         head.lw = lw;
         for (marks[0..m]) |at| {
-            const pre = uiLine(text[0..at], path_font, 1e9);
-            const x = lineW(pre);
-            if (pre) |l| objc.CFRelease(l);
+            const x = textW(text[0..at], path_font);
             if (x + sep_w > lw) break;
             head.marks[head.n] = x + sep_w / 2;
             head.n += 1;
@@ -4257,18 +4240,22 @@ fn panelRows(d: *const Doc) usize {
     return @max(d.npicks, 1);
 }
 
-/// The row fonts, made on first use.
+/// The fixed-size row fonts, made once at launch.
 fn panelFonts() void {
-    if (panel_font != null) return;
     panel_font = msg(Id, msg(Id, objc.class("NSFont"), "systemFontOfSize:", .{@as(f64, 13)}), "retain", .{});
     panel_small = msg(Id, msg(Id, objc.class("NSFont"), "systemFontOfSize:", .{@as(f64, 12)}), "retain", .{});
-    panel_base = rowBase(panel_font);
-    panel_small_base = rowBase(panel_small);
+    panel_base = baseIn(panel_font, prow);
+    panel_small_base = baseIn(panel_small, prow);
 }
 
 /// The baseline of text in `fnt`, centered in a row's height from its top.
-fn rowBase(fnt: Id) f64 {
-    return @round((prow - objc.CTFontGetAscent(fnt) - objc.CTFontGetDescent(fnt)) / 2 + objc.CTFontGetAscent(fnt));
+fn baseIn(fnt: Id, h: f64) f64 {
+    const asc = objc.CTFontGetAscent(fnt);
+    return @round((h - asc - objc.CTFontGetDescent(fnt)) / 2 + asc);
+}
+
+fn midOff(fnt: Id) f64 {
+    return (objc.CTFontGetAscent(fnt) - objc.CTFontGetDescent(fnt)) / 2;
 }
 
 /// Draws `s` in `fnt` with its left edge at `x`, cut to `room`, vertically
@@ -4309,7 +4296,6 @@ fn rowLine(s: []const u8, fnt: Id, room: f64) *const RowLine {
 /// with its top at `top` (pushed down by `rise`), drawn at opacity `a`.
 fn panelNone(ctx: Id, th: *const Theme, left: f64, top: f64, a: f64, rise: f64) void {
     if (a < 0.01) return;
-    panelFonts();
     _ = rowText(ctx, "No matches", panel_font, mixRgb(th.panel, th.muted, a), left, top + rise, 1e5);
 }
 
@@ -4318,7 +4304,6 @@ fn panelNone(ctx: Id, th: *const Theme, left: f64, top: f64, a: f64, rise: f64) 
 /// drawn at opacity `a`.
 fn panelRow(ctx: Id, d: *const Doc, th: *const Theme, dark: bool, p: usize, left: f64, right: f64, top: f64, a: f64, rise: f64) void {
     if (a < 0.01) return;
-    panelFonts();
     const y = top + rise;
     const ink = mixRgb(th.panel, th.fg, a);
     const dim = mixRgb(th.panel, th.muted, a);
@@ -5037,6 +5022,12 @@ fn lineW(line: Id) f64 {
     return if (line == null) 0 else objc.CTLineGetTypographicBounds(line, null, null, null);
 }
 
+fn textW(s: []const u8, fnt: Id) f64 {
+    const line = uiLine(s, fnt, 1e9);
+    defer if (line) |l| objc.CFRelease(l);
+    return lineW(line);
+}
+
 /// Draws a line without measuring it when its width is known or unused.
 fn paintLine(ctx: Id, line: Id, c: Rgb, a: f64, x: f64, y: f64) void {
     if (line == null) return;
@@ -5091,7 +5082,7 @@ fn cardRect(d: *const Doc) Rect {
 }
 
 fn cardShade(d: *const Doc, ctx: Id, dark: bool, now: f64) void {
-    const zen_k = 1 - std.math.clamp(d.win.z.x, 0, 1);
+    const zen_k = 1 - zen(d.win);
     const card = cardRect(d);
     if (zen_k > 0) cardShadow(ctx, dark, zen_k * (0.5 + 0.5 * d.win.key_a.at(now)), card.x, card.y, card.w, card.h);
 }
@@ -5109,7 +5100,6 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     // A stretched sidebar edge springs back to its limit.
     if (side_stretch.x != 0 or side_stretch.v != 0) {
         _ = side_stretch.step(now);
-        if (side_stretch.to == 0 and side_stretch.settled()) side_stretch.snap(0);
         side_w = @round(side_rest + side_stretch.x);
     }
     // A closing folder shuts once its rows have folded away.
@@ -5130,7 +5120,7 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     // Zen eases in: the lights follow it, the margin and header in drawPane.
     _ = w.z.step(now);
     w.peek.aim(if (full or w.peek_in or now < w.peek_out) 1 else 0, now);
-    const la = 1 - std.math.clamp(w.z.x, 0, 1);
+    const la = 1 - zen(w);
     const lit = @max(la, w.peek.at(now));
     if (lit != w.lights_a) {
         setLights(w, lit);
@@ -5227,6 +5217,51 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     if (w.busy or gliding) msg(void, w.link, "setPaused:", .{false});
 }
 
+const FindMarks = struct { cur: ?[2]usize, pop: f64, prev_a: f64, pills: []const u8, sensitive: bool, pills_a: f64 };
+
+/// Settles the find indicator for this frame: the current match (popping on
+/// arrival), the one fading out, and what the other pills match.
+fn findMarks(d: *Doc, s: [2]usize, finding: bool, now: f64) FindMarks {
+    var cur_m: ?[2]usize = null;
+    if (finding) {
+        const want = d.prompt.items;
+        if (s[1] - s[0] == want.len and editor.matchAt(d.file.ed.text(), s[0], want, editor.caseSensitive(want))) cur_m = s;
+    } else if (d.mode == .edit and s[0] != s[1]) {
+        const kept = if (d.cur_m) |h| h[0] == s[0] and h[1] == s[1] else false;
+        if (d.jumped or kept) cur_m = s;
+    }
+    const jumped = d.jumped;
+    d.jumped = false;
+    if (cur_m) |c| {
+        // It pops when it first appears and on every jump to a match.
+        if (d.cur_m == null or jumped) {
+            if (d.pop.settled()) d.pop.t = now;
+            d.pop.v = pop_kick;
+        }
+        if (d.cur_m) |h| if (jumped and h[0] != c[0]) {
+            d.prev_m = h;
+            d.prev_t0 = now;
+        };
+    } else if (d.cur_m) |h| {
+        d.prev_m = h;
+        d.prev_t0 = now;
+    }
+    d.cur_m = cur_m;
+    const pop = 1 + (if (d.pop.settled()) 0 else d.pop.step(now));
+    const prev_a = std.math.clamp(1 - (now - d.prev_t0) / fade_time, 0, 1);
+    // Opening find on prefilled text starts the matches' staggered fade-in.
+    if (!finding) {
+        d.find_seen = false;
+    } else if (!d.find_seen) {
+        d.find_seen = true;
+        if (d.fresh) d.stag_t0 = now;
+    }
+    // The other matches' pills stay while the find bar slides away, fading with it.
+    const closing_find = d.mode == .edit and d.held_id == d.file.id and (d.held_mode == .find or d.held_mode == .replace) and d.pbar.at(now) > 0.002;
+    const pills: []const u8 = if (finding) d.prompt.items else if (closing_find) d.held.items else "";
+    return .{ .cur = cur_m, .pop = pop, .prev_a = prev_a, .pills = pills, .sensitive = editor.caseSensitive(pills), .pills_a = if (finding) 1 else d.pbar.at(now) };
+}
+
 /// Draws a card in its pane's coordinates: the text, the prompt line and
 /// the header. `win_key` says whether its window is key, and `many`
 /// whether the window has other cards, which lights the focused one's ring.
@@ -5237,7 +5272,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         preview.update(d, th);
     }
     const card = cardRect(d);
-    const zt = std.math.clamp(d.win.z.x, 0, 1);
+    const zt = zen(d.win);
     const zen_k = 1 - zt;
     const focused = d.win.focus == d;
     // The caret only shows in the key window's focused card.
@@ -5322,15 +5357,13 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
 
     // A file freshly read from disk fades in, rising a few points into
     // place. A tab switch just fades from a little dim, with no rise.
-    const load = std.math.clamp((now - d.load_t) / loadDur(d), 0, 1);
-    const loaded = 1 - (1 - load) * (1 - load) * (1 - load);
-    const base_a: f64 = if (loaded >= 1) 1 else if (d.file.rise) loaded else swap_from + (1 - swap_from) * loaded;
+    const base_a = d.load.at(now);
     objc.CGContextSaveGState(ctx);
     // Text stops above the status strip rather than running under it.
     objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = card.w, .h = card.h - stripH(d) * (1 - d.pbar.at(now)) });
-    if (loaded < 1) {
+    if (base_a < 1) {
         objc.CGContextSetAlpha(ctx, base_a);
-        if (d.file.rise) objc.CGContextTranslateCTM(ctx, 0, (1 - loaded) * load_rise);
+        if (d.file.rise) objc.CGContextTranslateCTM(ctx, 0, (1 - base_a) * load_rise);
     }
 
     // The caret line's band slides after the caret, and stays on its line
@@ -5347,10 +5380,10 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // A new selection fades in.
     const has_sel = s[0] != s[1];
     const was_sel = d.had_sel;
-    if (has_sel and !was_sel) d.sel_t0 = now;
+    if (has_sel and !was_sel) d.sel_in.snap(0);
     d.had_sel = has_sel;
-    const fade = std.math.clamp((now - d.sel_t0) / fade_time, 0, 1);
-    const sel_a = 1 - (1 - fade) * (1 - fade) * (1 - fade);
+    if (has_sel) d.sel_in.aim(1, now);
+    const sel_a = d.sel_in.at(now);
     if (d.file.ed.buf.changes != d.sel_chg) d.sel_out.snap(0);
     // A selection that collapses with the text untouched (a click, an arrow, Escape)
     // fades out where it was; an edit under it cuts, and a new selection replaces it.
@@ -5364,49 +5397,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     d.sel_chg = d.file.ed.buf.changes;
     const out_a = d.sel_out.at(now);
 
-    // The find indicator marks the current match: the selection while it is a
-    // match of the search, or the selection a find jump just made.
-    var cur_m: ?[2]usize = null;
-    if (finding) {
-        const want = d.prompt.items;
-        if (s[1] - s[0] == want.len and editor.matchAt(d.file.ed.text(), s[0], want, editor.caseSensitive(want))) cur_m = s;
-    } else if (d.mode == .edit and has_sel) {
-        const kept = if (d.cur_m) |h| h[0] == s[0] and h[1] == s[1] else false;
-        if (d.jumped or kept) cur_m = s;
-    }
-    const jumped = d.jumped;
-    d.jumped = false;
-    if (cur_m) |c| {
-        // It pops when it first appears and on every jump to a match.
-        if (d.cur_m == null or jumped) {
-            if (d.pop.settled()) d.pop.t = now;
-            d.pop.v = pop_kick;
-        }
-        if (d.cur_m) |h| if (jumped and h[0] != c[0]) {
-            d.prev_m = h;
-            d.prev_t0 = now;
-        };
-    } else if (d.cur_m) |h| {
-        d.prev_m = h;
-        d.prev_t0 = now;
-    }
-    d.cur_m = cur_m;
-    const pop = 1 + (if (d.pop.settled()) 0 else d.pop.step(now));
-    const prev_a = std.math.clamp(1 - (now - d.prev_t0) / fade_time, 0, 1);
-    // Opening find on prefilled text starts the matches' staggered fade-in.
-    if (!finding) {
-        d.find_seen = false;
-    } else if (!d.find_seen) {
-        d.find_seen = true;
-        if (d.fresh) d.stag_t0 = now;
-    }
+    const fm = findMarks(d, s, finding, now);
     const flash_a = flashAlpha(d, now);
-
-    // The other matches' pills stay while the find bar slides away, fading with it.
-    const closing_find = d.mode == .edit and d.held_id == d.file.id and (d.held_mode == .find or d.held_mode == .replace) and d.pbar.at(now) > 0.002;
-    const pills: []const u8 = if (finding) d.prompt.items else if (closing_find) d.held.items else "";
-    const pills_sensitive = editor.caseSensitive(pills);
-    const pills_a: f64 = if (finding) 1 else d.pbar.at(now);
 
     // Backgrounds: selection, find matches.
     for (vis[0..nvis], first..) |v, row| {
@@ -5417,16 +5409,16 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         if (has_sel) fillSpan(ctx, th.sel, sel_a, s, ls, l, sg, ox, skip, y);
         if (out_a > 0) fillSpan(ctx, th.sel, out_a, d.sel_last, ls, l, sg, ox, skip, y);
         if (flash_a > 0) for (d.flash[0..d.flash_n]) |fr| fillSpan(ctx, th.caret, flash_a, fr, ls, l, sg, ox, skip, y);
-        if (pills.len > 0) {
+        if (fm.pills.len > 0) {
             // Opening find on prefilled text fades the matches in, the nearest first.
             const dist = if (row > here.row) row - here.row else here.row - row;
-            const m_a = std.math.clamp((now - d.stag_t0 - @min(stag_row * f(dist), stag_cap)) / fade_time, 0, 1) * pills_a;
-            var j = sg.start -| (pills.len - 1);
-            while (j < sg.end and j + pills.len <= l.len) : (j += 1) if (editor.matchAt(l, j, pills, pills_sensitive)) {
-                if (rowSpan(l, ls, sg, .{ ls + j, ls + j + pills.len }, ox, skip)) |sp| {
+            const m_a = std.math.clamp((now - d.stag_t0 - @min(stag_row * f(dist), stag_cap)) / fade_time, 0, 1) * fm.pills_a;
+            var j = sg.start -| (fm.pills.len - 1);
+            while (j < sg.end and j + fm.pills.len <= l.len) : (j += 1) if (editor.matchAt(l, j, fm.pills, fm.sensitive)) {
+                if (rowSpan(l, ls, sg, .{ ls + j, ls + j + fm.pills.len }, ox, skip)) |sp| {
                     if (sp.lo < sp.hi and ls + j != s[0]) pill(ctx, th.match, match_alpha * m_a, sp.x0, y + 2, sp.x1 - sp.x0, lh - 4, 3);
                 }
-                j += pills.len - 1;
+                j += fm.pills.len - 1;
             };
         }
     }
@@ -5449,7 +5441,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // alpha, so the text fades toward the page, band or selection under it
     // with no layer and one batch per strip however many rows are cut.
     const strip_a = [_]f64{ 0.8, 0.55, 0.3, 0.1 };
-    var any_reach = prev_a > 0 or cur_m != null;
+    var any_reach = fm.prev_a > 0 or fm.cur != null;
     var any_cut = false;
     for (0..2 + strip_a.len) |pass| {
         const x0 = ox + f(cols -| 1) * cw;
@@ -5476,8 +5468,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             const l = b.line(v.line);
             const ls = b.lineStart(v.line);
             if (pass == 1 and v.reach == 0) {
-                const fading_here = prev_a > 0 and d.prev_m[0] <= ls + l.len and d.prev_m[1] > ls;
-                const current_here = if (cur_m) |m| m[0] <= ls + l.len and m[1] > ls else false;
+                const fading_here = fm.prev_a > 0 and d.prev_m[0] <= ls + l.len and d.prev_m[1] > ls;
+                const current_here = if (fm.cur) |m| m[0] <= ls + l.len and m[1] > ls else false;
                 if (!fading_here and !current_here) continue;
             }
             if (pass == 0) {
@@ -5500,8 +5492,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
                 any_reach = any_reach or used >= cols;
                 any_cut = any_cut or used > cols;
             }
-            if (prev_a > 0) pillOver(&k, th, dark, l, k.offset, v.seg, d.prev_m, ox, skip, row_y, 1, prev_a);
-            if (cur_m) |m| pillOver(&k, th, dark, l, k.offset, v.seg, m, ox, skip, row_y, pop, 1);
+            if (fm.prev_a > 0) pillOver(&k, th, dark, l, k.offset, v.seg, d.prev_m, ox, skip, row_y, 1, fm.prev_a);
+            if (fm.cur) |m| pillOver(&k, th, dark, l, k.offset, v.seg, m, ox, skip, row_y, fm.pop, 1);
         }
         k.flush();
         objc.CGContextRestoreGState(ctx);
@@ -5521,7 +5513,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         // A newly shown file's caret fades in with its text.
         if (d.caret_fade and key) {
             d.caret_fade = false;
-            fadeIn(d.caret, loadDur(d));
+            fadeIn(d.caret, d.load.dur);
         }
     }
 
@@ -5551,6 +5543,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // when it's over, and the fade out takes it from there.
     if (d.bar.to == 1 and !d.busy and d.bar_armed != d.bar_t0) {
         d.bar_armed = d.bar_t0;
+        // `d.caret` stands in for the card: `later` needs a per-card object to cancel by.
         objc.later(d.win.view, "holdRedraw:", d.caret, @max(d.bar_t0 + bar_hold - now, 0) + 0.02);
     }
 }
@@ -5963,7 +5956,7 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
                 const nm = pg.name();
                 s.name[0] = .{ .full = uiLine(nm, tab_bold, 1e5) };
                 s.name[0].w = lineW(s.name[0].full);
-                s.name[1] = .{ .full = uiLine(nm, tab_font, 1e5) };
+                s.name[1] = .{ .full = uiLine(nm, side_font, 1e5) };
                 s.icon = iconFor(if (pg.path != null) nm else "");
             }
         }
@@ -6008,7 +6001,7 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
             if (live == d.open_at) x += d.open_px;
             live += 1;
         }
-        const g = @max(s.grow.step(now), 0);
+        const g = @max(s.grow.x, 0);
         s.x = x;
         s.w = @min(tabWidth(s, a), cap) * g;
         x += s.w + tab_space * a * @min(g, 1);
@@ -6197,7 +6190,7 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, ka: f64, a:
     // The weight switches halfway while the ink brightens: the two weights
     // have different widths, so drawing both at once smears the name.
     objc.CGContextSetAlpha(ctx, alpha * ink_a);
-    const name = if (s.gone) s.name[which].full else sideFit(&s.name[which], if (which == 0) tab_bold else tab_font, room_w + 1);
+    const name = if (s.gone) s.name[which].full else sideFit(&s.name[which], if (which == 0) tab_bold else side_font, room_w + 1);
     paintLine(ctx, name, ink, 1, nx, by);
     objc.CGContextRestoreGState(ctx);
     // The unsaved dot sits after the name with one tab and slides into
@@ -6539,12 +6532,7 @@ fn ghost(ctx: Id, th: *const Theme, img: Id, line: Id, gw: f64, x: f64, y: f64, 
     objc.CGContextRestoreGState(ctx);
     ring(ctx, th.fg, 0.3, x, y, gw, 22, 7);
     tile(img, x + tab_pad, @round(y + 11 - ts / 2), ts);
-    if (line != null) {
-        objc.CGContextSetRGBFillColor(ctx, th.fg[0], th.fg[1], th.fg[2], 1);
-        objc.CGContextSetTextPosition(ctx, x + tab_pad + ts + 7, @round(y + 11 + name_off));
-        objc.CTLineDraw(line, ctx);
-        objc.flipText(ctx);
-    }
+    paintLine(ctx, line, th.fg, 1, x + tab_pad + ts + 7, @round(y + 11 + name_off));
     objc.CGContextRestoreGState(ctx);
 }
 
@@ -7588,6 +7576,7 @@ pub fn setup() void {
     conf_path = settings.path(gpa) catch null;
     if (conf_path) |p| settings.prepare(gpa, p);
     loadSettings();
+    panelFonts();
     watchConf();
     const c = objc.ClassBuilder.begin("NSView", "ZeView");
     c.ivar("win");
