@@ -9,12 +9,17 @@
 #                                  own Zag session and drafts, records launch
 #                                  time and memory only, and quits without
 #                                  touching a file.
+#   bench.sh ab A B OUT [N]        runs A then B once each, N rounds (default
+#                                  6), into OUT/a and OUT/b, with one
+#                                  `qm with quiet zag-perf` hold per pair.
 # Each run launch gets a fresh HOME and session, and opens the same frozen copy
 # of Zag's sources (ZE_BENCH_DATA, made once from commit 7132176), so two
 # builds see the same files. The last step, quickopen_ms (open quick open, type
 # three letters, close), points quick open at a home-shaped folder of about
 # 60k files (ZE_BENCH_HOME_DATA, made once by this script, never in Git) and
-# puts the root back after. Nothing takes focus. Time it inside `qm with quiet`.
+# puts the root back after. Nothing takes focus. Time `run` and `session`
+# inside `qm with quiet`, one A/B pair per hold (`ab` does this): qm stops a
+# hold past 10 minutes when a build waits.
 set -eu
 cd "$(dirname "$0")/.."
 data=${ZE_BENCH_DATA:-$HOME/.local/share/zig-editor-perf/data}
@@ -68,6 +73,12 @@ case ${1:-} in
     app=${2:-"$PWD/zig-out/Zag Perf.app"}
     qm with build zag -- nice mise exec zig@0.17.0 -- scripts/bundle.sh perf "$app" >/dev/null
     echo "$app" ;;
+  ab)
+    a=$2 b=$3 out=$4 n=${5:-6} k=0
+    while [ "$k" -lt "$n" ]; do
+      qm with quiet zag-perf -- sh -c 'scripts/bench.sh run "$1" "$3/a" 1 && scripts/bench.sh run "$2" "$3/b" 1' sh "$a" "$b" "$out"
+      k=$((k + 1))
+    done ;;
   run|session)
     mode=$1 app=$2 out=$3 n=${4:-1}
     files="$data/src/view.zig:$data/src/editor.zig:$data/src/buffer.zig:$data/src/syntax.zig:$data/src/settings.zig"
@@ -100,5 +111,5 @@ case ${1:-} in
       rm -rf "$home"
       i=$((i + 1))
     done ;;
-  *) echo "usage: bench.sh build [out.app] | run APP OUT [N] | session APP OUT [N]" >&2; exit 1 ;;
+  *) echo "usage: bench.sh build [out.app] | run APP OUT [N] | session APP OUT [N] | ab A B OUT [N]" >&2; exit 1 ;;
 esac
