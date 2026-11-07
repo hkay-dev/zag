@@ -7482,6 +7482,98 @@ fn appPick(comptime run: fn (usize) void) *const anyopaque {
     }.thunk);
 }
 
+fn pasteboard() Id {
+    return msg(Id, objc.class("NSPasteboard"), "generalPasteboard", .{});
+}
+
+extern const NSPasteboardTypeString: Id;
+
+fn copy(d: *Doc) void {
+    const s = d.file.ed.sel();
+    if (d.mode != .edit or s[0] == s[1]) return;
+    putClipboard(d.file.ed.text()[s[0]..s[1]]);
+}
+
+fn putClipboard(text: []const u8) void {
+    const string = if (std.unicode.utf8ValidateSlice(text)) objc.str(text) else access.nsText(text);
+    const pb = pasteboard();
+    _ = msg(isize, pb, "clearContents", .{});
+    _ = msg(bool, pb, "setString:forType:", .{ string, NSPasteboardTypeString });
+}
+
+fn cut(d: *Doc) void {
+    if (d.mode != .edit) return;
+    copy(d);
+    d.file.ed.deleteSelection(gpa) catch {};
+    reveal(d);
+}
+
+fn paste(d: *Doc) void {
+    const s = objc.utf8(msg(Id, pasteboard(), "stringForType:", .{NSPasteboardTypeString}));
+    // An image or file on the clipboard has no text: the selection stays.
+    if (s.len == 0) return;
+    if (d.mode != .edit) return promptType(d, s);
+    const at = d.file.ed.sel()[0];
+    d.file.ed.insert(gpa, s) catch {};
+    if (std.mem.indexOfScalar(u8, s, '\n') != null or s.len > 40) {
+        flashStart(d);
+        flashAdd(d, at, d.file.ed.cur);
+    }
+    reveal(d);
+}
+
+fn selectAll(d: *Doc) void {
+    if (d.mode == .edit) d.file.ed.selectAll();
+}
+
+fn stepHistory(d: *Doc, forward: bool) void {
+    d.mode = .edit;
+    flashStart(d);
+    if ((if (forward) d.file.ed.redo(gpa) else d.file.ed.undo(gpa)) catch null) |span| flashAdd(d, span[0], span[1]);
+    reveal(d);
+}
+
+fn closeActive(d: *Doc) void {
+    closeTab(d, d.at);
+}
+
+pub fn previewText(id: u32) ?[]const u8 {
+    for (docs.items) |d| {
+        if (d.closing) continue;
+        for (0..tabCount(d)) |j| {
+            const p = tabPage(d, j);
+            if (p.id == id) return p.ed.text();
+        }
+    }
+    return null;
+}
+
+fn markdownPreview(d: *Doc) void {
+    preview.toggle(d, themeOf(d.win));
+}
+
+fn comment(d: *Doc) void {
+    if (d.mode != .edit) return;
+    d.file.ed.toggleComment(gpa, d.file.lang.line_comment) catch {};
+}
+
+fn zoom(_: *Doc, by: f64) void {
+    const size = if (by == 0) settings.default_size else std.math.clamp(conf.size + by, settings.size_min, settings.size_max);
+    var buf: [24]u8 = undefined;
+    store(.size, settings.decimal(&buf, size));
+}
+
+/// The Font panel's choice, saved to the settings file.
+fn changeFont(_: Id, _: Sel, sender: Id) callconv(.c) void {
+    const picked = msg(Id, sender, "convertFont:", .{font});
+    if (picked == null) return;
+    const name = objc.utf8(msg(Id, picked, "fontName", .{}));
+    // The system font's private name can't be asked for by name.
+    store(.font, if (name.len == 0 or name[0] == '.') "system" else name);
+    var buf: [24]u8 = undefined;
+    store(.size, settings.decimal(&buf, @round(msg(f64, picked, "pointSize", .{}))));
+}
+
 // ---- the menu bar ----
 //
 // One list builds the menus, binds each command's handler and says which
@@ -7724,100 +7816,8 @@ fn isChecked(it: Id) bool {
 /// Late-Night has set.
 pub fn validate(_: Id, _: Sel, it: Id) callconv(.c) bool {
     const r = ruleOf(it) orelse return true;
-    if (r.check != null) msg(void, it, "setState:", .{@as(isize, @intFromBool(isChecked(it)))});
+    if (r.check) |c| msg(void, it, "setState:", .{@as(isize, @intFromBool(checked(c, @intCast(msg(isize, it, "tag", .{})))))});
     return !(r.grey and conf.late_night);
-}
-
-fn pasteboard() Id {
-    return msg(Id, objc.class("NSPasteboard"), "generalPasteboard", .{});
-}
-
-extern const NSPasteboardTypeString: Id;
-
-fn copy(d: *Doc) void {
-    const s = d.file.ed.sel();
-    if (d.mode != .edit or s[0] == s[1]) return;
-    putClipboard(d.file.ed.text()[s[0]..s[1]]);
-}
-
-fn putClipboard(text: []const u8) void {
-    const string = if (std.unicode.utf8ValidateSlice(text)) objc.str(text) else access.nsText(text);
-    const pb = pasteboard();
-    _ = msg(isize, pb, "clearContents", .{});
-    _ = msg(bool, pb, "setString:forType:", .{ string, NSPasteboardTypeString });
-}
-
-fn cut(d: *Doc) void {
-    if (d.mode != .edit) return;
-    copy(d);
-    d.file.ed.deleteSelection(gpa) catch {};
-    reveal(d);
-}
-
-fn paste(d: *Doc) void {
-    const s = objc.utf8(msg(Id, pasteboard(), "stringForType:", .{NSPasteboardTypeString}));
-    // An image or file on the clipboard has no text: the selection stays.
-    if (s.len == 0) return;
-    if (d.mode != .edit) return promptType(d, s);
-    const at = d.file.ed.sel()[0];
-    d.file.ed.insert(gpa, s) catch {};
-    if (std.mem.indexOfScalar(u8, s, '\n') != null or s.len > 40) {
-        flashStart(d);
-        flashAdd(d, at, d.file.ed.cur);
-    }
-    reveal(d);
-}
-
-fn selectAll(d: *Doc) void {
-    if (d.mode == .edit) d.file.ed.selectAll();
-}
-
-fn stepHistory(d: *Doc, forward: bool) void {
-    d.mode = .edit;
-    flashStart(d);
-    if ((if (forward) d.file.ed.redo(gpa) else d.file.ed.undo(gpa)) catch null) |span| flashAdd(d, span[0], span[1]);
-    reveal(d);
-}
-
-fn closeActive(d: *Doc) void {
-    closeTab(d, d.at);
-}
-
-pub fn previewText(id: u32) ?[]const u8 {
-    for (docs.items) |d| {
-        if (d.closing) continue;
-        for (0..tabCount(d)) |j| {
-            const p = tabPage(d, j);
-            if (p.id == id) return p.ed.text();
-        }
-    }
-    return null;
-}
-
-fn markdownPreview(d: *Doc) void {
-    preview.toggle(d, themeOf(d.win));
-}
-
-fn comment(d: *Doc) void {
-    if (d.mode != .edit) return;
-    d.file.ed.toggleComment(gpa, d.file.lang.line_comment) catch {};
-}
-
-fn zoom(_: *Doc, by: f64) void {
-    const size = if (by == 0) settings.default_size else std.math.clamp(conf.size + by, settings.size_min, settings.size_max);
-    var buf: [24]u8 = undefined;
-    store(.size, settings.decimal(&buf, size));
-}
-
-/// The Font panel's choice, saved to the settings file.
-fn changeFont(_: Id, _: Sel, sender: Id) callconv(.c) void {
-    const picked = msg(Id, sender, "convertFont:", .{font});
-    if (picked == null) return;
-    const name = objc.utf8(msg(Id, picked, "fontName", .{}));
-    // The system font's private name can't be asked for by name.
-    store(.font, if (name.len == 0 or name[0] == '.') "system" else name);
-    var buf: [24]u8 = undefined;
-    store(.size, settings.decimal(&buf, @round(msg(f64, picked, "pointSize", .{}))));
 }
 
 /// Registers the view class and loads the font. Call once at launch.
