@@ -1118,7 +1118,7 @@ const Page = struct {
     stamp: ?files.Stamp = null,
     sx: f64 = 0,
     sy: f64 = 0,
-    /// Its tab's id, which stays with the file while the window holds it.
+    /// Its tab's id, which stays with the file while the card holds it.
     id: u32,
     /// An untitled file's draft, saved as it changes, and the
     /// `buf.changes` it last saved.
@@ -1172,7 +1172,9 @@ const Page = struct {
     }
 };
 
-/// Tabs, pages and windows get ids from here.
+pub const TabRef = struct { d: *Doc, j: usize };
+
+/// Tabs and draft file names get ids from here.
 var next_id: u32 = 1;
 
 fn newId() u32 {
@@ -1185,6 +1187,8 @@ const Doc = struct {
     /// The shown file's place among the card's tabs:
     /// `pages` are the others, in tab order with this one taken out.
     at: usize = 0,
+    /// The card's other files, in tab order.
+    pages: std.ArrayList(Page) = .empty,
     /// The header's tabs as drawn, folding ones included, and the active
     /// tab's highlight (x and width), which springs from tab to tab.
     slots: std.ArrayList(Slot) = .empty,
@@ -1374,14 +1378,12 @@ const Doc = struct {
     shown: bool = false,
     /// Place the caret without gliding (mouse drags).
     snap: bool = false,
-    /// The window's other files, in tab order.
-    pages: std.ArrayList(Page) = .empty,
-    /// When the window's file was last swapped in, for its text to fade in:
+    /// When the card's file was last swapped in, for its text to fade in:
     /// rising when it was just read from disk, else a plain fade. The caret
     /// fades in with it.
     load_t: f64 = -1,
     caret_fade: bool = false,
-    /// An empty window's hint: its opacity, and since when the card has
+    /// An empty card's hint: its opacity, and since when the card has
     /// been blank (-1 when it isn't).
     hint: Tween = .{ .dur = hint_in },
     blank_t0: f64 = -1,
@@ -1653,8 +1655,13 @@ pub fn open(path: []const u8, into: ?*Doc) void {
     front(d);
 }
 
+/// Opens into the key window's untouched card, else a new window.
+pub fn openFile(path: []const u8) void {
+    open(path, blankDoc());
+}
+
 /// The first live card and tab holding `abs`.
-fn holder(abs: []const u8) ?struct { d: *Doc, j: usize } {
+fn holder(abs: []const u8) ?TabRef {
     for (docs.items) |d| {
         if (d.closing) continue;
         for (0..tabCount(d)) |j| {
@@ -1737,7 +1744,7 @@ fn replaceable(d: *const Doc) bool {
     return isBlank(d) and d.pages.items.len == 0;
 }
 
-/// Sets the window's file aside as a page in its tab's place, for
+/// Sets the card's file aside as a page in its tab's place, for
 /// `install` to replace right after. A `replaceable` file is dropped
 /// instead. False when it can't.
 fn park(d: *Doc) bool {
@@ -1752,7 +1759,7 @@ fn park(d: *Doc) bool {
     return true;
 }
 
-/// Shows `pg` in the window, which must have just been parked, and picks
+/// Shows `pg` in the card, which must have just been parked, and picks
 /// up a change another app made to it.
 fn install(d: *Doc, pg: Page) void {
     d.file = pg;
@@ -1792,7 +1799,7 @@ fn install(d: *Doc, pg: Page) void {
     }
 }
 
-/// Takes page `tab` out of the pages and shows it in the window, whose
+/// Takes page `tab` out of the pages and shows it in the card, whose
 /// file must have just been parked or gone.
 fn swapIn(d: *Doc, tab: usize) void {
     const pg = d.pages.orderedRemove(tab);
@@ -1848,8 +1855,7 @@ fn showTab(d: *Doc, j: usize) void {
 }
 
 /// ⌃Tab and ⌃⇧Tab: the next or previous tab, around the ends.
-pub fn stepTab(by: isize) void {
-    const d = keyDoc() orelse return;
+pub fn stepTab(d: *Doc, by: isize) void {
     const n: isize = @intCast(tabCount(d));
     showTab(d, @intCast(@mod(@as(isize, @intCast(d.at)) + by, n)));
 }
@@ -1876,9 +1882,7 @@ fn closeTab(d: *Doc, at: usize) void {
         j = d.at;
         if (!keepOrDrop(d)) return;
     }
-    const shown = j == d.at;
     var pg = takeTab(d, j) orelse return;
-    if (shown) rememberPlace(&pg);
     pg.deinit();
 }
 
@@ -1930,7 +1934,7 @@ fn split(d: *Doc, down: bool) void {
         return msg(void, objc.class("NSSound"), "beep", .{});
     };
     if (tabCount(d) > 1) {
-        if (takeTab(d, d.at)) |pg| putTab(e, pg, 0);
+        putTab(e, takeTab(d, d.at).?, 0);
     } else startPrompt(e, .open);
     focus(e);
 }
@@ -1995,6 +1999,7 @@ fn takeTab(d: *Doc, j: usize) ?Page {
         return pg;
     }
     const pg = asPage(d);
+    rememberPlace(&pg);
     if (tabCount(d) == 1) {
         install(d, blankPage() orelse return null);
     } else {
@@ -2368,6 +2373,13 @@ fn newPane(w: *Win) ?*Doc {
     return d;
 }
 
+/// Runs `panel` modally; `recheckAll` stays out until it answers.
+fn runModal(panel: Id) isize {
+    modal = true;
+    defer modal = false;
+    return msg(isize, panel, "runModal", .{});
+}
+
 /// Runs a modal alert with `buttons` in order (none gives the default OK)
 /// and returns what it answered: 1000 for the first button, 1001 the next.
 fn askAlert(title: []const u8, info: []const u8, buttons: []const []const u8) isize {
@@ -2375,9 +2387,7 @@ fn askAlert(title: []const u8, info: []const u8, buttons: []const []const u8) is
     msg(void, a, "setMessageText:", .{objc.str(title)});
     msg(void, a, "setInformativeText:", .{objc.str(info)});
     for (buttons) |b| _ = msg(Id, a, "addButtonWithTitle:", .{objc.str(b)});
-    modal = true;
-    defer modal = false;
-    const r = msg(isize, a, "runModal", .{});
+    const r = runModal(a);
     msg(void, a, "release", .{});
     return r;
 }
@@ -2396,21 +2406,27 @@ fn askSave(d: *Doc, n: usize) isize {
     return askAlert(title, "Your changes are lost if you don't save them.", &.{ if (n == 1) "Save" else "Save All", "Don't Save", "Cancel" });
 }
 
-/// Asks to save the window's unsaved files: the one on show and its pages.
-/// Closing the window asks about untitled files' text too, since their
-/// drafts go with it; quitting keeps the drafts for next time and doesn't.
-/// False when the user cancels.
-fn settle(d: *Doc, quit: bool) bool {
+/// Asks to save a window's unsaved files, across its cards and tabs, with one
+/// question. Closing the window asks about untitled files' text too, since
+/// their drafts go with it; quitting keeps the drafts for next time and
+/// doesn't. False when the user cancels.
+fn settle(w: *Win, quit: bool) bool {
     var n: usize = 0;
-    var tab: usize = 0;
-    for (0..tabCount(d)) |j| if (asks(quit, tabPage(d, j))) {
-        n += 1;
-        tab = j;
+    var one: ?TabRef = null;
+    for (docs.items) |d| if (d.win == w and !d.closing) {
+        for (0..tabCount(d)) |j| if (asks(quit, tabPage(d, j))) {
+            n += 1;
+            one = .{ .d = d, .j = j };
+        };
     };
     if (n == 0) return true;
-    if (n == 1) showTab(d, tab);
-    return switch (askSave(d, n)) {
-        1000 => saveAll(d, quit),
+    // One file: show it so the question names it. More: ask from the focused card.
+    const ask = if (n == 1) one.?.d else w.focus;
+    if (n == 1) showTab(ask, one.?.j);
+    return switch (askSave(ask, n)) {
+        1000 => for (docs.items) |d| {
+            if (d.win == w and !d.closing and !saveAll(d, quit)) break false;
+        } else true,
         1001 => true,
         else => false,
     };
@@ -2433,9 +2449,8 @@ fn saveAll(d: *Doc, quit: bool) bool {
     return true;
 }
 
-/// For quitting: every window with unsaved changes to files asks first.
 pub fn settleAll() bool {
-    for (docs.items) |d| if (!settle(d, true)) return false;
+    for (wins.items) |w| if (!settle(w, true)) return false;
     return true;
 }
 
@@ -2447,9 +2462,7 @@ fn save(d: *Doc, as: bool) bool {
         const p = msg(Id, objc.class("NSSavePanel"), "savePanel", .{});
         msg(void, p, "setNameFieldStringValue:", .{objc.str(d.file.name())});
         if (root) |r| msg(void, p, "setDirectoryURL:", .{msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(r)})});
-        modal = true;
-        defer modal = false;
-        if (msg(isize, p, "runModal", .{}) != 1) return false;
+        if (runModal(p) != 1) return false;
         const path = objc.utf8(msg(Id, msg(Id, p, "URL", .{}), "path", .{}));
         fresh = gpa.dupeSentinel(u8, path, 0) catch return false;
     } else if (files.stamp(d.file.path.?)) |now| {
@@ -2506,15 +2519,11 @@ pub fn openPanel() void {
     msg(void, p, "setCanChooseDirectories:", .{true});
     msg(void, p, "setAllowsMultipleSelection:", .{true});
     if (root) |r| msg(void, p, "setDirectoryURL:", .{msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(r)})});
-    {
-        modal = true;
-        defer modal = false;
-        if (msg(isize, p, "runModal", .{}) != 1) return;
-    }
+    if (runModal(p) != 1) return;
     const urls = msg(Id, p, "URLs", .{});
     for (0..msg(usize, urls, "count", .{})) |i| {
         const path = objc.utf8(msg(Id, msg(Id, urls, "objectAtIndex:", .{i}), "path", .{}));
-        open(path, blankDoc());
+        openFile(path);
     }
 }
 
@@ -2884,7 +2893,7 @@ pub fn adoptDrafts() void {
         const abs = std.fmt.bufPrintSentinel(&pb, "{s}/{s}", .{ dir, name }, 0) catch continue;
         if (draftHeld(abs)) continue;
         var pg = loadDraft(abs) orelse continue;
-        const d = keyDoc() orelse (if (docs.items.len > 0) docs.items[0] else newDoc()) orelse return pg.deinitKeepDraft();
+        const d = keyDoc() orelse (if (wins.items.len > 0) wins.items[wins.items.len - 1].focus else newDoc()) orelse return pg.deinitKeepDraft();
         putTab(d, pg, d.at + 1);
     }
 }
@@ -3142,7 +3151,7 @@ pub fn openSettings() void {
     const p = conf_path orelse return;
     settings.ensure(gpa, p, &conf_saved) catch return alert("Couldn't write the settings file.", p);
     loadSettings();
-    open(conf_path.?, blankDoc());
+    openFile(conf_path.?);
 }
 
 /// Writes the opposite of flag `opt` to the settings file.
@@ -7173,7 +7182,7 @@ fn performDrag(_: Id, _: Sel, sender: Id) callconv(.c) bool {
     const opts = msg(Id, objc.class("NSDictionary"), "dictionaryWithObject:forKey:", .{ msg(Id, objc.class("NSNumber"), "numberWithBool:", .{true}), NSPasteboardURLReadingFileURLsOnlyKey });
     const urls = msg(Id, pb, "readObjectsForClasses:options:", .{ classes, opts });
     const n = if (urls != null) msg(usize, urls, "count", .{}) else 0;
-    for (0..n) |i| open(objc.utf8(msg(Id, msg(Id, urls, "objectAtIndex:", .{i}), "path", .{})), blankDoc());
+    for (0..n) |i| openFile(objc.utf8(msg(Id, msg(Id, urls, "objectAtIndex:", .{i}), "path", .{})));
     return n > 0;
 }
 
@@ -7358,7 +7367,7 @@ fn tabMenu(self: Id, w: *Win, d: *Doc, lp: Point) Id {
 }
 
 /// The card and tab index the tab menu was opened on, while both are there.
-fn menuTab() ?struct { d: *Doc, j: usize } {
+fn menuTab() ?TabRef {
     const w = menu_win orelse return null;
     const d = w.menu_card orelse return null;
     if (!ax.alive(d)) return null;
@@ -7432,11 +7441,8 @@ fn copyPath(_: Id, _: Sel, _: Id) callconv(.c) void {
     putClipboard(menuFile());
 }
 
-/// Each card with unsaved changes asks first.
 fn windowShouldClose(self: Id, _: Sel, _: Id) callconv(.c) bool {
-    const w = winOf(self) orelse return true;
-    for (docs.items) |d| if (d.win == w and !d.closing and !settle(d, false)) return false;
-    return true;
+    return settle(winOf(self) orelse return true, false);
 }
 
 fn windowWillClose(self: Id, _: Sel, _: Id) callconv(.c) void {
@@ -7647,6 +7653,8 @@ pub fn setup() void {
         .{ "closeTab:", closeActive, .{} },
         .{ "splitRight:", split, .{false} },
         .{ "splitDown:", split, .{true} },
+        .{ "nextTab:", stepTab, .{1} },
+        .{ "previousTab:", stepTab, .{-1} },
         .{ "nextCard:", stepCard, .{1} },
         .{ "previousCard:", stepCard, .{-1} },
         .{ "markdownPreview:", markdownPreview, .{} },

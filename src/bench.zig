@@ -73,7 +73,7 @@ fn run(_: Id, _: Sel, _: Id) callconv(.c) void {
     const cpu0 = cpuNow();
     const main0 = threadCpu();
     // The first tab holds the big file.
-    view.stepTab(1);
+    view.stepTab(view.keyDoc().?, 1);
     settle();
 
     // A full redraw of an idle window.
@@ -103,12 +103,12 @@ fn run(_: Id, _: Sel, _: Id) callconv(.c) void {
     // Switching tabs: the switch and its first frame, then later frames of
     // the switch's fade at 120 Hz.
     for (0..60) |_| {
-        step("tab_ms", false, view.stepTab, .{@as(isize, 1)});
+        step("tab_ms", false, view.stepTab, .{ view.keyDoc().?, @as(isize, 1) });
         settle();
     }
     memory("mem_tab_mb", "peak_tab_mb");
     for (0..20) |_| {
-        view.stepTab(1);
+        view.stepTab(view.keyDoc().?, 1);
         for (0..12) |_| step("anim_frame_ms", false, tick, .{});
     }
     settle();

@@ -98,7 +98,7 @@ opens there next time. Links are tinted and underlined.
 
 ## Tabs
 
-Every file a window has shown stays in it as a tab, with its unsaved changes and undo, so
+Every file a card has shown stays in it as a tab, with its unsaved changes and undo, so
 switching never asks you to save. With one file the header is just its name and folder. Open a
 second and the header turns into a row of tabs: the name becomes the first tab, the new one pops
 in beside it with a little bounce, and a **+** shows after the last one. The active tab's name is
@@ -193,8 +193,8 @@ points fade out.
   focused card, or below it when there's no room beside), **Open in New Window**, **Reveal in
   Finder** and **Copy Path**. A folder has the last two. The row keeps a faint tinted outline in
   the caret's color while the menu is open, apart from the highlight on the file on show.
-- **View > Show Next Tab** (⌃Tab) and **Show Previous Tab** (⌃⇧Tab) step through the window's
-  tabs.
+- **View > Show Next Tab** (⌃Tab) and **Show Previous Tab** (⌃⇧Tab) step through the focused card's
+  tabs. Both are grey when no window is open.
 - **View > Sidebar** (⌘\) or the sidebar button by the traffic lights shows or hides the sidebar
   in every window. It slides in and out, and the text's card follows its edge. It also hides when
   a window is too narrow to fit it beside the text.
@@ -361,9 +361,9 @@ permissions and its Finder tags. If a save under a new name fails, the file keep
 Closing a window with unsaved changes, or quitting with unsaved changes to files, asks whether to
 save them first. Closing also asks about untitled files with text in them, since their drafts go
 with the window; quitting keeps the drafts instead (see Drafts). When a window holds more than
-one of these in its tabs, one question covers them all: **Save All** saves each one (asking for a
-name for any untitled file), **Don't Save** drops the changes, and **Cancel** keeps the window
-open.
+one of these across its cards and tabs, one question covers them all: **Save All** saves each one
+(asking for a name for any untitled file), **Don't Save** drops the changes, and **Cancel** keeps
+the window open.
 
 ## VoiceOver
 

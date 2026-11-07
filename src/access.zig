@@ -585,7 +585,7 @@ fn tabsChildren(self: Id, _: Sel) callconv(.c) Id {
 }
 
 /// The tab's index now, or null once it's closed.
-fn tabIndex(self: Id) ?struct { d: *Doc, j: usize } {
+fn tabIndex(self: Id) ?view.TabRef {
     const d = docOf(self) orelse return null;
     return .{ .d = d, .j = ax.tabOf(d, @intCast(slot(self, .key).*)) orelse return null };
 }

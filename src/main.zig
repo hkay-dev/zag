@@ -35,7 +35,7 @@ fn didFinishLaunching(_: Id, _: Sel, _: Id) callconv(.c) void {
         if (a.len == 0) continue;
         if (a[0] == '-') {
             i += 1;
-        } else view.open(a, view.blankDoc());
+        } else view.openFile(a);
     }
     if (view.count() == 0 and !view.restoreSession()) _ = view.newDoc();
     view.adoptDrafts();
@@ -50,7 +50,7 @@ fn didFinishLaunching(_: Id, _: Sel, _: Id) callconv(.c) void {
 }
 
 fn openFiles(_: Id, _: Sel, _: Id, list: Id) callconv(.c) void {
-    for (0..msg(usize, list, "count", .{})) |i| view.open(objc.utf8(msg(Id, list, "objectAtIndex:", .{i})), view.blankDoc());
+    for (0..msg(usize, list, "count", .{})) |i| view.openFile(objc.utf8(msg(Id, list, "objectAtIndex:", .{i})));
 }
 
 fn shouldTerminate(_: Id, _: Sel, _: Id) callconv(.c) usize {
@@ -102,7 +102,7 @@ fn fillRecent(_: Id, _: Sel, menu: Id) callconv(.c) void {
 }
 
 fn openRecent(_: Id, _: Sel, sender: Id) callconv(.c) void {
-    view.open(objc.utf8(msg(Id, sender, "representedObject", .{})), view.blankDoc());
+    view.openFile(objc.utf8(msg(Id, sender, "representedObject", .{})));
 }
 
 fn submenu(bar: Id, title: []const u8) Id {
@@ -258,8 +258,6 @@ pub fn main(init: std.process.Init.Minimal) void {
     d.method("toggleLateNight:", act(view.flip, .{.@"late-night"}), "v@:@");
     d.method("validateMenuItem:", @ptrCast(&view.allowed), "c@:@");
     d.method("toggleZen:", act(view.toggleZen, .{}), "v@:@");
-    d.method("nextTab:", act(view.stepTab, .{1}), "v@:@");
-    d.method("previousTab:", act(view.stepTab, .{-1}), "v@:@");
     d.method("pickScheme:", tagged(view.pickScheme), "v@:@");
     d.method("pickAppearance:", tagged(view.pickLook), "v@:@");
     d.method("pickFocus:", tagged(view.pickFocus), "v@:@");
