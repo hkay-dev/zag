@@ -163,6 +163,7 @@ var side_w: f64 = settings.sidebar_default;
 var side_stretch: Spring = .{ .k = 380, .c = 33, .eps = 0.05 };
 var side_rest: f64 = settings.sidebar_default;
 const side_collapse = 100.0;
+const text_room = 360.0;
 /// How far either side of the sidebar's edge grabs it.
 const edge_grab = 4.0;
 /// The sidebar's selection sits this far in from its edges, with rounded corners.
@@ -179,7 +180,11 @@ fn sideShown(w: *const Win) bool {
 
 /// `sideShown` for a view width the caller already has.
 fn sideShownAt(width: f64) bool {
-    return !conf.zen and conf.sidebar and root != null and width >= side_w + 360;
+    return !conf.zen and conf.sidebar and root != null and width >= side_w + text_room;
+}
+
+fn overSide(w: *const Win, p: Point) bool {
+    return sideShown(w) and p.x < side_w;
 }
 
 /// A card's right edge in its pane, which it sits a gap inside of.
@@ -2323,7 +2328,7 @@ fn newWin(leaf: *Node) ?*Win {
     msg(void, bar, "release", .{});
     msg(void, win, "setToolbarStyle:", .{@as(isize, 3)});
     msg(void, win, "setTitlebarSeparatorStyle:", .{@as(isize, 1)});
-    msg(void, win, "setMinSize:", .{Point{ .x = 360, .y = 240 }});
+    msg(void, win, "setMinSize:", .{Point{ .x = text_room, .y = 240 }});
     // The sidebar material sits behind the view, which paints its chrome
     // over it with some of the material showing through.
     const fx = msg(Id, msg(Id, objc.class("NSVisualEffectView"), "alloc", .{}), "initWithFrame:", .{frame});
@@ -3888,7 +3893,7 @@ pub const ax = struct {
     }
 
     pub fn rowUnder(w: *const Win, p: Point) ?usize {
-        return if (sideShown(w) and p.x < side_w) sideRow(w, p.y) else null;
+        return if (overSide(w, p)) sideRow(w, p.y) else null;
     }
 
     /// Opens the file at `rel` in the focused card, or opens or shuts the
@@ -5858,12 +5863,23 @@ fn offHeadRow(p: Point, slack: f64) bool {
     return conf.zen or @abs(p.y - headY()) > slack;
 }
 
+fn toolRect(which: Icon) Rect {
+    const x = switch (which) {
+        .sidebar => toggle_x,
+        .plus => side_w - gap - 20,
+        else => unreachable,
+    };
+    return .{ .x = x - 14, .y = headY() - 14, .w = 28, .h = 28 };
+}
+
 /// The sidebar button by the traffic lights, or the + at the sidebar's
 /// top right, under `p` in the view: anywhere on its capsule.
 fn toolAt(w: *const Win, p: Point) ?Icon {
-    if (offHeadRow(p, 14)) return null;
-    if (root != null and @abs(p.x - toggle_x) <= 14) return .sidebar;
-    if (sideShown(w) and @abs(p.x - (side_w - gap - 20)) <= 14) return .plus;
+    if (conf.zen or root == null) return null;
+    inline for (.{ Icon.sidebar, Icon.plus }) |t| {
+        const r = toolRect(t);
+        if (p.x >= r.x and p.x <= r.x + r.w and p.y >= r.y and p.y <= r.y + r.h and (t != .plus or sideShown(w))) return t;
+    }
     return null;
 }
 
@@ -6308,7 +6324,7 @@ fn freeDrag(t: TabDrag) void {
 /// Null over the sidebar, the gaps, its own card's tab row, and its own
 /// card's text when it's that card's only tab or the card can't split.
 fn dropAt(w: *Win, t: *const TabDrag, p: Point) ?Drop {
-    if (sideShown(w) and p.x < side_w) return null;
+    if (overSide(w, p)) return null;
     const c = paneAt(w, p) orelse return null;
     const own = if (t.from) |x| x == c else false;
     const lp = inPane(c, p);
@@ -6662,7 +6678,7 @@ fn keyDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     if (code < 123 or code > 126) {
         msg(void, objc.class("NSCursor"), "setHiddenUntilMouseMoves:", .{true});
         // Typing fades Zen's peeking lights out at once.
-        peekTo(d.win, false, 0);
+        peekTo(d.win, false, false);
     }
     const arr = msg(Id, objc.class("NSArray"), "arrayWithObject:", .{ev});
     msg(void, self, "interpretKeyEvents:", .{arr});
@@ -6807,8 +6823,7 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
         if (t == .sidebar) flip(.sidebar) else newTab(w.focus);
         return;
     }
-    const side = sideShown(w);
-    if (side and p.y >= top_h and @abs(p.x - side_w) <= edge_grab) {
+    if (p.y >= top_h and @abs(p.x - side_w) <= edge_grab and sideShown(w)) {
         w.side_drag = true;
         w.side_lim = 0;
         if (side_stretch.x == 0) side_rest = side_w;
@@ -6816,7 +6831,7 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
         side_w = side_rest;
         return;
     }
-    if (side and p.x < side_w) {
+    if (overSide(w, p)) {
         if (p.y < top_h) return titleStrip(w, ev);
         if (p.y < listTop()) return parentsMenu(w);
         return sideClick(w, p, msg(usize, ev, "modifierFlags", .{}));
@@ -6881,22 +6896,26 @@ fn cardDown(d: *Doc, p: Point, ev: Id) void {
     refresh(d);
 }
 
+fn endSideDrag(w: *Win) void {
+    w.side_drag = false;
+    w.side_lim = 0;
+    for (wins.items) |o| msg(void, o.window, "invalidateCursorRectsForView:", .{o.view});
+}
+
 /// Moves the sidebar's edge to `x` in every window, within its limits and
 /// leaving room for the text. Past a limit it stretches against the
 /// mouse, and dragged right in, the sidebar shuts.
 fn resizeSide(w: *Win, x: f64) void {
     if (x < side_collapse) {
         const was = side_w;
-        w.side_drag = false;
-        w.side_lim = 0;
+        endSideDrag(w);
         side_stretch.snap(0);
         flip(.sidebar);
         // It slides away at the width it had.
         side_w = was;
-        for (wins.items) |o| msg(void, o.window, "invalidateCursorRectsForView:", .{o.view});
         return;
     }
-    const room = msg(Rect, w.view, "bounds", .{}).w - 360;
+    const room = msg(Rect, w.view, "bounds", .{}).w - text_room;
     const lo = settings.sidebar_min;
     const hi = @max(lo, @min(settings.sidebar_max, room));
     const to = @round(std.math.clamp(x, lo, hi));
@@ -6930,7 +6949,7 @@ fn mouseMoved(self: Id, _: Sel, ev: Id) callconv(.c) void {
     // It's tracked in every mode so Zen turned on under the pointer keeps them lit;
     // only Zen holds them after the pointer leaves.
     const corner = p.x < tabs_from and p.y < top_h;
-    if (w.peek_in != corner) peekTo(w, corner, if (conf.zen) 0.6 else 0);
+    if (w.peek_in != corner) peekTo(w, corner, true);
     hoverAt(w, p);
 }
 
@@ -6991,27 +7010,21 @@ fn setHover(d: *Doc, id: u32, shut: bool, plus: bool) void {
     msg(void, d.win.view, "setNeedsDisplay:", .{true});
 }
 
+/// The mouse left the view: everything it lit goes out.
 fn mouseExited(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
-    peekTo(w, false, if (conf.zen) 0.6 else 0);
-    if (w.hot != 0) {
-        redrawHot(w, w.hot);
-        w.hot = 0;
-    }
-    for (docs.items) |d| if (d.win == w) setHover(d, 0, false, false);
-    if (w.hov.row != null) {
-        w.hov.row = null;
-        redrawSide(w);
-    }
+    peekTo(w, false, true);
+    hoverAt(w, .{ .x = -1, .y = -1 });
 }
 
 /// Zen's lights peek back while the mouse is in the window's top-left
 /// corner, and fade out a hold after it leaves. Typing (no hold) needs no
 /// timer: its own redraw starts the fade.
-fn peekTo(w: *Win, in: bool, hold: f64) void {
+fn peekTo(w: *Win, in: bool, hold: bool) void {
+    const t: f64 = if (hold and conf.zen) 0.6 else 0;
     w.peek_in = in;
-    w.peek_out = CACurrentMediaTime() + hold;
-    if (hold > 0) objc.later(w.view, "holdRedraw:", w.window, hold);
+    w.peek_out = CACurrentMediaTime() + t;
+    if (t > 0) objc.later(w.view, "holdRedraw:", w.window, t);
 }
 
 /// The mouse lets go of a button it pressed: the button's fill fades.
@@ -7046,9 +7059,7 @@ fn mouseUp(self: Id, _: Sel, _: Id) callconv(.c) void {
         return msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
     }
     if (!w.side_drag) return;
-    w.side_drag = false;
-    w.side_lim = 0;
-    for (wins.items) |o| msg(void, o.window, "invalidateCursorRectsForView:", .{o.view});
+    endSideDrag(w);
     if (side_rest != conf.sidebar_width) {
         var buf: [24]u8 = undefined;
         store(.@"sidebar-width", settings.decimal(&buf, side_rest));
@@ -7087,7 +7098,7 @@ fn mouseDragged(self: Id, _: Sel, ev: Id) callconv(.c) void {
 fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
     const at = local(self, ev);
-    if (sideShown(w) and at.x < side_w) {
+    if (overSide(w, at)) {
         const dy = msg(f64, ev, "scrollingDeltaY", .{});
         w.side_y -= if (msg(bool, ev, "hasPreciseScrollingDeltas", .{})) dy else dy * lh;
         sideHover(w, at);
@@ -7124,9 +7135,8 @@ fn resetCursorRects(self: Id, _: Sel) callconv(.c) void {
     // `toolTip` answers nil where zen hides them.
     msg(void, self, "removeAllToolTips", .{});
     if (root != null) {
-        const hy = headY();
-        _ = msg(isize, self, "addToolTipRect:owner:userData:", .{ Rect{ .x = toggle_x - 14, .y = hy - 14, .w = 28, .h = 28 }, self, @as(?*anyopaque, null) });
-        _ = msg(isize, self, "addToolTipRect:owner:userData:", .{ Rect{ .x = side_w - gap - 34, .y = hy - 14, .w = 28, .h = 28 }, self, @as(?*anyopaque, null) });
+        _ = msg(isize, self, "addToolTipRect:owner:userData:", .{ toolRect(.sidebar), self, @as(?*anyopaque, null) });
+        _ = msg(isize, self, "addToolTipRect:owner:userData:", .{ toolRect(.plus), self, @as(?*anyopaque, null) });
     }
 }
 
@@ -7206,6 +7216,13 @@ pub fn menuItem(menu: Id, title: []const u8, sel: [:0]const u8, key: []const u8,
     msg(void, menu, "addItem:", .{it});
     msg(void, it, "release", .{});
     return it;
+}
+
+pub fn clipboardItems(m: Id) void {
+    _ = menuItem(m, "Cut", "cut:", "x", objc.cmd_key);
+    _ = menuItem(m, "Copy", "copy:", "c", objc.cmd_key);
+    _ = menuItem(m, "Paste", "paste:", "v", objc.cmd_key);
+    _ = menuItem(m, "Select All", "selectAll:", "a", objc.cmd_key);
 }
 
 pub fn separator(m: Id) void {
@@ -7293,7 +7310,7 @@ fn menuMark(ctx: Id, th: *const Theme, a: f64, x: f64, y: f64, w: f64, h: f64, r
 fn menuForEvent(self: Id, _: Sel, ev: Id) callconv(.c) Id {
     const w = winOf(self) orelse return null;
     const p = local(self, ev);
-    if (!sideShown(w) or p.x >= side_w) {
+    if (!overSide(w, p)) {
         const d = paneAt(w, p) orelse return null;
         const lp = inPane(d, p);
         if (lp.y < top_h) return tabMenu(self, w, d, lp);
@@ -7301,10 +7318,7 @@ fn menuForEvent(self: Id, _: Sel, ev: Id) callconv(.c) Id {
         focus(d);
         if (text_menu == null) {
             const m = objc.new("NSMenu");
-            _ = menuItem(m, "Cut", "cut:", "x", objc.cmd_key);
-            _ = menuItem(m, "Copy", "copy:", "c", objc.cmd_key);
-            _ = menuItem(m, "Paste", "paste:", "v", objc.cmd_key);
-            _ = menuItem(m, "Select All", "selectAll:", "a", objc.cmd_key);
+            clipboardItems(m);
             separator(m);
             _ = menuItem(m, "Toggle Comment", "toggleComment:", "/", objc.cmd_key);
             text_menu = m;

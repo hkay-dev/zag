@@ -107,11 +107,8 @@ fn openRecent(_: Id, _: Sel, sender: Id) callconv(.c) void {
 
 fn submenu(bar: Id, title: []const u8) Id {
     const m = msg(Id, msg(Id, objc.class("NSMenu"), "alloc", .{}), "initWithTitle:", .{objc.str(title)});
-    const it = objc.new("NSMenuItem");
-    msg(void, it, "setTitle:", .{objc.str(title)});
+    const it = view.menuItem(bar, title, "", "", 0);
     msg(void, it, "setSubmenu:", .{m});
-    msg(void, bar, "addItem:", .{it});
-    msg(void, it, "release", .{});
     msg(void, m, "release", .{});
     return m;
 }
@@ -146,10 +143,7 @@ fn buildMenu(delegate: Id) void {
     _ = view.menuItem(edit, "Undo", "undo:", "z", objc.cmd_key);
     _ = view.menuItem(edit, "Redo", "redo:", "z", objc.cmd_key | objc.shift_key);
     view.separator(edit);
-    _ = view.menuItem(edit, "Cut", "cut:", "x", objc.cmd_key);
-    _ = view.menuItem(edit, "Copy", "copy:", "c", objc.cmd_key);
-    _ = view.menuItem(edit, "Paste", "paste:", "v", objc.cmd_key);
-    _ = view.menuItem(edit, "Select All", "selectAll:", "a", objc.cmd_key);
+    view.clipboardItems(edit);
     view.separator(edit);
     _ = view.menuItem(edit, "Find…", "findText:", "f", objc.cmd_key);
     _ = view.menuItem(edit, "Find and Replace…", "findAndReplace:", "f", objc.cmd_key | objc.opt_key);
