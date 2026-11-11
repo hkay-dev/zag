@@ -31,12 +31,17 @@ cp zig-out/bin/zag "$app/Contents/MacOS/zag"
 # The icon. actool also writes a 1.9 MB Assets.car for macOS 26's glass
 # modes; Zag ships only the 37 KB AppIcon.icns (up to 256 px), which every
 # macOS shows in the same shape.
-icon=$(mktemp -d)
-xcrun actool "$PWD/AppIcon.icon" --compile "$icon" --app-icon AppIcon \
-  --platform macosx --minimum-deployment-target 15.0 \
-  --output-partial-info-plist /dev/null >/dev/null
-cp "$icon/AppIcon.icns" "$app/Contents/Resources/"
-rm -rf "$icon"
+icon_sha=$(find "$PWD/AppIcon.icon" -type f | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256 | awk '{print $1}')
+icon_cache="zig-out/.icon-cache/$icon_sha"
+if [ ! -f "$icon_cache/AppIcon.icns" ]; then
+  icon=$(mktemp -d)
+  xcrun actool "$PWD/AppIcon.icon" --compile "$icon" --app-icon AppIcon \
+    --platform macosx --minimum-deployment-target 15.0 \
+    --output-partial-info-plist /dev/null >/dev/null
+  mkdir -p "zig-out/.icon-cache"
+  mv "$icon" "$icon_cache" 2>/dev/null || rm -rf "$icon"
+fi
+cp "$icon_cache/AppIcon.icns" "$app/Contents/Resources/"
 cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
