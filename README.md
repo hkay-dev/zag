@@ -7,7 +7,7 @@ Zag is a small native text editor for macOS on Apple Silicon, written from scrat
 ## Highlights
 
 - **Tiny and instant.** Zag draws straight onto a `CGContext` with `CoreText` glyph runs on a monospace grid and reads and writes files directly through `libc`, with no embedded runtime, webview, or third-party dependencies.
-- **Cards, splits, and tabs.** Split any window side by side (`⌘D`) or top and bottom (`⇧⌘D`), drag tabs to reorder or split cards, and browse open folders in the collapsible file sidebar (`⌘B`).
+- **Cards, splits, and tabs.** Split any window side by side (`⌘D`) or top and bottom (`⇧⌘D`), drag tabs to reorder or split cards, and browse open folders in the collapsible file sidebar (`⌘\`).
 - **Animated motion.** Caret glides, spring-driven tab and sidebar highlights, smooth split folds, and theme crossfades animate every layout change.
 - **Quick Open and Command Palette.** Jump to any file in the open folder with fuzzy matching (`⌘P`) or run any menu command from the keyboard (`⌘K`).
 - **Live Markdown Preview.** Render the active Markdown file in a companion preview window (`⇧⌘M`) with synchronized scrolling, lists, code blocks, links, and tables.
@@ -65,7 +65,7 @@ CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/dmg.s
 | Split right / Split down | `⌘D` / `⇧⌘D` |
 | Focus previous / next card | `⌥⌘←` / `⌥⌘→` |
 | Previous / next tab | `⇧⌘[` / `⇧⌘]` (or `⌃⇧⇥` / `⌃⇥`) |
-| Toggle sidebar | `⌘B` |
+| Toggle sidebar | `⌘\` |
 | Find / Find and Replace | `⌘F` / `⌥⌘F` |
 | Go to Line | `⌘L` |
 | Toggle Comment | `⌘/` |
