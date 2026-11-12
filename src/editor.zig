@@ -547,7 +547,7 @@ fn wordLeft(t: []const u8, from: usize) usize {
 fn wordRight(t: []const u8, from: usize) usize {
     var i = from;
     while (i < t.len and class(t[i]) == 1) i += 1;
-    if (i < t.len and class(t[i]) == 2) return if (t[i] == '\r' and i + 1 < t.len) i + 2 else i + 1;
+    if (i < t.len and class(t[i]) == 2) return if (t[i] == '\r' and i + 1 < t.len and t[i + 1] == '\n') i + 2 else i + 1;
     if (i == t.len) return i;
     const k = class(t[i]);
     while (i < t.len and class(t[i]) == k) i += 1;
