@@ -174,9 +174,12 @@ pub const Editor = struct {
     }
 
     /// Tab: indents the selected lines, or inserts an indent at the caret.
+    /// A selection of one whole line indents it, whichever way it was dragged.
     pub fn tab(e: *Editor, gpa: Allocator) !void {
         const r = e.sel();
-        if (e.buf.lineOf(r[0]) == e.buf.lineOf(r[1])) {
+        const first = e.buf.lineOf(r[0]);
+        const whole = r[0] != r[1] and r[0] == e.buf.lineStart(first) and r[1] == e.buf.lineEnd(first);
+        if (!whole and first == e.buf.lineOf(r[1])) {
             if (e.indent[0] == '\t') return e.insert(gpa, "\t");
             const row = e.buf.lineOf(e.cur);
             const col = colOf(e.buf.line(row), 0, 0, e.cur - e.buf.lineStart(row));
@@ -850,6 +853,17 @@ test "indent and outdent a block, skipping a line the selection only touches" {
     try t_.expectEqualStrings("    a\n    b\nc", e.text());
     try e.outdent(gpa_t);
     try t_.expectEqualStrings("a\nb\nc", e.text());
+}
+
+test "tab indents one whole selected line in either direction" {
+    var e = try Editor.init(gpa_t, "ab\nc");
+    defer e.deinit(gpa_t);
+    e.select(0, 2);
+    try e.tab(gpa_t);
+    try t_.expectEqualStrings("    ab\nc", e.text());
+    e.select(6, 0);
+    try e.tab(gpa_t);
+    try t_.expectEqualStrings("        ab\nc", e.text());
 }
 
 test "search wraps and backs up past the current match" {
