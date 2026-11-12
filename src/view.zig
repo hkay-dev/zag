@@ -1751,6 +1751,8 @@ fn install(d: *Doc, pg: Page) void {
     d.focus_on = false;
     d.sel_out.snap(0);
     d.snap = true;
+    d.drag = .char;
+    d.drag_from = .{ 0, 0 };
     d.cur_m = null;
     d.prev_t0 = -1e9;
     d.jumped = false;
@@ -6851,7 +6853,6 @@ fn cardDown(d: *Doc, p: Point, ev: Id) void {
         d.win.tdrag = .{ .from = d, .id = hit.id, .down = at, .at = at, .grab = p.x - (s.x + s.shift.x) };
         return;
     }
-    d.win.side_down = false;
     if (listing(d) != null) {
         const top = by - f(panelRows(d)) * prow - ppad;
         if (p.y >= top and p.y < by) {
@@ -6860,10 +6861,8 @@ fn cardDown(d: *Doc, p: Point, ev: Id) void {
             return refresh(d);
         }
     }
-    if (p.y >= by) {
-        d.win.side_down = true;
-        return;
-    }
+    if (p.y >= by) return;
+    d.win.side_down = false;
     d.mode = .edit;
     const pos = posAt(d, p);
     switch (msg(isize, ev, "clickCount", .{})) {
