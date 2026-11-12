@@ -4618,8 +4618,8 @@ const Fold = struct {
 };
 
 /// The folders folding now. Slot 0 is the latest click's; a folder still
-/// closing when another click comes moves to slot 1 and finishes there,
-/// so clicks are never held up by a closing folder.
+/// opening or closing when another click comes moves to slot 1 and
+/// finishes there, so a click never snaps the folder before it.
 var folds: [2]Fold = .{ .{}, .{} };
 
 /// A folding folder as drawn: its row, where its rows end, how far open it
@@ -4681,8 +4681,8 @@ fn refindFold(o: *Fold, now: f64) void {
 }
 
 /// Opens or closes the folder at row `i`. A folder that's still folding
-/// turns around from where it got to; one still closing keeps going on
-/// its own record.
+/// turns around from where it got to; another one still folding keeps
+/// going on its own record.
 fn startFold(i: usize) void {
     defer for (wins.items) |w| redrawSide(w);
     const now = CACurrentMediaTime();
@@ -4693,21 +4693,23 @@ fn startFold(i: usize) void {
         o.closing = !o.closing;
         return o.t.aim(if (o.closing) 0 else 1, now);
     };
-    // A closing folder the new one reaches into, or a third folder
-    // closing at once, is shut right away.
+    // A folding folder the new one reaches into, or a third folder
+    // folding at once, finishes right away: a closing one shuts and an
+    // opening one lands open.
     var at = i;
     while (true) {
         const e = tree.end(at);
-        const crowded = folds[0].closing and folds[0].t.moving(now) and folds[1].closing and folds[1].t.moving(now);
+        const crowded = folds[0].t.moving(now) and folds[1].t.moving(now);
         var hit: ?*Fold = null;
-        for (&folds, 0..) |*o, s| if (o.closing and o.t.moving(now) and ((o.at < e and at < o.at + o.n + 1) or (crowded and s == 1))) {
+        for (&folds, 0..) |*o, s| if (o.t.moving(now) and ((o.at < e and at < o.at + o.n + 1) or (crowded and s == 1))) {
             hit = o;
         };
-        finishFold(hit orelse break);
+        const o = hit orelse break;
+        if (o.closing) finishFold(o) else o.t.snap(1);
         at = tree.rowOf(rel) orelse return;
     }
     const shut = tree.isOpen(rel);
-    if (folds[0].closing and folds[0].t.moving(now)) folds[1] = folds[0];
+    if (folds[0].t.moving(now)) folds[1] = folds[0];
     const fo = &folds[0];
     @memcpy(fo.rel[0..rel.len], rel);
     fo.len = rel.len;

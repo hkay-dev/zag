@@ -99,9 +99,10 @@ an animation acts at once: a closing folder keeps sliding and the click maps thr
 - Theme and appearance change: 0.25 s ease-in-out layer crossfade, skipped for Zen alone
   (zig-editor#ms1x). The drag ghost lifts to 1.04 on a spring k 500 c 28 with a real shadow, and
   the card shadow halves over 0.2 s when the window stops being key.
-- Folds keep two records, the latest click's and one still closing, so clicks map through
-  sliding rows and never snap a closing folder. Only a second folder closing at once, or a click
-  inside a closing folder's rows, finishes the older one early.
+- Folds keep two records, the latest click's and the one before it, so clicks map through
+  sliding rows and never snap a folder that's still opening or closing. Only a third folder
+  folding at once, or a click on a folder that overlaps a folding folder's rows, finishes the
+  older one early (zag#g0r3).
 - Haptics (trackpad taps): alignment taps when a split gap or the sidebar edge reaches a snap
   point or limit, and when a dragged tab swaps places; a level tap when the drop zone changes
   kind. Never on typing, clicks or scrolling.
