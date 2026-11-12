@@ -2724,10 +2724,12 @@ fn restoreWindow(frame: []const u8, it: *std.mem.SplitIterator(u8, .scalar)) voi
     var lit: ?*Doc = null;
     const n = restoreNode(w, it, &lit) orelse {
         // Nothing of the line is left: the window closes, holding a card for its layout.
+        // Only the delegate is set, so closing tears it down without finishWin
+        // centering it and writing that frame over the saved one.
         const d = newPane(w) orelse return;
         leaf.* = .{ .pane = d };
         w.focus = d;
-        finishWin(w);
+        msg(void, w.window, "setDelegate:", .{w.view});
         return msg(void, w.window, "close", .{});
     };
     gpa.destroy(leaf);
