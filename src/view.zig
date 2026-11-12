@@ -3500,6 +3500,16 @@ fn countFound(d: *Doc) void {
     d.found[0] += 1;
 }
 
+/// "3 of 12" for a full count; past `count_cap`, "3 of 10000+", or
+/// "10000+ matches" when the current match lies beyond the counted ones.
+fn foundTally(buf: []u8, found: [2]usize) []const u8 {
+    const cap = editor.count_cap;
+    if (found[1] == 0) return "no matches";
+    if (found[1] < cap) return std.fmt.bufPrint(buf, "{d} of {d}", .{ @min(found[0], found[1]), found[1] }) catch "";
+    if (found[0] <= cap) return std.fmt.bufPrint(buf, "{d} of {d}+", .{ found[0], cap }) catch "";
+    return std.fmt.bufPrint(buf, "{d}+ matches", .{cap}) catch "";
+}
+
 /// The prompt field that takes typing: the replacement, or the search.
 fn field(d: *Doc) *std.ArrayList(u8) {
     return if (d.mode == .replace and d.which == 1) &d.with else &d.prompt;
@@ -5882,7 +5892,7 @@ fn drawPrompt(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, ka: f64, 
         // The words rise a beat after the band starts.
         if (now >= d.pbar_t0 + words_lag) d.prompt_t.aim(1, now);
         var tally: []const u8 = "";
-        if (finding) tally = if (d.found[1] == 0) "no matches" else std.fmt.bufPrint(&buf, "{d} of {d}", .{ @min(d.found[0], d.found[1]), d.found[1] }) catch "";
+        if (finding) tally = foundTally(&buf, d.found);
         if (d.mode == .open and quick != null) tally = std.fmt.bufPrint(&buf, "{d} files", .{quick.?.paths.items.len}) catch "";
         if (d.mode == .command) tally = std.fmt.bufPrint(&buf, "{d} commands", .{cmds.items.len}) catch "";
         d.held_n = @min(tally.len, d.held_tally.len);

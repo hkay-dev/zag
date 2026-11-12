@@ -326,8 +326,9 @@ Zen Mode hides it. There's no setting for it.
 ## Find and replace
 
 1. Press ⌘F. The prompt starts with the selected text or your last search.
-2. Type: Zag jumps to the first match and shows how many there are. Searching ignores case unless
-   you type a capital letter. If nothing matches, the words shake.
+2. Type: Zag jumps to the first match and shows how many there are. Zag stops counting at 10,000
+   and shows `10000+`, so a one-letter search in a huge file answers at once. Searching ignores case
+   unless you type a capital letter. If nothing matches, the words shake.
 3. Press Return for the next match, ⇧Return for the previous one, and Escape to close the prompt.
 
 The match you're on is a bright yellow pill that pops when you jump to it, and the other matches

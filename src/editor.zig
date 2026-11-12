@@ -508,22 +508,37 @@ pub fn matchAt(t: []const u8, i: usize, q: []const u8, sensitive: bool) bool {
     return std.ascii.eqlIgnoreCase(t[i .. i + q.len], q);
 }
 
+/// First index at or after `from` holding byte `a` or `b`, 32 bytes at a time.
+fn findEither(t: []const u8, from: usize, a: u8, b: u8) ?usize {
+    const V = @Vector(32, u8);
+    var i = from;
+    while (i + 32 <= t.len) : (i += 32) {
+        const v: V = t[i..][0..32].*;
+        const hit = (v == @as(V, @splat(a))) | (v == @as(V, @splat(b)));
+        if (std.simd.firstTrue(hit)) |k| return i + k;
+    }
+    while (i < t.len) : (i += 1) if (t[i] == a or t[i] == b) return i;
+    return null;
+}
+
+/// Next spot at or after `i`, before `stop`, where `q` could start.
+fn candidate(t: []const u8, i: usize, stop: usize, q: []const u8, sensitive: bool) ?usize {
+    if (sensitive) return std.mem.indexOfPos(u8, t[0 .. stop + q.len - 1], i, q);
+    return findEither(t[0..stop], i, std.ascii.toLower(q[0]), std.ascii.toUpper(q[0]));
+}
+
 fn search(t: []const u8, q: []const u8, from: usize, back: bool) ?usize {
     if (q.len == 0 or q.len > t.len) return null;
     const end = t.len - q.len + 1;
     const start = @min(from, end);
     const sensitive = caseSensitive(q);
-    const cases = [2]u8{ std.ascii.toLower(q[0]), std.ascii.toUpper(q[0]) };
     for (0..2) |pass| {
         const prefix = back == (pass == 0);
         var i: usize = if (prefix) 0 else start;
         const stop = if (prefix) start else end;
         var found: ?usize = null;
         while (i < stop) {
-            const p = (if (sensitive)
-                std.mem.indexOfPos(u8, t[0 .. stop + q.len - 1], i, q)
-            else
-                std.mem.indexOfAnyPos(u8, t[0..stop], i, &cases)) orelse break;
+            const p = candidate(t, i, stop, q, sensitive) orelse break;
             if (matchAt(t, p, q, sensitive)) {
                 if (!back) return p;
                 found = p;
@@ -535,18 +550,20 @@ fn search(t: []const u8, q: []const u8, from: usize, back: bool) ?usize {
     return null;
 }
 
-/// Non-overlapping matches ending at or before `before`, and in all the text.
+/// Counting stops at this many matches, so a one-letter query in a huge
+/// file returns within a frame.
+pub const count_cap = 10_000;
+
+/// Non-overlapping matches ending at or before `before`, and in all the
+/// text, both counted up to `count_cap`.
 pub fn countMatches(t: []const u8, q: []const u8, before: usize) [2]usize {
     var n = [2]usize{ 0, 0 };
     if (q.len == 0 or q.len > t.len) return n;
     const sensitive = caseSensitive(q);
-    const cases = [2]u8{ std.ascii.toLower(q[0]), std.ascii.toUpper(q[0]) };
+    const end = t.len - q.len + 1;
     var i: usize = 0;
-    while (i <= t.len - q.len) {
-        const p = (if (sensitive)
-            std.mem.indexOfPos(u8, t, i, q)
-        else
-            std.mem.indexOfAnyPos(u8, t, i, &cases)) orelse break;
+    while (i < end and n[1] < count_cap) {
+        const p = candidate(t, i, end, q, sensitive) orelse break;
         if (matchAt(t, p, q, sensitive)) {
             n[0] += @intFromBool(p + q.len <= before);
             n[1] += 1;
@@ -925,6 +942,20 @@ test "search jumps with punctuation, case folding and wrapping in both direction
     try t_.expectEqual(@as(?usize, 1), search("aaaa", "aa", 2, true));
     try t_.expectEqual([2]usize{ 1, 3 }, countMatches(s, ".foo", 8));
     try t_.expectEqual([2]usize{ 1, 1 }, countMatches(s, ".Foo", 8));
+}
+
+test "search finds folded matches past the 32-byte blocks and counting stops at the cap" {
+    var buf: [116]u8 = @splat('x');
+    @memcpy(buf[70..73], "Foo");
+    @memcpy(buf[113..], "fOO");
+    const long: []const u8 = &buf;
+    try t_.expectEqual(@as(?usize, 70), search(long, "foo", 0, false));
+    try t_.expectEqual(@as(?usize, 113), search(long, "foo", 71, false));
+    try t_.expectEqual(@as(?usize, 113), search(long, "foo", 0, true));
+    try t_.expectEqual([2]usize{ 1, 2 }, countMatches(long, "foo", 100));
+    const many: [count_cap + 5]u8 = @splat('a');
+    try t_.expectEqual([2]usize{ 3, count_cap }, countMatches(&many, "a", 3));
+    try t_.expectEqual([2]usize{ count_cap, count_cap }, countMatches(&many, "a", many.len));
 }
 
 test "word motion stops at punctuation and line ends" {
