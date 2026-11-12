@@ -1421,6 +1421,9 @@ const Win = struct {
     /// The mouse went down outside the cards' text (the sidebar, the title
     /// band, a gap), so drags don't select text.
     side_down: bool = false,
+    /// Where a text selection drag last was in the view, while the button
+    /// is down, so a pointer held above or below the text goes on scrolling.
+    sel_at: ?Point = null,
     /// The mouse went down on the sidebar's edge and is dragging it.
     side_drag: bool = false,
     /// Which limit the sidebar's edge is at while dragged: -1 least, 1 most, 0 none.
@@ -6964,6 +6967,7 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
     const p = local(self, ev);
     w.side_down = true;
+    w.sel_at = null;
     w.grab = null;
     endDrag(w);
     endFly(w);
@@ -7186,6 +7190,7 @@ fn letGo(w: *Win) void {
 fn mouseUp(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
     letGo(w);
+    w.sel_at = null;
     if (w.tdrag) |t| {
         w.tdrag = null;
         startFly(w, t);
@@ -7219,9 +7224,20 @@ fn mouseDragged(self: Id, _: Sel, ev: Id) callconv(.c) void {
     if (w.tdrag != null) return dragTab(w, local(self, ev));
     if (w.grab) |n| return dragGap(w, n, local(self, ev));
     if (w.side_down) return;
+    dragText(w, local(self, ev));
+}
+
+/// How often a selection drag held above or below the text scrolls a line.
+const drag_step = 1.0 / 60.0;
+
+/// Extends the focused card's selection to `at` in the view, scrolling a
+/// line when it's above or below the text, and comes back after
+/// `drag_step` to scroll again while the mouse holds still out there.
+fn dragText(w: *Win, at: Point) void {
     const d = w.focus;
     d.snap = true;
-    const p = inPane(d, local(self, ev));
+    const p = inPane(d, at);
+    const sy = d.file.sy;
     if (p.y < top_h) d.file.sy -= lh;
     if (p.y > bottom(d)) d.file.sy += lh;
     clampScroll(d);
@@ -7234,6 +7250,19 @@ fn mouseDragged(self: Id, _: Sel, ev: Id) callconv(.c) void {
         if (u[0] < d.drag_from[0]) d.file.ed.select(d.drag_from[1], u[0]) else d.file.ed.select(d.drag_from[0], @max(u[1], d.drag_from[1]));
     }
     refresh(d);
+    w.sel_at = at;
+    if (d.file.sy != sy) objc.later(w.view, "dragScroll:", w.window, drag_step);
+}
+
+/// The selection drag's timer: scrolls on while the button is still down.
+fn dragScroll(self: Id, _: Sel, _: Id) callconv(.c) void {
+    const w = winOf(self) orelse return;
+    const at = w.sel_at orelse return;
+    if (msg(usize, objc.class("NSEvent"), "pressedMouseButtons", .{}) & 1 == 0) {
+        w.sel_at = null;
+        return;
+    }
+    dragText(w, at);
 }
 
 /// Scrolls the sidebar or the card under the mouse, focused or not.
@@ -8061,6 +8090,7 @@ pub fn setup() void {
     c.method("retitle:", @ptrCast(&retitleNow), "v@:@");
     c.method("tick:", @ptrCast(&tick), "v@:@");
     c.method("holdRedraw:", @ptrCast(&holdRedraw), "v@:@");
+    c.method("dragScroll:", @ptrCast(&dragScroll), "v@:@");
     c.method("saveDrafts:", @ptrCast(&saveDraftsNow), "v@:@");
     c.method("changeFont:", @ptrCast(&changeFont), "v@:@");
     c.method("menuForEvent:", @ptrCast(&menuForEvent), "@@:@");
