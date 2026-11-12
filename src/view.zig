@@ -5579,11 +5579,19 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             // Opening find on prefilled text fades the matches in, the nearest first.
             const dist = if (row > here.row) row - here.row else here.row - row;
             const m_a = std.math.clamp((now - d.stag_t0 - @min(stag_row * f(dist), stag_cap)) / fade_time, 0, 1) * fm.pills_a;
+            // Each pill's column carries on from the last one's, and the scan
+            // stops past the right edge, so a long unwrapped line costs one pass.
+            var at = sg.start;
+            var col = sg.col;
             var j = sg.start -| (fm.pills.len - 1);
             while (j < sg.end and j + fm.pills.len <= l.len) : (j += 1) if (editor.matchAt(l, j, fm.pills, fm.sensitive)) {
-                if (rowSpan(l, ls, sg, .{ ls + j, ls + j + fm.pills.len }, ox, skip)) |sp| {
-                    if (sp.lo < sp.hi and ls + j != s[0]) pill(ctx, th.match, match_alpha * m_a, sp.x0, y + 2, sp.x1 - sp.x0, lh - 4, 3);
-                }
+                const lo = @max(j, sg.start);
+                const hi = @min(j + fm.pills.len, sg.end);
+                const c0 = editor.colOf(l, at, col, lo);
+                col = editor.colOf(l, lo, c0, hi);
+                at = hi;
+                if (c0 - sg.col > skip + cols) break;
+                if (col - sg.col + 1 >= skip and ls + j != s[0]) pill(ctx, th.match, match_alpha * m_a, ox + (f(c0 - sg.col) - f(skip)) * cw, y + 2, f(col - c0) * cw, lh - 4, 3);
                 j += fm.pills.len - 1;
             };
         }
