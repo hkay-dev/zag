@@ -1559,6 +1559,8 @@ const TabDrag = struct {
     cmd: bool = false,
     /// The sidebar row it came from, which dims while it's out.
     row: ?usize = null,
+    /// The tab's place in its row when the mouse went down, where ⎋ puts it back.
+    start: usize = 0,
 };
 
 var wins: std.ArrayList(*Win) = .empty;
@@ -6473,6 +6475,22 @@ fn endDrag(w: *Win) void {
     freeDrag(t);
 }
 
+/// ⎋ during a drag: a tab goes back to its place in its row, a copy out
+/// of its row or from the sidebar flies home, and letting go does nothing.
+fn cancelDrag(w: *Win) void {
+    var t = w.tdrag orelse return;
+    w.tdrag = null;
+    if (t.from) |d| if (!d.closing) {
+        if (tabIndex(d, t.id)) |j| reorderTab(d, j, @min(t.start, tabCount(d) - 1));
+        refresh(d);
+    };
+    t.drop = null;
+    startFly(w, t);
+    freeDrag(t);
+    aimPreview(w, CACurrentMediaTime());
+    msg(void, w.view, "setNeedsDisplay:", .{true});
+}
+
 fn freeDrag(t: TabDrag) void {
     if (t.file) |p| gpa.free(p);
     if (t.name) |l| objc.CFRelease(l);
@@ -6821,6 +6839,8 @@ fn keyDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     d.flash_n = 0;
     const flags = msg(usize, ev, "modifierFlags", .{});
     const code = msg(u16, ev, "keyCode", .{});
+    // ⎋ mid-drag drops nothing: the tab or file goes home.
+    if (code == 53 and d.win.tdrag != null) return cancelDrag(d.win);
     // ⌥Z for Soft Wrap: menus only see option keys after the text has typed them.
     if (flags & (objc.cmd_key | objc.opt_key | objc.ctrl_key) == objc.opt_key and code == 6) return flip(.wrap);
     // ⌃⌘Z reaches here while Late-Night greys the Zen item: it leaves Late-Night.
@@ -7019,7 +7039,7 @@ fn cardDown(d: *Doc, p: Point, ev: Id) void {
         // Held, the tab can be dragged along its row or to another card.
         const s = d.slots.items[slotOf(d, hit.id) orelse return];
         const at: Point = .{ .x = p.x + d.org.x, .y = p.y + d.org.y };
-        d.win.tdrag = .{ .from = d, .id = hit.id, .down = at, .at = at, .grab = p.x - (s.x + s.shift.x) };
+        d.win.tdrag = .{ .from = d, .id = hit.id, .start = hit.j, .down = at, .at = at, .grab = p.x - (s.x + s.shift.x) };
         return;
     }
     if (listing(d) != null) {
