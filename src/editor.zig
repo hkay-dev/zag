@@ -214,8 +214,13 @@ pub const Editor = struct {
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(gpa);
         var depth: usize = 0;
+        // Where the caret lands in the new text: the same token, or the
+        // same byte inside a string, it sat on or just before.
+        const cur = e.cur;
+        var at: ?usize = if (cur < a) cur else null;
         var i = a;
         while (i < z) : (i += 1) {
+            if (at == null and cur <= i) at = a + out.items.len;
             const c = t[i];
             switch (c) {
                 ' ', '\t', '\r', '\n' => {},
@@ -223,6 +228,7 @@ pub const Editor = struct {
                     const s = i;
                     i += 1;
                     while (t[i] != '"') i += if (t[i] == '\\') 2 else 1;
+                    if (at == null and cur <= i) at = a + out.items.len + cur - s;
                     try out.appendSlice(gpa, t[s .. i + 1]);
                 },
                 '{', '[' => {
@@ -239,7 +245,9 @@ pub const Editor = struct {
                 },
                 '}', ']' => {
                     depth -= 1;
+                    const mark = a + out.items.len;
                     try e.breakLine(gpa, &out, base, depth);
+                    if (at == mark) at = a + out.items.len;
                     try out.append(gpa, c);
                 },
                 ',' => {
@@ -252,7 +260,8 @@ pub const Editor = struct {
         }
         if (std.mem.eql(u8, out.items, t[a..z])) return true;
         try e.buf.replace(gpa, a, z, out.items, e.cur, false);
-        if (e.hasSel()) e.select(a, a + out.items.len) else e.select(@min(e.cur, a), @min(e.cur, a));
+        const caret = at orelse cur - z + a + out.items.len;
+        if (e.hasSel()) e.select(a, a + out.items.len) else e.select(caret, caret);
         return true;
     }
 
@@ -883,6 +892,17 @@ test "format JSON indents nesting and keeps keys, numbers and strings as written
     try t_.expectEqualStrings("\n{\n    \"b\": [\n        1.50,\n        {},\n        []\n    ],\n    \"a\": \"x\\\"{,\"\n}\n", e.text());
     _ = try e.undo(gpa_t);
     try t_.expectEqualStrings("\n{\"b\":[1.50,{},[ ]],\"a\":\"x\\\"{,\"}\n", e.text());
+}
+
+test "format JSON keeps the caret on the token or string byte it was on" {
+    const src = "\n{\"b\":[1.50,{},[ ]],\"a\":\"x\\\"{,\"}\n";
+    for ([_][2]usize{ .{ 9, 24 }, .{ 28, 71 }, .{ 31, 75 }, .{ 32, 76 }, .{ 0, 0 } }) |c| {
+        var e = try Editor.init(gpa_t, src);
+        defer e.deinit(gpa_t);
+        e.select(c[0], c[0]);
+        try t_.expect(try e.formatJson(gpa_t));
+        try t_.expectEqual([2]usize{ c[1], c[1] }, e.sel());
+    }
 }
 
 test "format JSON leaves text that isn't JSON alone and works on a selection" {
