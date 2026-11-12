@@ -3543,7 +3543,11 @@ fn promptCommand(d: *Doc, name: []const u8) void {
     if (is(name, "deleteBackward")) {
         d.fresh = false;
         into.items.len = editor.prevChar(into.items, into.items.len);
-    } else if (is(name, "deleteWordBackward") or is(name, "deleteToBeginningOfLine")) {
+    } else if (is(name, "deleteWordBackward")) {
+        // A fresh prefill is selected, so it goes whole.
+        into.items.len = if (d.fresh) 0 else editor.wordLeft(into.items, into.items.len);
+        d.fresh = false;
+    } else if (is(name, "deleteToBeginningOfLine")) {
         into.clearRetainingCapacity();
     } else if (listing(d) != null and (is(name, "moveUp") or is(name, "moveDown"))) {
         if (is(name, "moveUp")) d.pick -|= 1 else d.pick = @min(d.pick + 1, d.npicks -| 1);

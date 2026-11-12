@@ -582,7 +582,7 @@ fn isCloser(c: u8) bool {
     return c == ')' or c == ']' or c == '}' or c == '"' or c == '\'' or c == '`';
 }
 
-fn wordLeft(t: []const u8, from: usize) usize {
+pub fn wordLeft(t: []const u8, from: usize) usize {
     var i = from;
     while (i > 0 and class(t[i - 1]) == 1) i -= 1;
     if (i > 0 and t[i - 1] == '\n') return if (i > 1 and t[i - 2] == '\r') i - 2 else i - 1;
