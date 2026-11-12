@@ -431,6 +431,7 @@ pub const Editor = struct {
         a = charStart(t, a);
         var z: usize = 0;
         while (z < t.len - a and z < bytes.len - a and t[t.len - 1 - z] == bytes[bytes.len - 1 - z]) z += 1;
+        while (z > 0 and t[t.len - z] & 0xC0 == 0x80) z -= 1;
         const old_len = t.len;
         const fix = struct {
             fn at(p: usize, keep: usize, tail: usize, from: usize, to: usize) usize {
@@ -906,4 +907,15 @@ test "reload keeps the caret and undoes back to the old text" {
     try t_.expectEqual(@as(usize, 15), e.cur);
     _ = try e.undo(gpa_t);
     try t_.expectEqualStrings("zero\none\ntwo\nthree\n", e.text());
+}
+
+test "reload keeps a changed multi-byte character whole for undo and redo" {
+    var e = try Editor.init(gpa_t, "\xC3\xA1");
+    defer e.deinit(gpa_t);
+    try e.reload(gpa_t, "\xC2\xA1");
+    _ = try e.undo(gpa_t);
+    try t_.expectEqualStrings("\xC3\xA1", e.text());
+    _ = try e.redo(gpa_t);
+    try t_.expectEqualStrings("\xC2\xA1", e.text());
+    try t_.expectEqual(@as(usize, 2), e.cur);
 }
