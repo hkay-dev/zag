@@ -21,11 +21,19 @@ pub const Editor = struct {
 
     pub fn init(gpa: Allocator, bytes: []const u8) !Editor {
         var e: Editor = .{ .buf = try Buffer.init(gpa, bytes) };
+        e.detectStyle(bytes);
+        return e;
+    }
+
+    /// Picks the line ending and indent that Return and Tab insert from the
+    /// file's own text.
+    fn detectStyle(e: *Editor, bytes: []const u8) void {
+        e.eol = "\n";
         if (std.mem.indexOfScalar(u8, bytes, '\n')) |i| {
             if (i > 0 and bytes[i - 1] == '\r') e.eol = "\r\n";
         }
+        e.indent = "    ";
         if (std.mem.indexOf(u8, bytes, "\n\t") != null and std.mem.indexOf(u8, bytes, "\n    ") == null) e.indent = "\t";
-        return e;
     }
 
     pub fn deinit(e: *Editor, gpa: Allocator) void {
@@ -461,6 +469,7 @@ pub const Editor = struct {
         const cur = fix(e.cur, a, z, old_len, bytes.len);
         try e.buf.replace(gpa, a, old_len - z, bytes[a .. bytes.len - z], e.cur, false);
         e.buf.markSaved();
+        e.detectStyle(bytes);
         e.select(anchor, cur);
     }
 };
@@ -938,6 +947,16 @@ test "reload keeps the caret and undoes back to the old text" {
     try t_.expectEqual(@as(usize, 15), e.cur);
     _ = try e.undo(gpa_t);
     try t_.expectEqualStrings("zero\none\ntwo\nthree\n", e.text());
+}
+
+test "reload picks up the new file's line ending and indent" {
+    var e = try Editor.init(gpa_t, "a\r\n\tb\r\n");
+    defer e.deinit(gpa_t);
+    try t_.expectEqualStrings("\r\n", e.eol);
+    try t_.expectEqualStrings("\t", e.indent);
+    try e.reload(gpa_t, "a\n    b\n");
+    try t_.expectEqualStrings("\n", e.eol);
+    try t_.expectEqualStrings("    ", e.indent);
 }
 
 test "reload keeps a changed multi-byte character whole for undo and redo" {
