@@ -38,10 +38,13 @@ fn didFinishLaunching(_: Id, _: Sel, _: Id) callconv(.c) void {
     }
     if (view.count() == 0 and !view.restoreSession()) _ = view.newDoc();
     view.adoptDrafts();
-    // With no folder from the terminal or the last session, use the home folder.
-    if (view.root == null) if (std.c.getenv("HOME")) |h| {
-        if (view.gpa.dupe(u8, std.mem.span(h))) |dir| view.setRoot(dir) else |_| {}
-    };
+    // A file opened from Finder skips the session, but not its folder; with
+    // neither a folder from the terminal nor a saved one, use the home folder.
+    if (view.root == null) {
+        if (view.savedRoot()) |dir| view.setRoot(dir) else if (std.c.getenv("HOME")) |h| {
+            if (view.gpa.dupe(u8, std.mem.span(h))) |dir| view.setRoot(dir) else |_| {}
+        }
+    }
     // Launched from a terminal there is no bundle and nothing brings the
     // window forward; from the bundle, Launch Services does it (or `open -g` doesn't).
     const bundle = msg(Id, objc.class("NSBundle"), "mainBundle", .{});

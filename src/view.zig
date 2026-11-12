@@ -2691,17 +2691,21 @@ fn saveLayout(w: *const Win, n: *const Node, out: *std.ArrayList(u8)) !usize {
     return try saveLayout(w, n.kids[0], out) + try saveLayout(w, n.kids[1], out);
 }
 
+/// The last session's folder, owned by gpa, or null when it's gone or unset.
+pub fn savedRoot() ?[:0]u8 {
+    const saved = msg(Id, defaults(), "stringForKey:", .{objc.str("root")});
+    if (saved == null) return null;
+    const z = gpa.dupeSentinel(u8, objc.utf8(saved), 0) catch return null;
+    if (files.isDir(z)) return z;
+    gpa.free(z);
+    return null;
+}
+
 /// Reopens last session's windows where they were, with their cards and
 /// tabs, and its folder when Zag started without one. False when no window
 /// opened.
 pub fn restoreSession() bool {
-    if (root == null) {
-        const saved = msg(Id, defaults(), "stringForKey:", .{objc.str("root")});
-        if (saved != null) {
-            const z = gpa.dupeSentinel(u8, objc.utf8(saved), 0) catch return false;
-            if (files.isDir(z)) adoptRoot(z) else gpa.free(z);
-        }
-    }
+    if (root == null) if (savedRoot()) |z| adoptRoot(z);
     const list = msg(Id, defaults(), "stringArrayForKey:", .{objc.str("session")});
     restoring = true;
     const n = if (list != null) msg(usize, list, "count", .{}) else 0;
