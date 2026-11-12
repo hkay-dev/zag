@@ -1859,8 +1859,9 @@ fn closeTab(d: *Doc, at: usize) void {
     var j = at;
     if (tabPage(d, j).loses()) {
         showTab(d, j);
-        j = d.at;
         if (!keepOrDrop(d)) return;
+        // A Save As can close tabs left of it, so take its place after saving.
+        j = d.at;
     }
     var pg = takeTab(d, j) orelse return;
     pg.deinit();
@@ -2419,17 +2420,20 @@ fn asks(quit: bool, p: *const Page) bool {
     return if (quit) p.edited() else p.loses();
 }
 
-/// Saves the file on show, then each page `settle` asked about in turn.
+/// Saves the file on show, then each page `settle` asked about in tab order.
 fn saveAll(d: *Doc, quit: bool) bool {
-    const shown = d.at;
-    for (0..tabCount(d)) |i| {
-        // Save the shown file first, then the others in tab order.
-        const j = if (i == 0) shown else if (i <= shown) i - 1 else i;
-        if (!asks(quit, tabPage(d, j))) continue;
+    if (asks(quit, &d.file) and !save(d, false)) return false;
+    // A Save As can close other tabs, so look again after each save.
+    while (askingTab(d, quit)) |j| {
         showTab(d, j);
-        if (!save(d, false)) return false;
+        if (d.at != j or !save(d, false)) return false;
     }
     return true;
+}
+
+fn askingTab(d: *Doc, quit: bool) ?usize {
+    for (0..tabCount(d)) |j| if (asks(quit, tabPage(d, j))) return j;
+    return null;
 }
 
 pub fn settleAll() bool {
@@ -2527,7 +2531,8 @@ fn dropCopies(keep: *Doc, abs: []const u8) void {
         pg.deinit();
         if (!last) continue;
         if (h.d.win.cards.pane != null) {
-            msg(void, h.d.win.window, "performClose:", .{@as(Id, null)});
+            // Close it on the next turn: `settle` may be walking the windows' cards.
+            msg(void, h.d.win.window, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("performClose:"), @as(Id, null), @as(f64, 0) });
         } else {
             foldCard(h.d);
             if (h.d.win == keep.win) focus(keep);
