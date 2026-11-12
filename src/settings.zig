@@ -492,27 +492,48 @@ fn byte(v: f64) u8 {
     return @intFromFloat(@round(std.math.clamp(v, 0, 1) * 255));
 }
 
+/// The ` # comment` after a line's value, with the spaces before it, or "".
+fn trailingComment(line: []const u8) []const u8 {
+    const eq = std.mem.indexOfScalar(u8, line, '=') orelse return "";
+    const val = std.mem.trimStart(u8, line[eq + 1 ..], " \t");
+    if (val.len > 0 and (val[0] == '"' or val[0] == '\'')) {
+        const end = std.mem.indexOfScalarPos(u8, val, 1, val[0]) orelse return "";
+        const rest = val[end + 1 ..];
+        const trimmed = std.mem.trimStart(u8, rest, " \t");
+        return if (trimmed.len > 0 and trimmed[0] == '#') rest else "";
+    }
+    for (val, 0..) |ch, i| if (ch == '#' and i > 0 and (val[i - 1] == ' ' or val[i - 1] == '\t'))
+        return val[std.mem.trimEnd(u8, val[0..i], " \t").len..];
+    return "";
+}
+
 /// `text` with the `opt` line set to `value`, added at the end when missing.
 /// Flags (`true`, `false`) and numbers are written bare, everything else quoted.
+/// The last `opt` line is the one `parse` reads, so that one changes, and its
+/// trailing comment stays.
 fn setLine(gpa: Allocator, text: []const u8, opt: Opt, value: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     const key = @tagName(opt);
     const quote: []const u8 = if (options[@intFromEnum(opt)].kind == .string) "\"" else "";
-    var done = false;
+    var target: ?usize = null;
     var it = std.mem.splitScalar(u8, text, '\n');
-    var first = true;
-    while (it.next()) |raw| {
-        if (!first) try out.append(gpa, '\n');
-        first = false;
+    var n: usize = 0;
+    while (it.next()) |raw| : (n += 1) {
         const line = std.mem.trim(u8, raw, " \t\r");
-        const eq = std.mem.indexOfScalar(u8, line, '=');
-        if (!done and line.len > 0 and line[0] != '#' and eq != null and std.mem.eql(u8, std.mem.trim(u8, line[0..eq.?], " \t"), key)) {
-            try out.print(gpa, "{s} = {s}{s}{s}", .{ key, quote, value, quote });
-            done = true;
+        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        if (line[0] != '#' and std.mem.eql(u8, std.mem.trim(u8, line[0..eq], " \t"), key)) target = n;
+    }
+    it.reset();
+    n = 0;
+    while (it.next()) |raw| : (n += 1) {
+        if (n > 0) try out.append(gpa, '\n');
+        if (n == target) {
+            const comment = trailingComment(std.mem.trim(u8, raw, " \t\r"));
+            try out.print(gpa, "{s} = {s}{s}{s}{s}", .{ key, quote, value, quote, comment });
         } else try out.appendSlice(gpa, raw);
     }
-    if (!done) {
+    if (target == null) {
         if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') try out.append(gpa, '\n');
         try out.print(gpa, "{s} = {s}{s}{s}\n", .{ key, quote, value, quote });
     }
@@ -672,6 +693,16 @@ test "setting a key rewrites only its line, or adds it, in TOML" {
     const c = try setLine(t.allocator, "focus = \"line\"\n", .focus, "paragraph");
     defer t.allocator.free(c);
     try t.expectEqualStrings("focus = \"paragraph\"\n", c);
+    const d = try setLine(t.allocator, "wrap = true # wrap prose\nfont = \"Menlo\"  # mine\n", .wrap, "false");
+    defer t.allocator.free(d);
+    try t.expectEqualStrings("wrap = false # wrap prose\nfont = \"Menlo\"  # mine\n", d);
+    const e = try setLine(t.allocator, d, .font, "system");
+    defer t.allocator.free(e);
+    try t.expectEqualStrings("wrap = false # wrap prose\nfont = \"system\"  # mine\n", e);
+    const f = try setLine(t.allocator, "wrap = false\nsize = 14\nwrap = true\n", .wrap, "false");
+    defer t.allocator.free(f);
+    try t.expectEqualStrings("wrap = false\nsize = 14\nwrap = false\n", f);
+    try t.expect(!parse(f).wrap);
 }
 
 test "the reader takes quotes, trailing comments and bare values" {
