@@ -28,11 +28,18 @@ pub fn scan(gpa: Allocator, root: []const u8) !Files {
     var path: std.ArrayList(u8) = .empty;
     defer path.deinit(gpa);
     try path.appendSlice(gpa, root);
-    try walk(&f, gpa, &path, root.len + 1);
+    try walk(&f, gpa, &path, root.len + 1, isHome(root));
     return f;
 }
 
-fn walk(f: *Files, gpa: Allocator, path: *std.ArrayList(u8), rel: usize) !void {
+/// True when `root` is the user's home folder, whose Library is all caches
+/// and app data, and walking it trips macOS privacy prompts.
+fn isHome(root: []const u8) bool {
+    const home = std.mem.span(c.getenv("HOME") orelse return false);
+    return home.len > 1 and std.mem.eql(u8, std.mem.trimEnd(u8, root, "/"), std.mem.trimEnd(u8, home, "/"));
+}
+
+fn walk(f: *Files, gpa: Allocator, path: *std.ArrayList(u8), rel: usize, home: bool) !void {
     try path.append(gpa, 0);
     const dir = c.opendir(@ptrCast(path.items.ptr)) orelse return path.shrinkRetainingCapacity(path.items.len - 1);
     path.items.len -= 1;
@@ -45,12 +52,29 @@ fn walk(f: *Files, gpa: Allocator, path: *std.ArrayList(u8), rel: usize) !void {
         path.shrinkRetainingCapacity(len);
         try path.append(gpa, '/');
         try path.appendSlice(gpa, name);
-        switch (ent.type) {
-            c.DT.DIR => if (!isSkipped(name)) try walk(f, gpa, path, rel),
-            c.DT.REG, c.DT.LNK => try f.paths.append(gpa, try f.arena.allocator().dupe(u8, path.items[rel..])),
+        const kind = if (ent.type == c.DT.UNKNOWN) try typeOf(gpa, path, false) else ent.type;
+        switch (kind) {
+            c.DT.DIR => if (!isSkipped(name) and !(home and std.mem.eql(u8, name, "Library"))) try walk(f, gpa, path, rel, false),
+            c.DT.REG => try f.paths.append(gpa, try f.arena.allocator().dupe(u8, path.items[rel..])),
+            // A link to a folder isn't walked, so a link cycle can't fill the list.
+            c.DT.LNK => if (try typeOf(gpa, path, true) == c.DT.REG) try f.paths.append(gpa, try f.arena.allocator().dupe(u8, path.items[rel..])),
             else => {},
         }
     }
+}
+
+/// The `DT` type of `path`, following a link only when `follow` is set.
+fn typeOf(gpa: Allocator, path: *std.ArrayList(u8), follow: bool) !u8 {
+    try path.append(gpa, 0);
+    defer path.items.len -= 1;
+    var st: c.Stat = undefined;
+    if (c.fstatat(c.AT.FDCWD, @ptrCast(path.items.ptr), &st, if (follow) 0 else c.AT.SYMLINK_NOFOLLOW) != 0) return c.DT.UNKNOWN;
+    return switch (st.mode & c.S.IFMT) {
+        c.S.IFDIR => c.DT.DIR,
+        c.S.IFREG => c.DT.REG,
+        c.S.IFLNK => c.DT.LNK,
+        else => c.DT.UNKNOWN,
+    };
 }
 
 fn isSkipped(name: []const u8) bool {
