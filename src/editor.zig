@@ -96,6 +96,21 @@ pub const Editor = struct {
         e.typing = one;
     }
 
+    /// Inserts pasted text with its `\n` and `\r\n` breaks turned into the
+    /// file's own line ending.
+    pub fn paste(e: *Editor, gpa: Allocator, s: []const u8) !void {
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(gpa);
+        var rest = s;
+        while (std.mem.indexOfScalar(u8, rest, '\n')) |i| {
+            try out.appendSlice(gpa, rest[0 .. if (i > 0 and rest[i - 1] == '\r') i - 1 else i]);
+            try out.appendSlice(gpa, e.eol);
+            rest = rest[i + 1 ..];
+        }
+        try out.appendSlice(gpa, rest);
+        try e.insert(gpa, out.items);
+    }
+
     /// Newline that keeps the current line's indentation.
     pub fn newline(e: *Editor, gpa: Allocator) !void {
         const t = e.text();
@@ -723,6 +738,19 @@ test "CRLF files get CRLF newlines" {
     e.move(.end, false);
     try e.newline(gpa_t);
     try t_.expectEqualStrings("a\r\n\r\nb", e.text());
+}
+
+test "pasted breaks take the file's line ending" {
+    var crlf = try Editor.init(gpa_t, "a\r\nb");
+    defer crlf.deinit(gpa_t);
+    crlf.moveTo(1, false);
+    try crlf.paste(gpa_t, "x\ny\r\nz");
+    try t_.expectEqualStrings("ax\r\ny\r\nz\r\nb", crlf.text());
+    var lf = try Editor.init(gpa_t, "a\nb");
+    defer lf.deinit(gpa_t);
+    lf.moveTo(1, false);
+    try lf.paste(gpa_t, "x\r\ny\n");
+    try t_.expectEqualStrings("ax\ny\n\nb", lf.text());
 }
 
 test "line deletes at a line's edge take the whole CRLF break" {

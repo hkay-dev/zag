@@ -7573,7 +7573,7 @@ fn paste(d: *Doc) void {
     if (s.len == 0) return;
     if (d.mode != .edit) return promptType(d, s);
     const at = d.file.ed.sel()[0];
-    d.file.ed.insert(gpa, s) catch {};
+    d.file.ed.paste(gpa, s) catch {};
     if (std.mem.indexOfScalar(u8, s, '\n') != null or s.len > 40) {
         flashStart(d);
         flashAdd(d, at, d.file.ed.cur);
