@@ -50,6 +50,10 @@ pub fn close(w: Id) void {
 fn closeAction(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     close(owner);
 }
+/// File > Close Tab (⌘W) with the preview key: its delegate answers `closeTab:`, so the shortcut closes the window.
+fn closeTab(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
+    msg(void, window, "performClose:", .{@as(Id, null)});
+}
 /// Tab `id` was saved under a new path.
 pub fn rename(id: u32, new: []const u8) void {
     if (window != null and id == seen_id) {
@@ -98,6 +102,7 @@ pub fn toggle(d: anytype, th: *const settings.Theme) void {
         c.method("windowWillClose:", @ptrCast(&closed), "v@:@");
         c.method("windowDidResize:", @ptrCast(&resized), "v@:@");
         c.method("markdownPreview:", @ptrCast(&closeAction), "v@:@");
+        c.method("closeTab:", @ptrCast(&closeTab), "v@:@");
         target = msg(Id, msg(Id, c.finish(), "alloc", .{}), "init", .{});
     }
     owner = d.win.window;
