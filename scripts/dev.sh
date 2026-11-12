@@ -21,6 +21,18 @@ for a; do
   set -- "$@" "$a"
   shift
 done
-open -g -j -n "$app" --env HOME="$home" --stdout "${ZE_DEV_LOG:-/tmp/ze-dev.log}" --stderr "${ZE_DEV_LOG:-/tmp/ze-dev.log}" --args "$@"
-sleep 1
-pgrep -n -f "^$app/Contents/MacOS/zag( |\$)"
+log=${ZE_DEV_LOG:-/tmp/ze-dev.log}
+pat="^$app/Contents/MacOS/zag( |\$)"
+# Copies already running before `open` aren't the new one.
+before=" $(pgrep -f "$pat" | tr '\n' ' ') "
+open -g -j -n "$app" --env HOME="$home" --stdout "$log" --stderr "$log" --args "$@"
+# Launch Services can take seconds under load, so wait up to 10 s.
+i=0
+while [ $i -lt 200 ]; do
+  pid=$(pgrep -n -f "$pat" || true)
+  case $before in *" $pid "*) ;; *) echo "$pid"; exit 0 ;; esac
+  sleep 0.05
+  i=$((i + 1))
+done
+echo "dev.sh: Zag Dev didn't start within 10 s; see $log" >&2
+exit 1
