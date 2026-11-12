@@ -40,6 +40,8 @@ People open Zag from the Dock, Finder or a terminal (`zag notes.txt`, `zag .`), 
 - Show size alongside the editing features. Explain that fuller development tools serve needs that Zag doesn't cover.
 - Say plainly that Zag is an editor, not an IDE. Show code editing and writing as equally valid uses.
 - Name: Zag (formerly ze). Icon: `AppIcon.icon`.
+- Site appearance: follow the system theme by default and offer explicit Light and Dark choices.
+- Site motion: use sparse animated ASCII backgrounds and licensed React Bits interactions. Respect reduced motion and offer a pause control.
 
 ## Evidence on Hand
 
