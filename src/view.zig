@@ -2045,8 +2045,10 @@ fn nodeOf(n: *Node, d: *const Doc) ?*Node {
     return nodeOf(n.kids[0], d) orelse nodeOf(n.kids[1], d);
 }
 
+/// The first card under `n` that isn't folding away.
 fn firstPane(n: *const Node) *Doc {
-    return n.pane orelse firstPane(n.kids[0]);
+    if (n.pane) |p| return p;
+    return firstPane(n.kids[if (n.going) |g| 1 - g else 0]);
 }
 
 /// The panes of the first `s` and the rest of `r`, along its width or
@@ -2088,6 +2090,7 @@ fn dropFolded(w: *Win, n: *Node) void {
     if (n.going) |g| if (n.share.settled()) {
         const gone = n.kids[g];
         const keep = n.kids[1 - g];
+        if (w.focus == gone.pane.?) focus(firstPane(keep));
         closePane(gone.pane.?);
         gpa.destroy(gone);
         const up = n.up;
