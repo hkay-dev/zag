@@ -166,6 +166,32 @@ fn style(flags: usize) Id {
     }
     return slot.*;
 }
+/// Widens column `col` of the table to fit the cell that runs from `start` to the end of `out`.
+fn measure(out: Id, start: usize, col: usize, widths: []f64) void {
+    if (col >= widths.len) return;
+    const len = msg(usize, out, "length", .{});
+    const sub = msg(Id, out, "attributedSubstringFromRange:", .{Range{ .loc = start, .len = len - start }});
+    widths[col] = @max(widths[col], msg(objc.Size, sub, "size", .{}).w);
+}
+/// Lines up the table that runs from `start` to the end of `out`: a left tab stop after each column's widest cell.
+fn tabulate(out: Id, start: usize, widths: []const f64, key_style: Id) void {
+    const p = objc.new("NSMutableParagraphStyle");
+    defer msg(void, p, "release", .{});
+    msg(void, p, "setLineHeightMultiple:", .{@as(f64, 1.35)});
+    msg(void, p, "setParagraphSpacing:", .{@as(f64, 6)});
+    const stops = objc.new("NSMutableArray");
+    defer msg(void, stops, "release", .{});
+    const none = msg(Id, objc.class("NSDictionary"), "dictionary", .{});
+    var x: f64 = 0;
+    for (widths) |w| {
+        x += w + 24;
+        const tab = msg(Id, msg(Id, objc.class("NSTextTab"), "alloc", .{}), "initWithTextAlignment:location:options:", .{ @as(isize, 0), x, none });
+        msg(void, stops, "addObject:", .{tab});
+        msg(void, tab, "release", .{});
+    }
+    msg(void, p, "setTabStops:", .{stops});
+    attr(out, key_style, p, .{ .loc = start, .len = msg(usize, out, "length", .{}) - start });
+}
 fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     if (view.previewText(seen_id)) |bytes| {
         msg(void, source, "release", .{});
@@ -175,7 +201,9 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     const options = objc.new("NSAttributedStringMarkdownParsingOptions");
     defer msg(void, options, "release", .{});
     msg(void, options, "setInterpretedSyntax:", .{@as(isize, 0)});
-    const parsed = msg(Id, msg(Id, objc.class("NSAttributedString"), "alloc", .{}), "initWithMarkdown:options:baseURL:error:", .{ msg(Id, source, "dataUsingEncoding:", .{@as(usize, 4)}), options, @as(Id, null), @as(?*Id, null) });
+    // Relative links resolve against the file's folder.
+    const folder: Id = if (msg(usize, path, "length", .{}) == 0) null else msg(Id, objc.class("NSURL"), "fileURLWithPath:isDirectory:", .{ msg(Id, path, "stringByDeletingLastPathComponent", .{}), true });
+    const parsed = msg(Id, msg(Id, objc.class("NSAttributedString"), "alloc", .{}), "initWithMarkdown:options:baseURL:error:", .{ msg(Id, source, "dataUsingEncoding:", .{@as(usize, 4)}), options, folder, @as(?*Id, null) });
     defer msg(void, parsed, "release", .{});
     const out = objc.new("NSMutableAttributedString");
     defer msg(void, out, "release", .{});
@@ -184,6 +212,14 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     const fg, const link, const muted, const panel = .{ color(theme.fg), color(theme.kinds[@intFromEnum(syntax.Kind.function)]), color(theme.muted), color(theme.panel) };
     var i: usize = 0;
     var previous: usize = 0;
+    // The table being rendered and its current cell: identities, where each starts in `out`,
+    // the cell's column and the widest cell seen in each column.
+    var table: usize = 0;
+    var table_start: usize = 0;
+    var cell: usize = 0;
+    var cell_start: usize = 0;
+    var col: usize = 0;
+    var widths: [16]f64 = @splat(0);
     while (i < msg(usize, parsed, "length", .{})) {
         var r: Range = undefined;
         const attrs = msg(Id, parsed, "attributesAtIndex:effectiveRange:", .{ i, &r });
@@ -191,12 +227,34 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
         defer msg(void, part, "release", .{});
         const intent = msg(Id, attrs, "objectForKey:", .{key_intent});
         const identity = msg(usize, intent, "identity", .{});
-        const fresh = identity != previous;
+        // A table cell's text joins its row's line, after a tab per column.
+        const in_cell = msg(isize, intent, "intentKind", .{}) == 11;
+        const row: Id = if (in_cell) msg(Id, intent, "parentIntent", .{}) else null;
+        const block = if (in_cell) msg(usize, row, "identity", .{}) else identity;
+        const this_cell = if (in_cell) identity else 0;
+        const this_table = if (in_cell) msg(usize, msg(Id, row, "parentIntent", .{}), "identity", .{}) else 0;
+        if (cell != 0 and this_cell != cell) measure(out, cell_start, col, &widths);
+        if (table != 0 and this_table != table) tabulate(out, table_start, &widths, key_style);
+        const fresh = block != previous;
         if (fresh and i > 0) msg(void, msg(Id, out, "mutableString", .{}), "appendString:", .{objc.str("\n")});
+        if (in_cell and this_table != table) {
+            table_start = msg(usize, out, "length", .{});
+            widths = @splat(0);
+        }
+        if (in_cell and this_cell != cell) {
+            const at: usize = @intCast(@max(msg(isize, intent, "column", .{}), 0));
+            const tabs = if (fresh) at else @max(at -| col, 1);
+            for (0..tabs) |_| msg(void, msg(Id, out, "mutableString", .{}), "appendString:", .{objc.str("\t")});
+            cell_start = msg(usize, out, "length", .{});
+            col = at;
+        }
+        table = this_table;
+        cell = this_cell;
         var base: usize = 0;
         var ink = fg;
         const all: Range = .{ .loc = 0, .len = r.len };
         var flags: usize = 0;
+        var header: usize = 0;
         var prefix: Id = null;
         var c = intent;
         while (c != null) : (c = msg(Id, c, "parentIntent", .{})) {
@@ -216,23 +274,36 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
                 5 => { base = 4; attr(part, key_back, panel, all); },
                 6 => { ink = muted; flags |= 2; },
                 7 => if (fresh) { prefix = objc.str("────────────────────────"); },
+                9 => header = 2,
                 else => {},
             }
         }
+        const plain = ink;
         const inline_intent = msg(usize, msg(Id, attrs, "objectForKey:", .{key_inline}), "unsignedIntegerValue", .{});
         if (inline_intent & 4 != 0) base = 4;
         const linked = msg(Id, attrs, "objectForKey:", .{key_link}) != null;
         if (linked) ink = link;
-        attr(part, key_font, font(base, inline_intent & 3), all);
+        attr(part, key_font, font(base, inline_intent & 3 | header), all);
         attr(part, key_color, ink, all);
         if (linked) attr(part, key_line, msg(Id, objc.class("NSNumber"), "numberWithInteger:", .{@as(isize, 1)}), all);
         attr(part, key_style, style(flags), all);
         msg(void, part, "removeAttribute:range:", .{ key_intent, all });
-        if (prefix != null) msg(void, part, "replaceCharactersInRange:withString:", .{ Range{ .loc = 0, .len = 0 }, prefix });
+        // A bullet, number or rule gets body text's own look, never its item's bold, code or link.
+        if (prefix != null) {
+            const lead = msg(Id, msg(Id, objc.class("NSMutableAttributedString"), "alloc", .{}), "initWithString:", .{prefix});
+            defer msg(void, lead, "release", .{});
+            const whole: Range = .{ .loc = 0, .len = msg(usize, lead, "length", .{}) };
+            attr(lead, key_font, font(0, 0), whole);
+            attr(lead, key_color, plain, whole);
+            attr(lead, key_style, style(flags), whole);
+            msg(void, out, "appendAttributedString:", .{lead});
+        }
         msg(void, out, "appendAttributedString:", .{part});
-        previous = identity;
+        previous = block;
         i += r.len;
     }
+    if (cell != 0) measure(out, cell_start, col, &widths);
+    if (table != 0) tabulate(out, table_start, &widths, key_style);
     const clip = msg(Id, msg(Id, text, "enclosingScrollView", .{}), "contentView", .{});
     const position = msg(objc.Rect, clip, "bounds", .{});
     const store = msg(Id, text, "textStorage", .{});

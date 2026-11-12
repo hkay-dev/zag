@@ -77,7 +77,9 @@ than 680 points. Run it again to close it. Keep typing in the editor: the previe
 short pause without jumping back to the top. It stays with the file it was opened for when you
 switch tabs or cards, and closes with its window. Other text files can be previewed too, using
 the same Markdown rules. The preview window remembers where you left it and how big it was, and
-opens there next time. Links are tinted and underlined.
+opens there next time. Links are tinted and underlined, and a link to another file, such as
+`[guide](docs/index.md)`, opens that file from the Markdown file's folder. Tables show each row on
+one line with its columns lined up and the header row in bold.
 
 ## Open files
 
