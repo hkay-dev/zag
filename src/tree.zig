@@ -17,7 +17,9 @@ pub const Row = struct {
     dir: bool,
 };
 
-const Read = struct { path: [:0]const u8, stamp: files.Stamp };
+/// `stamp` is null when the folder couldn't be opened, so `fresh` tries it
+/// again: a permission change moves ctime, not the mtime a stamp compares.
+const Read = struct { path: [:0]const u8, stamp: ?files.Stamp };
 
 pub const Tree = struct {
     arena: std.heap.ArenaAllocator,
@@ -108,7 +110,7 @@ pub const Tree = struct {
         if (t.read_open != t.open.items.len) return false;
         for (t.read.items) |d| {
             const now = files.stamp(d.path);
-            if (now == null or !std.meta.eql(now.?, d.stamp)) return false;
+            if (now == null or d.stamp == null or !std.meta.eql(now.?, d.stamp.?)) return false;
         }
         return true;
     }
@@ -126,7 +128,7 @@ pub const Tree = struct {
         try path.append(gpa, 0);
         const stamp = files.stamp(path.items[0 .. path.items.len - 1 :0]);
         const dir = c.opendir(@ptrCast(path.items.ptr));
-        if (stamp) |s| try t.read.append(a, .{ .path = try a.dupeSentinel(u8, path.items[0 .. path.items.len - 1], 0), .stamp = s });
+        if (stamp) |s| try t.read.append(a, .{ .path = try a.dupeSentinel(u8, path.items[0 .. path.items.len - 1], 0), .stamp = if (dir == null) null else s });
         path.items.len -= 1;
         const dh = dir orelse return;
         const len = path.items.len;
