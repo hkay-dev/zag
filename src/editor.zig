@@ -96,9 +96,10 @@ pub const Editor = struct {
     /// Replaces the selection with `s`.
     pub fn insert(e: *Editor, gpa: Allocator, s: []const u8) !void {
         const r = e.sel();
-        // One typed character, ASCII or not, joins the typing run; a newline
-        // starts the next one.
-        const one = s.len > 0 and (std.unicode.utf8ByteSequenceLength(s[0]) catch 0) == s.len;
+        // One typed character, ASCII or not and including emoji built from
+        // several code points, joins the typing run; a newline starts the
+        // next one.
+        const one = oneCluster(s);
         try e.buf.replace(gpa, r[0], r[1], s, e.cur, e.typing and !e.hasSel() and one and s[0] != '\n');
         e.select(r[0] + s.len, r[0] + s.len);
         e.typing = one;
@@ -627,6 +628,29 @@ pub fn decode(t: []const u8, i: usize) struct { cp: u21, len: usize } {
     return .{ .cp = cp, .len = n };
 }
 
+/// Whether `s` is one user-visible character: a code point followed only by
+/// combining marks, variation selectors, skin tones, tags, ZWJ-joined code
+/// points, or the second half of a flag.
+fn oneCluster(s: []const u8) bool {
+    if (s.len == 0) return false;
+    const first = decode(s, 0);
+    var i = first.len;
+    var flag = first.cp >= 0x1F1E6 and first.cp <= 0x1F1FF;
+    var joined = false;
+    while (i < s.len) {
+        const d = decode(s, i);
+        const ok = joined or (flag and d.cp >= 0x1F1E6 and d.cp <= 0x1F1FF) or switch (d.cp) {
+            0x0300...0x036F, 0x1AB0...0x1AFF, 0x1DC0...0x1DFF, 0x200D, 0x20D0...0x20FF, 0xFE00...0xFE0F, 0xFE20...0xFE2F, 0x1F3FB...0x1F3FF, 0xE0020...0xE007F, 0xE0100...0xE01EF => true,
+            else => false,
+        };
+        if (!ok) return false;
+        flag = false;
+        joined = d.cp == 0x200D;
+        i += d.len;
+    }
+    return true;
+}
+
 /// How many cells a codepoint takes: 2 for East Asian wide and emoji.
 fn width(cp: u21) usize {
     return switch (cp) {
@@ -800,6 +824,15 @@ test "typed characters outside ASCII join the typing run" {
     for ([_][]const u8{ "ü", "b", "😀", "r" }) |s| try e.insert(gpa_t, s);
     _ = try e.undo(gpa_t);
     try t_.expectEqualStrings("", e.text());
+}
+
+test "emoji built from several code points join the typing run" {
+    var e = try Editor.init(gpa_t, "");
+    defer e.deinit(gpa_t);
+    for ([_][]const u8{ "h", "\u{2764}\u{FE0F}", "\u{1F44D}\u{1F3FD}", "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", "\u{1F1EF}\u{1F1F5}", "e\u{0301}", "x" }) |s| try e.insert(gpa_t, s);
+    _ = try e.undo(gpa_t);
+    try t_.expectEqualStrings("", e.text());
+    for ([_][]const u8{ "ab", "\u{1F1EF}\u{1F1F5}\u{1F1EF}", "\r\n" }) |s| try t_.expect(!oneCluster(s));
 }
 
 test "comment toggle adds at the shallowest indent and removes again" {
