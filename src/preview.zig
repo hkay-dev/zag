@@ -10,11 +10,13 @@ const Range = extern struct { loc: usize, len: usize };
 var window: Id = null;
 var text: Id = null;
 var target: Id = null;
+/// The window that last showed the previewed tab; its theme paints the preview.
 var owner: Id = null;
+/// The previewed tab's path, for the title.
 var path: Id = null;
 var theme: settings.Theme = undefined;
 var fade = false;
-/// The doc and edit count last scheduled or rendered.
+/// The previewed tab's id and the edit count last scheduled or rendered.
 var seen_id: u32 = std.math.maxInt(u32);
 var seen_changes: u64 = 0;
 /// The text last rendered, kept so a theme change still repaints after its tab closes.
@@ -48,8 +50,9 @@ pub fn close(w: Id) void {
 fn closeAction(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     close(owner);
 }
-pub fn rename(w: Id, old: []const u8, new: []const u8) void {
-    if (owner == w and std.mem.eql(u8, objc.utf8(path), old)) {
+/// Tab `id` was saved under a new path.
+pub fn rename(id: u32, new: []const u8) void {
+    if (window != null and id == seen_id) {
         msg(void, path, "setString:", .{objc.str(new)});
         retitle();
     }
@@ -74,15 +77,15 @@ fn resized(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
 }
 /// `th` is the theme the editor draws with: zen's grey and Increase Contrast included.
 pub fn update(d: anytype, th: *const settings.Theme) void {
-    if (owner != d.win.window) return;
+    if (window == null) return;
+    // Only the previewed tab's edits render; any card in its window passes on a theme change.
+    const mine = d.file.id == seen_id;
+    if (mine) owner = d.win.window else if (owner != d.win.window) return;
     // A caret move or scroll changes nothing: `changes` counts every edit, undo and redo.
-    const changed = (seen_id != d.file.id or seen_changes != d.file.ed.buf.changes) and std.mem.eql(u8, objc.utf8(path), d.file.path orelse "");
+    const changed = mine and seen_changes != d.file.ed.buf.changes;
     const same_theme = std.meta.eql(theme, th.*);
     if (!changed and same_theme) return;
-    if (changed) {
-        seen_id = d.file.id;
-        seen_changes = d.file.ed.buf.changes;
-    }
+    if (changed) seen_changes = d.file.ed.buf.changes;
     fade = fade or !same_theme;
     theme = th.*;
     objc.later(target, "render:", null, 0.15);

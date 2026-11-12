@@ -2483,7 +2483,7 @@ fn save(d: *Doc, as: bool) bool {
             return false;
         };
         gpa.free(z);
-        preview.rename(d.win.window, d.file.path orelse "", abs);
+        preview.rename(d.file.id, abs);
         if (d.file.path) |old| gpa.free(old);
         d.file.path = abs;
         dropCopies(d, abs);
@@ -2497,7 +2497,7 @@ fn save(d: *Doc, as: bool) bool {
             if (std.mem.eql(u8, abs, d.file.path.?)) {
                 gpa.free(abs);
             } else {
-                preview.rename(d.win.window, d.file.path.?, abs);
+                preview.rename(d.file.id, abs);
                 gpa.free(d.file.path.?);
                 d.file.path = abs;
                 named(d);
