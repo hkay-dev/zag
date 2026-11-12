@@ -2447,7 +2447,15 @@ fn save(d: *Doc, as: bool) bool {
         if (root) |r| msg(void, p, "setDirectoryURL:", .{msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(r)})});
         if (runModal(p) != 1) return false;
         const path = objc.utf8(msg(Id, msg(Id, p, "URL", .{}), "path", .{}));
-        fresh = gpa.dupeSentinel(u8, path, 0) catch return false;
+        const z = gpa.dupeSentinel(u8, path, 0) catch return false;
+        // Resolve a file that exists before writing, so replacing a symlink
+        // writes through to its target instead of over the link.
+        if (!files.exists(z)) {
+            fresh = z;
+        } else {
+            defer gpa.free(z);
+            fresh = files.absolute(gpa, z) catch return false;
+        }
     } else if (files.stamp(d.file.path.?)) |now| {
         // Another app wrote the file since Zag read or saved it. A deleted
         // file is just written again.
