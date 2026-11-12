@@ -3410,7 +3410,7 @@ fn addCommands(menu: Id, prefix: []const u8) void {
             section = title;
             continue;
         }
-        if (act == palette_sel or act == window_sel) continue;
+        if (act == palette_sel or act == window_sel or greyed(it)) continue;
         const name = (if (section.len > 0) std.fmt.allocPrint(a, "{s}: {s}", .{ section, title }) else a.dupe(u8, title)) catch return;
         cmd_names.append(a, name) catch return;
         cmds.append(a, .{ .item = msg(Id, it, "retain", .{}), .keys = keysOf(a, it) catch "", .on = isChecked(it) }) catch {
@@ -3442,7 +3442,7 @@ fn runCommand(_: Id, _: Sel, it: Id) callconv(.c) void {
     const menu = msg(Id, it, "menu", .{});
     if (menu == null) return;
     const i = msg(isize, menu, "indexOfItem:", .{it});
-    if (i >= 0) msg(void, menu, "performActionForItemAtIndex:", .{i});
+    if (i >= 0 and !greyed(it)) msg(void, menu, "performActionForItemAtIndex:", .{i});
 }
 
 fn countFound(d: *Doc) void {
@@ -7959,6 +7959,13 @@ fn checked(c: Check, tag: usize) bool {
 fn isChecked(it: Id) bool {
     const c = (ruleOf(it) orelse return false).check orelse return false;
     return checked(c, @intCast(msg(isize, it, "tag", .{})));
+}
+
+/// Whether Late-Night has set the command that `it` runs, so the menu greys it
+/// and the palette leaves it out.
+fn greyed(it: Id) bool {
+    const r = ruleOf(it) orelse return false;
+    return r.grey and conf.late_night;
 }
 
 /// What the menu's validation says: sets the checkmark and greys what
