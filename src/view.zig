@@ -3000,15 +3000,21 @@ fn fadeTheme(w: *Win) void {
     for (docs.items) |d| if (d.win == w) msg(void, d.caret, "addAnimation:forKey:", .{ t, objc.str("theme") });
 }
 
-/// Reads the settings file and applies it to every window.
-fn loadSettings() void {
-    // Once the file exists, use the path open() gives it (/tmp is /private/tmp).
+/// Once the settings file exists, uses the path open() gives it (/tmp is
+/// /private/tmp, and a linked file resolves to its target so writes go
+/// through the link instead of replacing it).
+fn resolveConf() void {
     if (conf_path != null and files.exists(conf_path.?)) {
         if (files.absolute(gpa, conf_path.?)) |abs| {
             gpa.free(conf_path.?);
             conf_path = abs;
         } else |_| {}
     }
+}
+
+/// Reads the settings file and applies it to every window.
+fn loadSettings() void {
+    resolveConf();
     const p = conf_path orelse return;
     const old_lh = lh;
     const old_themes = themes;
@@ -7871,6 +7877,7 @@ pub fn setup() void {
     readContrast();
     loadPlaces();
     conf_path = settings.path(gpa) catch null;
+    resolveConf();
     if (conf_path) |p| settings.prepare(gpa, p);
     loadSettings();
     panelFonts();
