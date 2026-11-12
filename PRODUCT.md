@@ -16,11 +16,11 @@ Developers and writers on a Mac (macOS 15+, Apple Silicon) who write and edit pl
 
 ## Product Purpose
 
-Zag is a free, MIT-licensed text editor for macOS, written from scratch in Zig. It edits text that you write. Success: a visitor understands what Zag is in one look and downloads the `.dmg`.
+Zag is a free, MIT-licensed text editor for macOS, written from scratch in Zig. Developers and writers use it for code, notes and Markdown. Success: a visitor understands what Zag is in one look and downloads the `.dmg`.
 
 ## Positioning
 
-Zag is a text editor, not a text creator. It has no AI, no autocomplete, no snippets and no plugins: it doesn't write anything for you. It is opinionated (US English typing, Apple Silicon, system fonts, one way to do each thing) and tiny: the release binary is about 360 KB, links only Apple's system frameworks and libc, and still has splits, tabs, a sidebar, Quick Open, a command palette, Markdown preview, focus modes and themes.
+Zag is a text editor, not an IDE. Developers and writers get split views, Quick Open, a command palette, syntax highlighting and Markdown preview without a debugger, build system or extension setup. Zag has no AI, autocomplete, snippets or plugins. Its release binary is about 360 KB and links only Apple's system frameworks and libc. Compare compressed Mac downloads with compressed Mac downloads, never Zag's binary with another editor's whole package. A smaller download doesn't make an editor better for every task.
 
 ## Operating Context
 
@@ -37,8 +37,8 @@ People open Zag from the Dock, Finder or a terminal (`zag notes.txt`, `zag .`), 
 ## Brand Commitments
 
 - Free and open source: no selling, no pricing, no hype, no explaining basics (offline use, privacy and the like).
-- Brag about size and lightness while staying full featured.
-- Say plainly that Zag is opinionated and edits text rather than creating it, and explain that difference.
+- Show size alongside the editing features. Explain that fuller development tools serve needs that Zag doesn't cover.
+- Say plainly that Zag is an editor, not an IDE. Show code editing and writing as equally valid uses.
 - Name: Zag (formerly ze). Icon: `AppIcon.icon`.
 
 ## Evidence on Hand
@@ -49,7 +49,7 @@ People open Zag from the Dock, Finder or a terminal (`zag notes.txt`, `zag .`), 
 
 ## Product Principles
 
-1. Edit, don't generate.
+1. Support code and writing without becoming a full development environment.
 2. Small on purpose: every feature pays for its bytes.
 3. Feel like a Mac app: system fonts, system icons, native materials.
 4. Motion with purpose: things glide instead of jumping.
