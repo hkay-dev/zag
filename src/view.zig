@@ -1687,7 +1687,7 @@ fn loadPage(abs: [:0]const u8) ?Page {
         },
     };
     defer gpa.free(bytes);
-    if (std.mem.indexOfScalar(u8, bytes[0..@min(bytes.len, 8000)], 0) != null) {
+    if (looksBinary(bytes)) {
         alert("This looks like a binary file.", abs);
         return null;
     }
@@ -2902,24 +2902,39 @@ pub fn recheckAll() void {
 }
 
 /// A clean doc reloads from disk; one with unsaved changes asks first. A
-/// deleted file leaves the text as unsaved changes.
+/// deleted or binary file leaves the text as unsaved changes. A failed read
+/// leaves the old stamp, so the next check retries and Save asks first.
 fn checkOutside(d: *Doc) void {
     for (d.pages.items) |*pg| checkDeleted(pg);
     const p = d.file.path orelse return;
     const now = files.stamp(p);
     if (std.meta.eql(now, d.file.stamp)) return;
-    d.file.stamp = now;
     if (now == null) {
+        d.file.stamp = now;
         d.file.ed.buf.markUnsaved();
         d.note = "deleted on disk";
         return refresh(d);
     }
-    if (d.file.ed.buf.dirty() and !askReload(d)) return;
+    if (d.file.ed.buf.dirty() and !askReload(d)) {
+        d.file.stamp = now;
+        return;
+    }
     const bytes = files.read(gpa, p) catch return;
     defer gpa.free(bytes);
+    if (looksBinary(bytes)) {
+        d.file.stamp = now;
+        d.file.ed.buf.markUnsaved();
+        d.note = "binary on disk";
+        return refresh(d);
+    }
     d.file.ed.reload(gpa, bytes) catch return;
+    d.file.stamp = now;
     d.note = "reloaded";
     refresh(d);
+}
+
+fn looksBinary(bytes: []const u8) bool {
+    return std.mem.indexOfScalar(u8, bytes[0..@min(bytes.len, 8000)], 0) != null;
 }
 
 /// A parked tab whose file was deleted keeps its text as unsaved changes, so
