@@ -7,6 +7,7 @@
 const std = @import("std");
 const objc = @import("objc.zig");
 const editor = @import("editor.zig");
+const buffer = @import("buffer.zig");
 const view = @import("view.zig");
 const ax = view.ax;
 const Doc = ax.Card;
@@ -373,18 +374,6 @@ fn unitsOf(cp: u21) usize {
     return if (cp >= 0x10000) 2 else 1;
 }
 
-/// UTF-16 units in `t[from..to]`, both at character starts.
-fn units(t: []const u8, from: usize, to: usize) usize {
-    var n: usize = 0;
-    var i = from;
-    while (i < to and i < t.len) {
-        const c = editor.decode(t, i);
-        n += unitsOf(c.cp);
-        i += c.len;
-    }
-    return n;
-}
-
 /// The byte `n` UTF-16 units on from byte `from`, at a character's start.
 fn advance(t: []const u8, from: usize, n: usize) usize {
     var left = n;
@@ -399,18 +388,35 @@ fn advance(t: []const u8, from: usize, n: usize) usize {
     return i;
 }
 
-fn toRange(t: []const u8, a: usize, b: usize) Range {
-    const loc = units(t, 0, a);
-    return .{ .loc = loc, .len = units(t, a, b) };
+/// UTF-16 units before byte `pos`, a character's start: the line's offset
+/// from the buffer's table, plus a walk within the line.
+fn unitsTo(b: *buffer.Buffer, pos: usize) usize {
+    const t = b.text.items;
+    const u = b.unitStarts(gpa) catch return buffer.utf16Units(t, 0, pos);
+    const k = b.lineOf(pos);
+    return u[k] + buffer.utf16Units(t, b.lineStart(k), pos);
 }
 
-fn toBytes(t: []const u8, r: Range) [2]usize {
-    const a = advance(t, 0, r.loc);
-    return .{ a, advance(t, a, r.len) };
+/// The byte `n` UTF-16 units into the text, at a character's start.
+fn byteAt(b: *buffer.Buffer, n: usize) usize {
+    const t = b.text.items;
+    const u = b.unitStarts(gpa) catch return advance(t, 0, n);
+    const k = buffer.lastAtMost(u, n);
+    return advance(t, b.lineStart(k), n - u[k]);
+}
+
+fn toRange(b: *buffer.Buffer, a: usize, z: usize) Range {
+    const loc = unitsTo(b, a);
+    return .{ .loc = loc, .len = unitsTo(b, z) - loc };
+}
+
+fn toBytes(b: *buffer.Buffer, r: Range) [2]usize {
+    const a = byteAt(b, r.loc);
+    return .{ a, byteAt(b, unitsTo(b, a) +| r.len) };
 }
 
 /// An NSString of `s`, with each bad byte as U+FFFD so the units line up
-/// with `units`.
+/// with `buffer.utf16Units`.
 pub fn nsText(s: []const u8) Id {
     var out: std.ArrayList(u16) = .empty;
     defer out.deinit(gpa);
@@ -445,8 +451,8 @@ fn textValue(self: Id, _: Sel) callconv(.c) Id {
 
 fn textCount(self: Id, _: Sel) callconv(.c) isize {
     const d = docOf(self) orelse return 0;
-    const t = d.file.ed.text();
-    return @intCast(units(t, 0, t.len));
+    const b = &d.file.ed.buf;
+    return @intCast(unitsTo(b, b.text.items.len));
 }
 
 fn selText(self: Id, _: Sel) callconv(.c) Id {
@@ -458,7 +464,7 @@ fn selText(self: Id, _: Sel) callconv(.c) Id {
 fn selRange(self: Id, _: Sel) callconv(.c) Range {
     const d = docOf(self) orelse return .{};
     const s = d.file.ed.sel();
-    return toRange(d.file.ed.text(), s[0], s[1]);
+    return toRange(&d.file.ed.buf, s[0], s[1]);
 }
 
 fn selRanges(self: Id, _: Sel) callconv(.c) Id {
@@ -469,7 +475,7 @@ fn selRanges(self: Id, _: Sel) callconv(.c) Id {
 /// VoiceOver moves the caret or selects.
 fn setSelRange(self: Id, _: Sel, r: Range) callconv(.c) void {
     const d = docOf(self) orelse return;
-    const b = toBytes(d.file.ed.text(), r);
+    const b = toBytes(&d.file.ed.buf, r);
     ax.select(d, b[0], b[1]);
 }
 
@@ -481,29 +487,28 @@ fn caretLine(self: Id, _: Sel) callconv(.c) isize {
 fn visibleRange(self: Id, _: Sel) callconv(.c) Range {
     const d = docOf(self) orelse return .{};
     const v = ax.visible(d);
-    return toRange(d.file.ed.text(), v[0], @max(v[0], v[1]));
+    return toRange(&d.file.ed.buf, v[0], @max(v[0], v[1]));
 }
 
 fn lineForIndex(self: Id, _: Sel, i: isize) callconv(.c) isize {
     const d = docOf(self) orelse return 0;
     if (i < 0) return 0;
-    return @intCast(d.file.ed.buf.lineOf(advance(d.file.ed.text(), 0, @intCast(i))));
+    return @intCast(d.file.ed.buf.lineOf(byteAt(&d.file.ed.buf, @intCast(i))));
 }
 
 /// Line `n` with its line break, as NSTextView gives it.
 fn rangeForLine(self: Id, _: Sel, n: isize) callconv(.c) Range {
     const d = docOf(self) orelse return .{};
     const b = &d.file.ed.buf;
-    const t = d.file.ed.text();
-    if (n < 0 or @as(usize, @intCast(n)) >= b.lines()) return .{ .loc = units(t, 0, t.len) };
+    if (n < 0 or @as(usize, @intCast(n)) >= b.lines()) return .{ .loc = unitsTo(b, b.text.items.len) };
     const k: usize = @intCast(n);
-    return toRange(t, b.lineStart(k), b.lineStop(k));
+    return toRange(b, b.lineStart(k), b.lineStop(k));
 }
 
 fn stringForRange(self: Id, _: Sel, r: Range) callconv(.c) Id {
     const d = docOf(self) orelse return objc.str("");
     const t = d.file.ed.text();
-    const b = toBytes(t, r);
+    const b = toBytes(&d.file.ed.buf, r);
     return nsText(t[b[0]..b[1]]);
 }
 
@@ -516,7 +521,7 @@ fn attributedForRange(self: Id, _: Sel, r: Range) callconv(.c) Id {
 fn frameForRange(self: Id, _: Sel, r: Range) callconv(.c) Rect {
     const d = docOf(self) orelse return .{};
     const t = d.file.ed.text();
-    const b = toBytes(t, r);
+    const b = toBytes(&d.file.ed.buf, r);
     const a = ax.cell(d, b[0]);
     if (b[1] == b[0]) return screen(d.win.view, a);
     const z = ax.cell(d, editor.prevChar(t, b[1]));
@@ -530,22 +535,22 @@ fn rangeForPosition(self: Id, _: Sel, p: Point) callconv(.c) Range {
     const d = docOf(self) orelse return .{};
     const t = d.file.ed.text();
     const pos = ax.posAtPoint(d, fromScreen(d.win.view, p));
-    return toRange(t, pos, editor.nextChar(t, pos));
+    return toRange(&d.file.ed.buf, pos, editor.nextChar(t, pos));
 }
 
 /// The whole character that unit `i` falls in.
 fn rangeForIndex(self: Id, _: Sel, i: isize) callconv(.c) Range {
     const d = docOf(self) orelse return .{};
     const t = d.file.ed.text();
-    const pos = advance(t, 0, @intCast(@max(i, 0)));
-    return toRange(t, pos, editor.nextChar(t, pos));
+    const pos = byteAt(&d.file.ed.buf, @intCast(@max(i, 0)));
+    return toRange(&d.file.ed.buf, pos, editor.nextChar(t, pos));
 }
 
 /// The text has one style for VoiceOver: all of it.
 fn styleRange(self: Id, _: Sel, _: isize) callconv(.c) Range {
     const d = docOf(self) orelse return .{};
-    const t = d.file.ed.text();
-    return .{ .len = units(t, 0, t.len) };
+    const b = &d.file.ed.buf;
+    return .{ .len = unitsTo(b, b.text.items.len) };
 }
 
 fn textFocused(self: Id, _: Sel) callconv(.c) bool {

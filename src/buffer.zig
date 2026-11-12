@@ -10,6 +10,9 @@ pub const Buffer = struct {
     text: std.ArrayList(u8) = .empty,
     /// Byte offset of each line's first byte. Always starts with 0.
     starts: std.ArrayList(u32) = .empty,
+    /// UTF-16 units before each line's first byte, as NSString counts them,
+    /// in step with `starts`. Empty until `unitStarts` first builds it.
+    units: std.ArrayList(u32) = .empty,
     undos: std.ArrayList(Edit) = .empty,
     redos: std.ArrayList(Edit) = .empty,
     seq: u64 = 0,
@@ -54,6 +57,7 @@ pub const Buffer = struct {
         b.undos.deinit(gpa);
         b.redos.deinit(gpa);
         b.wraps.deinit(gpa);
+        b.units.deinit(gpa);
         b.starts.deinit(gpa);
         b.text.deinit(gpa);
     }
@@ -86,6 +90,21 @@ pub const Buffer = struct {
     /// The line that holds byte `pos`.
     pub fn lineOf(b: *const Buffer, pos: usize) usize {
         return lastAtMost(b.starts.items, pos);
+    }
+
+    /// UTF-16 units before each line's start, built on first call and then
+    /// maintained by every edit, so VoiceOver's ranges cost one line's walk.
+    pub fn unitStarts(b: *Buffer, gpa: Allocator) ![]const u32 {
+        if (b.units.items.len == 0) {
+            try b.units.ensureTotalCapacityPrecise(gpa, b.lines());
+            var u: u32 = 0;
+            b.units.appendAssumeCapacity(0);
+            for (b.starts.items[1..], b.starts.items[0 .. b.lines() - 1]) |s, prev| {
+                u += @intCast(utf16Units(b.text.items, prev, s));
+                b.units.appendAssumeCapacity(u);
+            }
+        }
+        return b.units.items;
     }
 
     pub fn dirty(b: *const Buffer) bool {
@@ -178,9 +197,29 @@ pub const Buffer = struct {
 
         const delta: i64 = @as(i64, @intCast(new.len)) - @as(i64, @intCast(end - start));
         for (b.starts.items[first + 1 + added.items.len ..]) |*s| s.* = @intCast(@as(i64, s.*) + delta);
+        if (b.units.items.len > 0) b.spliceUnits(gpa, first, last, added.items.len);
         b.touched = @min(b.touched, first);
         b.touched_end = @max(b.touched_end, first + added.items.len + 1);
         b.lines_shifted = b.lines_shifted or last - first != added.items.len;
+    }
+
+    /// Recounts the edited lines' units and shifts the lines after them.
+    /// Runs after `starts` is up to date; a failed grow drops the table.
+    fn spliceUnits(b: *Buffer, gpa: Allocator, first: usize, last: usize, added: usize) void {
+        b.units.replaceRange(gpa, first + 1, last - first, b.starts.items[first + 1 .. first + 1 + added]) catch {
+            b.units.clearAndFree(gpa);
+            return;
+        };
+        const s = b.starts.items;
+        const u = b.units.items;
+        const stop = first + 1 + added;
+        for (first + 1..@min(stop + 1, u.len)) |k| {
+            const n: u32 = @intCast(utf16Units(b.text.items, s[k - 1], s[k]));
+            if (k == stop) {
+                const delta = @as(i64, u[k - 1] + n) - u[k];
+                for (u[stop..]) |*x| x.* = @intCast(@as(i64, x.*) + delta);
+            } else u[k] = u[k - 1] + n;
+        }
     }
 
     pub fn wordCount(b: *Buffer) usize {
@@ -203,6 +242,25 @@ pub fn lastAtMost(v: []const u32, pos: usize) usize {
         if (v[mid] <= pos) lo = mid else hi = mid;
     }
     return lo;
+}
+
+/// UTF-16 units in `s[from..to]`, both at character starts, as NSString
+/// counts them; each bad byte is one U+FFFD, as `editor.decode` reads it.
+pub fn utf16Units(s: []const u8, from: usize, to: usize) usize {
+    var n: usize = 0;
+    var i = from;
+    while (i < to and i < s.len) {
+        if (s[i] < 0x80) {
+            n += 1;
+            i += 1;
+            continue;
+        }
+        const k = std.unicode.utf8ByteSequenceLength(s[i]) catch 1;
+        const ok = k > 1 and i + k <= s.len and if (std.unicode.utf8Decode(s[i .. i + k])) |_| true else |_| false;
+        n += if (ok and k == 4) 2 else 1;
+        i += if (ok) k else 1;
+    }
+    return n;
 }
 
 /// Word starts whose byte lies in `start..end`, including boundary context.
@@ -265,6 +323,29 @@ test "line starts stay right through random edits, undo and redo" {
         while (words.next() != null) count += 1;
         try t.expectEqual(count, b.wordCount());
         try t.expectEqual(b.lines(), b.wraps.items.len);
+    }
+}
+
+test "UTF-16 line offsets match a fresh count through random edits, undo and redo" {
+    try t.expectEqual(@as(usize, 8), utf16Units("a\xc3\xa9\xf0\x9f\x98\x80\xff\xe2\x82\n", 0, 11));
+    var prng = std.Random.DefaultPrng.init(11);
+    const r = prng.random();
+    var b = try Buffer.init(t.allocator, "one\nt\xc3\xa9o\n\n\xf0\x9f\x98\x80\r\nfour");
+    defer b.deinit(t.allocator);
+    _ = try b.unitStarts(t.allocator);
+    const pieces = [_][]const u8{ "", "x", "\n", "\xc3\xa9", "\xf0\x9f\x98\x80\n", "\xff", "a\n\xe2\x82\xacb\n" };
+    for (0..600) |_| {
+        const n = b.text.items.len;
+        const s = r.uintAtMost(usize, n);
+        const e = s + r.uintAtMost(usize, @min(n - s, 6));
+        switch (r.uintLessThan(u8, 4)) {
+            0 => _ = try b.undo(t.allocator),
+            1 => _ = try b.redo(t.allocator),
+            else => try b.replace(t.allocator, s, e, pieces[r.uintLessThan(usize, pieces.len)], s, r.boolean()),
+        }
+        var fresh = try Buffer.init(t.allocator, b.text.items);
+        defer fresh.deinit(t.allocator);
+        try t.expectEqualSlices(u32, try fresh.unitStarts(t.allocator), b.units.items);
     }
 }
 
