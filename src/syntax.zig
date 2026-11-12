@@ -402,6 +402,8 @@ fn lexHtml(s: []const u8, state: State, out: ?[]Kind) State {
         else => {
             const c = s[i];
             if (std.mem.startsWith(u8, s[i..], "<!--")) {
+                mark(out, i, i + 4, .comment);
+                i += 4;
                 st = .html_comment;
             } else if (c == '<' and i + 1 < s.len and (std.ascii.isAlphabetic(s[i + 1]) or s[i + 1] == '/' or s[i + 1] == '!' or s[i + 1] == '?')) {
                 const closing = s[i + 1] == '/';
@@ -431,7 +433,8 @@ fn attrs(s: []const u8, from: usize, st: *State, out: ?[]Kind) usize {
     while (i < s.len) {
         const c = s[i];
         if (c == '>') {
-            st.* = switch (st.*) {
+            const self_closing = i > 0 and s[i - 1] == '/';
+            st.* = if (self_closing) .normal else switch (st.*) {
                 .tag_style => .style,
                 .tag_script => .script,
                 else => .normal,
@@ -537,6 +540,9 @@ test "html: tags, attributes, values, comments and entities" {
     try t.expectEqual(State.normal, lexLine(&html, "  lang=\"en\">", .tag, &k));
     try t.expectEqual(Kind.function, k[2]);
     try t.expectEqual(Kind.string, k[7]);
+    try t.expectEqual(State.html_comment, lexLine(&html, "<!--> <b>", .normal, &k));
+    try t.expectEqual(Kind.comment, k[7]);
+    try t.expectEqual(State.html_comment, lexLine(&html, "<!---> a", .normal, &k));
 }
 
 test "html: style and script text is lexed as CSS and JavaScript up to the end tag" {
@@ -555,6 +561,8 @@ test "html: style and script text is lexed as CSS and JavaScript up to the end t
     try t.expectEqual(Kind.string, k[0]);
     try t.expectEqual(Kind.keyword, k[4]);
     try t.expectEqual(Kind.keyword, k[19]);
+    try t.expectEqual(State.normal, lexLine(&html, "<script src=\"a.js\"/> <b>", .normal, &k));
+    try t.expectEqual(Kind.keyword, k[22]);
 }
 
 test "markdown fences carry across lines and color nothing else inside" {
