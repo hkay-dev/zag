@@ -3257,6 +3257,9 @@ var cmds: std.ArrayList(Command) = .empty;
 /// palette is mostly for settings. Running one runs its menu item, so the
 /// palette never needs its own copy of a command.
 fn listCommands() void {
+    // Each item is retained, so one that AppKit drops while the palette is
+    // open stays safe to run.
+    for (cmds.items) |c| msg(void, c.item, "release", .{});
     _ = cmd_arena.reset(.retain_capacity);
     cmd_names = .empty;
     cmds = .empty;
@@ -3278,6 +3281,8 @@ fn addCommands(menu: Id, prefix: []const u8) void {
     var section = prefix;
     const n: usize = @intCast(msg(isize, menu, "numberOfItems", .{}));
     const palette_sel = objc.sel_registerName("commandPalette:");
+    // AppKit's own entries for each open window in the Window menu.
+    const window_sel = objc.sel_registerName("makeKeyAndOrderFront:");
     for (0..n) |i| {
         const it = msg(Id, menu, "itemAtIndex:", .{@as(isize, @intCast(i))});
         if (msg(bool, it, "isSeparatorItem", .{})) {
@@ -3297,10 +3302,13 @@ fn addCommands(menu: Id, prefix: []const u8) void {
             section = title;
             continue;
         }
-        if (act == palette_sel) continue;
+        if (act == palette_sel or act == window_sel) continue;
         const name = (if (section.len > 0) std.fmt.allocPrint(a, "{s}: {s}", .{ section, title }) else a.dupe(u8, title)) catch return;
         cmd_names.append(a, name) catch return;
-        cmds.append(a, .{ .item = it, .keys = keysOf(a, it) catch "", .on = isChecked(it) }) catch return;
+        cmds.append(a, .{ .item = msg(Id, it, "retain", .{}), .keys = keysOf(a, it) catch "", .on = isChecked(it) }) catch {
+            msg(void, it, "release", .{});
+            return;
+        };
     }
 }
 
