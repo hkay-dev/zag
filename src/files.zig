@@ -11,20 +11,24 @@ const copy_xattr = 1 << 2;
 
 const max_size = 1 << 30;
 
-/// The whole file. error.FileNotFound when it doesn't exist yet.
+/// The whole file. error.FileNotFound when it doesn't exist yet, and
+/// error.NotAFile for a pipe, socket or device, which it opens without
+/// blocking so a FIFO with no writer can't hang the caller.
 pub fn read(gpa: Allocator, path: [:0]const u8) ![]u8 {
-    const fd = c.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true });
+    const fd = c.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NONBLOCK = true });
     if (fd < 0) return if (c._errno().* == @intFromEnum(c.E.NOENT)) error.FileNotFound else error.ReadFailed;
     defer _ = c.close(fd);
     var st: c.Stat = undefined;
     if (c.fstat(fd, &st) != 0) return error.ReadFailed;
+    if (st.mode & c.S.IFMT != c.S.IFREG) return error.NotAFile;
     if (st.size > max_size) return error.FileTooBig;
     const buf = try gpa.alloc(u8, @intCast(st.size));
     errdefer gpa.free(buf);
     var n: usize = 0;
     while (n < buf.len) {
         const r = c.read(fd, buf[n..].ptr, buf.len - n);
-        if (r <= 0) return error.ReadFailed;
+        if (r < 0) return error.ReadFailed;
+        if (r == 0) return gpa.realloc(buf, n); // the file shrank after fstat
         n += @intCast(r);
     }
     return buf;
@@ -149,6 +153,20 @@ test "save replaces the text, keeps the file's mode and tags and leaves no temp 
     try t.expectEqualStrings("new text", got);
     try t.expectEqual(@as(c.mode_t, 0o755), modeOf(path));
     try t.expectEqual(@as(usize, 1), entries(dir));
+}
+
+extern "c" fn mkfifo(path: [*:0]const u8, mode: c.mode_t) c_int;
+
+test "read turns down a FIFO with no writer instead of blocking" {
+    var tmpl = "/tmp/ze-test-XXXXXX".*;
+    const dir = std.mem.span(mkdtemp(&tmpl).?);
+    defer _ = c.rmdir(dir);
+    var buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&buf, "{s}/pipe", .{dir}, 0);
+    try t.expectEqual(@as(c_int, 0), mkfifo(path, 0o644));
+    defer _ = c.unlink(path);
+    try t.expectError(error.NotAFile, read(t.allocator, path));
+    try t.expectError(error.NotAFile, read(t.allocator, "/dev/zero"));
 }
 
 fn modeOf(path: [:0]const u8) c.mode_t {
