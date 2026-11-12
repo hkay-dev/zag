@@ -1,17 +1,19 @@
 #!/bin/sh
-# bundle.sh [dev|stable] [out.app]: builds a small release and wraps it as an
-# app, signed with Vesper Self-Signed, and prints the app's path.
-#   dev     "Zag Dev", dev.hkay.ze.dev, at zig-out/Zag Dev.app. It runs in the
+# bundle.sh [dev|perf|stable] [out.app]: builds Zag and wraps it as a macOS
+# .app bundle, then prints the bundle path.
+#   dev     "Zag Dev", dev.hkay.ze.dev, at zig-out/Zag Dev.app. Runs in the
 #           background (LSUIElement); start it with scripts/dev.sh.
-#           ZE_DEBUG=1 builds it in debug mode, which stops on bad memory
-#           use with a message instead of drawing garbage or crashing later.
-#   stable  "Zag", dev.hkay.ze, at zig-out/Zag.app. Only scripts/ship.sh makes
-#           it, and installs it at ~/Applications/Zag.app.
-#   perf    "Zag Perf", dev.hkay.ze.perf, at zig-out/Zag Perf.app: the same
-#           release with the self-driving bench compiled in, for
-#           scripts/bench.sh. Background only, like dev.
-# The bundle ids still say ze, the app's first name, so settings, sessions
-# and drafts carry over from it.
+#           ZE_DEBUG=1 builds in debug mode for full panic stack traces.
+#   perf    "Zag Perf", dev.hkay.ze.perf, at zig-out/Zag Perf.app: release build
+#           with the self-driving benchmark compiled in (scripts/bench.sh).
+#   stable  "Zag", dev.hkay.ze, at zig-out/Zag.app.
+#
+# Environment:
+#   CODESIGN_IDENTITY  Signing identity name, or "-" for ad-hoc signing.
+#                      Defaults to "Vesper Self-Signed" when present in the
+#                      keychain, otherwise "-" for local source builds.
+#   ZE_VERSION         Short version string (default: 0.1.0).
+#   ZIG                Zig compiler command (default: zig).
 set -eu
 cd "$(dirname "$0")/.."
 flavor=${1:-dev}
@@ -22,9 +24,12 @@ case $flavor in
   *) echo "bundle.sh: dev, perf or stable, not $flavor" >&2; exit 1 ;;
 esac
 app=${2:-"zig-out/$name.app"}
-if [ "$flavor" = dev ] && [ "${ZE_DEBUG:-}" = 1 ]; then zig build
-elif [ "$flavor" = perf ]; then zig build --release -Dbench=true
-else zig build --release; fi
+zig_cmd=${ZIG:-zig}
+version=${ZE_VERSION:-0.1.0}
+build_ver=$(git rev-parse --short=9 HEAD 2>/dev/null || printf '%s' "$version")
+if [ "$flavor" = dev ] && [ "${ZE_DEBUG:-}" = 1 ]; then "$zig_cmd" build
+elif [ "$flavor" = perf ]; then "$zig_cmd" build --release -Dbench=true
+else "$zig_cmd" build --release; fi
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp zig-out/bin/zag "$app/Contents/MacOS/zag"
@@ -49,12 +54,15 @@ cat > "$app/Contents/Info.plist" <<EOF
 <dict>
   <key>CFBundleIdentifier</key><string>$id</string>
   <key>CFBundleName</key><string>$name</string>
+  <key>CFBundleDisplayName</key><string>$name</string>
   <key>CFBundleExecutable</key><string>zag</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
-  <key>CFBundleVersion</key><string>$(git rev-parse --short=9 HEAD)</string>
+  <key>CFBundleShortVersionString</key><string>$version</string>
+  <key>CFBundleVersion</key><string>$build_ver</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSHumanReadableCopyright</key><string>Copyright © 2026 Harsha Kotcherlakota. MIT License.</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   $ui
   <key>CFBundleDocumentTypes</key>
@@ -68,7 +76,17 @@ cat > "$app/Contents/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
-# One identity for stable and dev, never ad hoc: macOS keeps grants per
-# bundle id and certificate (armada docs/mac-dev-builds.md).
-codesign --force --sign "Vesper Self-Signed" "$app"
+if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+  sign_id=$CODESIGN_IDENTITY
+elif security find-identity -v -p codesigning 2>/dev/null | grep -Fq '"Vesper Self-Signed"'; then
+  sign_id="Vesper Self-Signed"
+else
+  sign_id="-"
+fi
+case $sign_id in
+  "Developer ID Application:"*)
+    codesign --force --options runtime --timestamp --sign "$sign_id" "$app" ;;
+  *)
+    codesign --force --sign "$sign_id" "$app" ;;
+esac
 echo "$app"

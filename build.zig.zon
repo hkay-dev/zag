@@ -1,7 +1,16 @@
 .{
-    .name = .ze,
+    .name = .zag,
     .version = "0.1.0",
     .minimum_zig_version = "0.17.0",
-    .paths = .{""},
-    .fingerprint = 0xa9d11654bd61ccb0,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "AppIcon.icon",
+        "scripts",
+        "dmg",
+        "LICENSE",
+        "README.md",
+    },
+    .fingerprint = 0x9179a892def1ed0,
 }

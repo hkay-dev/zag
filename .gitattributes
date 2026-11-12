@@ -1,0 +1,10 @@
+AGENTS.md export-ignore
+.omp export-ignore
+docs/design export-ignore
+docs/loops export-ignore
+docs/perf export-ignore
+docs/research export-ignore
+scripts/bench.sh export-ignore
+scripts/jury.sh export-ignore
+scripts/ship.sh export-ignore
+scripts/shot.sh export-ignore
