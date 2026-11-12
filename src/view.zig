@@ -2481,6 +2481,7 @@ fn save(d: *Doc, as: bool) bool {
         preview.rename(d.win.window, d.file.path orelse "", abs);
         if (d.file.path) |old| gpa.free(old);
         d.file.path = abs;
+        dropCopies(d, abs);
         d.file.lang = syntax.forPath(abs);
         clearSyntax(d);
         named(d);
@@ -2514,6 +2515,36 @@ fn save(d: *Doc, as: bool) bool {
     refresh(d);
     for (wins.items) |w| redrawSide(w);
     return true;
+}
+
+/// Closes every other tab that holds `abs`, which Save As just wrote over
+/// from `keep`, without asking: what it showed is gone from disk. A card's
+/// last tab folds the card away, or closes the window when it's the only card.
+fn dropCopies(keep: *Doc, abs: []const u8) void {
+    while (copyOf(keep, abs)) |h| {
+        const last = tabCount(h.d) == 1;
+        var pg = takeTab(h.d, h.j) orelse return;
+        pg.deinit();
+        if (!last) continue;
+        if (h.d.win.cards.pane != null) {
+            msg(void, h.d.win.window, "performClose:", .{@as(Id, null)});
+        } else {
+            foldCard(h.d);
+            if (h.d.win == keep.win) focus(keep);
+        }
+    }
+}
+
+/// The first live tab other than `keep`'s file on show that holds `abs`.
+fn copyOf(keep: *Doc, abs: []const u8) ?TabRef {
+    for (docs.items) |d| {
+        if (d.closing) continue;
+        for (0..tabCount(d)) |j| {
+            const p = tabPage(d, j);
+            if (p != &keep.file and p.path != null and std.mem.eql(u8, p.path.?, abs)) return .{ .d = d, .j = j };
+        }
+    }
+    return null;
 }
 
 /// Whether the rows of folder `rel` (null for the root) are on the tree's list.
