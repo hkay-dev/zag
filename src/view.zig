@@ -2904,6 +2904,7 @@ pub fn recheckAll() void {
 /// A clean doc reloads from disk; one with unsaved changes asks first. A
 /// deleted file leaves the text as unsaved changes.
 fn checkOutside(d: *Doc) void {
+    for (d.pages.items) |*pg| checkDeleted(pg);
     const p = d.file.path orelse return;
     const now = files.stamp(p);
     if (std.meta.eql(now, d.file.stamp)) return;
@@ -2919,6 +2920,15 @@ fn checkOutside(d: *Doc) void {
     d.file.ed.reload(gpa, bytes) catch return;
     d.note = "reloaded";
     refresh(d);
+}
+
+/// A parked tab whose file was deleted keeps its text as unsaved changes, so
+/// quitting asks about it. Only the shown tab reloads changed files.
+fn checkDeleted(pg: *Page) void {
+    const p = pg.path orelse return;
+    if (pg.stamp == null or files.stamp(p) != null) return;
+    pg.stamp = null;
+    pg.ed.buf.markUnsaved();
 }
 
 fn changedTitle(d: *Doc, buf: *[300]u8) []const u8 {
