@@ -261,7 +261,8 @@ pub const Editor = struct {
     const LineOp = union(enum) { indent, outdent, comment: []const u8 };
 
     /// Rewrites every line the selection touches as one undo step, and
-    /// selects the rewritten lines.
+    /// selects the rewritten lines. With only a caret, the caret stays on the
+    /// same character instead.
     fn eachLine(e: *Editor, gpa: Allocator, op: LineOp) !void {
         const b = &e.buf;
         const r = e.sel();
@@ -285,6 +286,11 @@ pub const Editor = struct {
         }
         if (min_ws == std.math.maxInt(usize)) min_ws = 0;
 
+        // The one change on the caret's line: `del` bytes at column `at`
+        // became `add` bytes.
+        var at: usize = 0;
+        var del: usize = 0;
+        var add: usize = 0;
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(gpa);
         for (first..last + 1) |i| {
@@ -293,32 +299,44 @@ pub const Editor = struct {
             const ws = leadingWs(l);
             switch (op) {
                 .indent => {
-                    if (l.len > 0) try out.appendSlice(gpa, e.indent);
+                    if (l.len > 0) add = e.indent.len;
+                    try out.appendSlice(gpa, e.indent[0..add]);
                     try out.appendSlice(gpa, l);
                 },
                 .outdent => {
-                    var n: usize = 0;
-                    if (n < l.len and l[0] == '\t') n = 1 else while (n < l.len and n < tab_width and l[n] == ' ') n += 1;
-                    try out.appendSlice(gpa, l[n..]);
+                    if (del < l.len and l[0] == '\t') del = 1 else while (del < l.len and del < tab_width and l[del] == ' ') del += 1;
+                    try out.appendSlice(gpa, l[del..]);
                 },
                 .comment => |p| if (ws == l.len) {
                     try out.appendSlice(gpa, l);
                 } else if (all) {
-                    var cut_end = ws + p.len;
-                    if (cut_end < l.len and l[cut_end] == ' ') cut_end += 1;
-                    try out.appendSlice(gpa, l[0..ws]);
-                    try out.appendSlice(gpa, l[cut_end..]);
+                    at = ws;
+                    del = p.len;
+                    if (at + del < l.len and l[at + del] == ' ') del += 1;
+                    try out.appendSlice(gpa, l[0..at]);
+                    try out.appendSlice(gpa, l[at + del ..]);
                 } else {
-                    try out.appendSlice(gpa, l[0..min_ws]);
+                    at = min_ws;
+                    add = p.len + 1;
+                    try out.appendSlice(gpa, l[0..at]);
                     try out.appendSlice(gpa, p);
                     try out.append(gpa, ' ');
-                    try out.appendSlice(gpa, l[min_ws..]);
+                    try out.appendSlice(gpa, l[at..]);
                 },
+            }
+            if (i < last) {
+                at = 0;
+                del = 0;
+                add = 0;
             }
         }
         if (std.mem.eql(u8, out.items, t[start..end])) return;
+        const had_sel = e.hasSel();
+        const col = e.cur - start;
         try b.replace(gpa, start, end, out.items, e.cur, false);
-        e.select(start, start + out.items.len);
+        if (had_sel) return e.select(start, start + out.items.len);
+        const c = start + if (col < at) col else if (col < at + del) at + add else col - del + add;
+        e.select(c, c);
     }
 
     pub fn undo(e: *Editor, gpa: Allocator) !?[2]usize {
@@ -789,6 +807,20 @@ test "comment toggle adds at the shallowest indent and removes again" {
     try t_.expectEqualStrings("  // a\n\n  //   b\n", e.text());
     try e.toggleComment(gpa_t, "//");
     try t_.expectEqualStrings("  a\n\n    b\n", e.text());
+}
+
+test "comment toggle and outdent with only a caret keep the caret on its character" {
+    var e = try Editor.init(gpa_t, "    ab\n");
+    defer e.deinit(gpa_t);
+    e.select(5, 5);
+    try e.toggleComment(gpa_t, "//");
+    try t_.expectEqualStrings("    // ab\n", e.text());
+    try t_.expectEqual([2]usize{ 8, 8 }, e.sel());
+    try e.toggleComment(gpa_t, "//");
+    try t_.expectEqual([2]usize{ 5, 5 }, e.sel());
+    try e.outdent(gpa_t);
+    try t_.expectEqualStrings("ab\n", e.text());
+    try t_.expectEqual([2]usize{ 1, 1 }, e.sel());
 }
 
 test "format JSON indents nesting and keeps keys, numbers and strings as written" {
