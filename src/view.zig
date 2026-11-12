@@ -6801,11 +6801,14 @@ fn setLights(w: *Win, a: f64) void {
 /// Reads where AppKit put the traffic lights, which it centers in the
 /// window's empty toolbar, so the header's middle sits on their line and
 /// its tabs start past them; and the window's corner radius, so the cards'
-/// corners nest inside it a gap in. Full screen keeps the last values, and
-/// is what it returns.
+/// corners nest inside it a gap in. Full screen keeps the last header height
+/// and radius, and is what it returns; AppKit moves the lights up into the
+/// hidden toolbar there, so the sidebar button and tabs take their room.
 fn fitTitlebar(w: *Win, r: Rect) bool {
     if (msg(usize, w.window, "styleMask", .{}) & (1 << 14) != 0) {
         w.tb.ok = false;
+        toggle_x = gap + 24;
+        tabs_from = gap + 14;
         return true;
     }
     // The numbers change with the window's size, full screen or key state,
