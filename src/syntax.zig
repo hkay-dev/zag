@@ -21,6 +21,10 @@ pub const Lang = struct {
     triple: bool = false,
     /// JS template strings and Go raw strings, which can span lines.
     backtick: bool = false,
+    /// Backtick strings take no backslash escapes (Go raw strings).
+    raw_backtick: bool = false,
+    /// Rust's `'a` lifetimes and `'outer:` labels, which aren't char literals.
+    lifetimes: bool = false,
     /// Zig's `\\` multiline string lines.
     line_string: []const u8 = "",
     /// Words before `(` are functions, Capitalized words types and ALL_CAPS
@@ -74,14 +78,14 @@ const python: Lang = .{ .line_comment = "#", .triple = true, .names = true, .key
     "False", "None", "self", "match", "case",
 } };
 
-const rust: Lang = .{ .line_comment = "//", .block_comment = true, .names = true, .keywords = &.{
+const rust: Lang = .{ .line_comment = "//", .block_comment = true, .names = true, .lifetimes = true, .keywords = &.{
     "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
     "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move",
     "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true",
     "type", "unsafe", "use", "where", "while",
 } };
 
-const go: Lang = .{ .line_comment = "//", .block_comment = true, .backtick = true, .names = true, .keywords = &.{
+const go: Lang = .{ .line_comment = "//", .block_comment = true, .backtick = true, .raw_backtick = true, .names = true, .keywords = &.{
     "break", "case", "chan", "const", "continue", "default", "defer", "else", "fallthrough",
     "for", "func", "go", "goto", "if", "import", "interface", "map", "package", "range",
     "return", "select", "struct", "switch", "type", "var", "true", "false", "nil",
@@ -210,8 +214,9 @@ pub fn lexLine(lang: *const Lang, s: []const u8, state: State, out: ?[]Kind) Sta
                     .triple_single => "'''",
                     else => "`",
                 };
-                if (findClose(s, i, close)) |e| {
-                    i = e + close.len;
+                const e = if (st == .backtick and lang.raw_backtick) std.mem.indexOfPos(u8, s, i, close) else findClose(s, i, close);
+                if (e) |at| {
+                    i = at + close.len;
                     st = .normal;
                 } else i = s.len;
             },
@@ -238,7 +243,9 @@ pub fn lexLine(lang: *const Lang, s: []const u8, state: State, out: ?[]Kind) Sta
                     kind = .string;
                     i += 1;
                     st = .backtick;
-                } else if (c == '"' or (c == '\'' and lang.keywords.len > 0)) {
+                } else if (c == '\'' and lang.lifetimes and isLifetime(s, i)) {
+                    i += 1;
+                } else if (c == '"' or (c == '\'' and lang != &plain)) {
                     if (findClose(s, i + 1, s[i .. i + 1])) |e| {
                         i = e + 1;
                         var j = i;
@@ -471,6 +478,26 @@ fn findClose(s: []const u8, from: usize, close: []const u8) ?usize {
         } else if (std.mem.startsWith(u8, s[i..], close)) return i;
     }
     return null;
+}
+
+/// Whether the `'` at `i` starts a lifetime or label (`'a`, `'static`)
+/// rather than a char literal (`'a'`, `'\n'`, `'é'`).
+fn isLifetime(s: []const u8, i: usize) bool {
+    if (i + 1 >= s.len or !isWord(s[i + 1])) return false;
+    const n = std.unicode.utf8ByteSequenceLength(s[i + 1]) catch 1;
+    return i + 1 + n >= s.len or s[i + 1 + n] != '\'';
+}
+
+test "rust lifetimes, go raw backslashes and css single quotes" {
+    var k: [40]Kind = undefined;
+    _ = lexLine(&rust, "fn f<'a>(x: &'a str, c: 'b')", .normal, &k);
+    try t.expectEqual(Kind.text, k[9]);
+    try t.expectEqual(Kind.string, k[24]);
+    try t.expectEqual(State.normal, lexLine(&go, "re := `\\d+\\` + x", .normal, &k));
+    try t.expectEqual(Kind.string, k[11]);
+    try t.expectEqual(Kind.text, k[15]);
+    _ = lexLine(&css, "a { font: 'Inter'; }", .normal, &k);
+    try t.expectEqual(Kind.string, k[10]);
 }
 
 const t = std.testing;
