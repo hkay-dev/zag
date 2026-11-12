@@ -1,5 +1,6 @@
 //! Foundation parses Markdown; AppKit lays out the read-only preview.
 const std = @import("std");
+const access = @import("access.zig");
 const objc = @import("objc.zig");
 const settings = @import("settings.zig");
 const syntax = @import("syntax.zig");
@@ -168,7 +169,7 @@ fn style(flags: usize) Id {
 fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     if (view.previewText(seen_id)) |bytes| {
         msg(void, source, "release", .{});
-        source = msg(Id, objc.str(bytes), "retain", .{});
+        source = msg(Id, access.nsText(bytes), "retain", .{});
     }
     if (source == null) return;
     const options = objc.new("NSAttributedStringMarkdownParsingOptions");
