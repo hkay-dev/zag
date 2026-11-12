@@ -511,7 +511,7 @@ fn trailingComment(line: []const u8) []const u8 {
 /// Flags (`true`, `false`) and numbers are written bare, everything else quoted.
 /// The last `opt` line is the one `parse` reads, so that one changes, and its
 /// trailing comment stays.
-fn setLine(gpa: Allocator, text: []const u8, opt: Opt, value: []const u8) ![]u8 {
+pub fn setLine(gpa: Allocator, text: []const u8, opt: Opt, value: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     const key = @tagName(opt);

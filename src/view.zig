@@ -3170,12 +3170,40 @@ fn isConf(path: ?[]const u8) bool {
     return std.mem.eql(u8, p, c);
 }
 
-/// Rewrites one line of the settings file and applies it.
+/// Rewrites one line of the settings file and applies it. An open
+/// config.toml with unsaved edits gets the same line in its text, as an
+/// undoable edit, instead of a reload that would ask to drop those edits.
 fn store(opt: settings.Opt, value: []const u8) void {
     const p = conf_path orelse return;
+    const before = files.stamp(p);
     settings.store(gpa, p, &conf_saved, opt, value) catch return alert("Couldn't write the settings file.", p);
     loadSettings();
-    for (docs.items) |d| if (isConf(d.file.path)) checkOutside(d);
+    for (docs.items) |d| if (isConf(d.file.path)) {
+        if (d.file.ed.buf.dirty() and std.meta.eql(d.file.stamp, before)) {
+            setConfLine(d, opt, value) catch {};
+            d.file.stamp = files.stamp(p);
+            refresh(d);
+        } else checkOutside(d);
+    };
+}
+
+/// Sets the `opt` line in the doc's own text, replacing only the bytes that
+/// differ, with the caret and selection shifted past the change.
+fn setConfLine(d: *Doc, opt: settings.Opt, value: []const u8) !void {
+    const e = &d.file.ed;
+    const old = e.text();
+    const new = try settings.setLine(gpa, old, opt, value);
+    defer gpa.free(new);
+    var a: usize = 0;
+    while (a < old.len and a < new.len and old[a] == new[a]) a += 1;
+    var z: usize = 0;
+    while (z < old.len - a and z < new.len - a and old[old.len - 1 - z] == new[new.len - 1 - z]) z += 1;
+    const end = old.len - z;
+    const grown = new.len - z;
+    const cur = if (e.cur >= end) e.cur - end + grown else @min(e.cur, grown);
+    const anchor = if (e.anchor >= end) e.anchor - end + grown else @min(e.anchor, grown);
+    try e.buf.replace(gpa, a, end, new[a..grown], e.cur, false);
+    e.select(anchor, cur);
 }
 
 // ---- the settings file, watched ----
