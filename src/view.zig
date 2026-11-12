@@ -3935,8 +3935,9 @@ fn clearSyntax(d: *Doc) void {
 
 /// Line `i`'s kinds for this frame, added to `lex[0]`: copied from the last
 /// frame when it drew the line, else lexed. `walk` steps through the last
-/// frame's lines, as the frame asks for lines in order.
-fn lineKinds(d: *Doc, i: usize, l: []const u8, walk: *usize) ?[]const syntax.Kind {
+/// frame's lines, as the frame asks for lines in order. Returns the kinds'
+/// offset in `lex[0].kinds`, since a later line's append can move the buffer.
+fn lineKinds(d: *Doc, i: usize, l: []const u8, walk: *usize) ?usize {
     const now = &d.lex[0];
     const old = d.lex[1].lines.items;
     const at = now.kinds.items.len;
@@ -3950,7 +3951,7 @@ fn lineKinds(d: *Doc, i: usize, l: []const u8, walk: *usize) ?[]const syntax.Kin
     if (walk.* < old.len and old[walk.*].line == i) {
         @memcpy(out, d.lex[1].kinds.items[old[walk.*].at..][0..l.len]);
     } else _ = syntax.lexLine(d.file.lang, l, d.states.items[i], out);
-    return out;
+    return at;
 }
 
 // ---- untitled names ----
@@ -5066,7 +5067,9 @@ fn themeOf(w: *Win) *const Theme {
     return &themes[@intFromBool(isDark(w))];
 }
 
-const VRow = struct { line: usize, seg: Seg, kinds: ?[]const syntax.Kind = null, reach: u8 = 0 };
+/// `kinds` is the row's line's offset in `lex[0].kinds`, not a slice, since
+/// lexing a later row can move that buffer.
+const VRow = struct { line: usize, seg: Seg, kinds: ?usize = null, reach: u8 = 0 };
 
 fn cardRect(d: *const Doc) Rect {
     return .{ .x = gap, .y = gap, .w = d.size.x - 2 * gap, .h = d.size.y - 2 * gap };
@@ -5424,7 +5427,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     d.lex[0].clear();
     var walk: usize = 0;
     var lexed: usize = std.math.maxInt(usize);
-    var kinds: ?[]const syntax.Kind = null;
+    var kinds: ?usize = null;
     // Pass 0 stops a column short of the margin; it draws one cell more than
     // fits to learn which rows reach it (1) and which run past it (2). Pass 1
     // draws the last columns of rows that just fit at full strength, and the
@@ -5470,14 +5473,15 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
                 }
                 v.kinds = kinds;
             }
+            const ks: ?[]const syntax.Kind = if (v.kinds) |at| d.lex[0].kinds.items[at..][0..l.len] else null;
             k.offset = ls;
             const row_y = top_h + f(row) * lh - d.vy;
             // Later passes redraw only the last columns, at the x pass 0 gives them.
             const back = @min(cols, 2);
             const used = if (pass > 0)
-                k.run(l, v.seg.start, v.seg.end, v.seg.col, v.kinds, th, th.fg, ox + f(cols - back) * cw, row_y + baseline, skip + cols - back, back + 1)
+                k.run(l, v.seg.start, v.seg.end, v.seg.col, ks, th, th.fg, ox + f(cols - back) * cw, row_y + baseline, skip + cols - back, back + 1)
             else
-                k.run(l, v.seg.start, v.seg.end, v.seg.col, v.kinds, th, th.fg, ox, row_y + baseline, skip, cols + 1);
+                k.run(l, v.seg.start, v.seg.end, v.seg.col, ks, th, th.fg, ox, row_y + baseline, skip, cols + 1);
             if (pass == 0) {
                 v.reach = if (used > cols) 2 else if (used == cols) 1 else 0;
                 any_reach = any_reach or used >= cols;
