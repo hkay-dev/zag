@@ -3540,12 +3540,12 @@ fn promptCommand(d: *Doc, name: []const u8) void {
         return;
     }
     const into = field(d);
-    if (is(name, "deleteBackward")) {
-        d.fresh = false;
-        into.items.len = editor.prevChar(into.items, into.items.len);
-    } else if (is(name, "deleteWordBackward")) {
+    if (is(name, "deleteBackward") or is(name, "deleteWordBackward")) {
         // A fresh prefill is selected, so it goes whole.
-        into.items.len = if (d.fresh) 0 else editor.wordLeft(into.items, into.items.len);
+        into.items.len = if (d.fresh) 0 else if (is(name, "deleteBackward"))
+            editor.prevChar(into.items, into.items.len)
+        else
+            editor.wordLeft(into.items, into.items.len);
         d.fresh = false;
     } else if (is(name, "deleteToBeginningOfLine")) {
         into.clearRetainingCapacity();
