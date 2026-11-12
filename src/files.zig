@@ -6,6 +6,9 @@ const Allocator = std.mem.Allocator;
 
 extern "c" fn mkstemp(template: [*:0]u8) c_int;
 extern "c" fn copyfile(from: [*:0]const u8, to: [*:0]const u8, state: ?*anyopaque, flags: u32) c_int;
+extern "c" fn umask(mask: c.mode_t) c.mode_t;
+extern "c" fn access(path: [*:0]const u8, mode: c_int) c_int;
+const w_ok = 2;
 const copy_acl = 1 << 0;
 const copy_xattr = 1 << 2;
 
@@ -36,7 +39,8 @@ pub fn read(gpa: Allocator, path: [:0]const u8) ![]u8 {
 
 /// Writes a temp file beside `path`, syncs it, then renames it over `path`,
 /// so a crash mid-save leaves the old file whole. Keeps the file's mode,
-/// extended attributes (Finder tags among them) and ACL.
+/// extended attributes (Finder tags among them) and ACL; a new file gets
+/// 0666 less the umask, as `open` would give it.
 pub fn write(path: [:0]const u8, data: []const u8) !void {
     var tmp_buf: [c.PATH_MAX + 16]u8 = undefined;
     const tmp = try std.fmt.bufPrintSentinel(&tmp_buf, "{s}.ze-XXXXXX", .{path}, 0);
@@ -53,11 +57,26 @@ pub fn write(path: [:0]const u8, data: []const u8) !void {
         }
         var st: c.Stat = undefined;
         const old = c.stat(path, &st) == 0;
-        const mode: c.mode_t = if (old) st.mode & 0o7777 else 0o644;
+        const mode: c.mode_t = if (old) st.mode & 0o7777 else 0o666 & ~currentUmask();
         if (old) _ = copyfile(path, tmp.ptr, null, copy_acl | copy_xattr);
         if (c.fchmod(fd, mode) != 0 or c.fsync(fd) != 0) return error.WriteFailed;
     }
     if (c.rename(tmp.ptr, path) != 0) return error.WriteFailed;
+}
+
+/// The process umask. umask() only reads it by setting it, so this puts it
+/// back, setting 0777 meanwhile so a file made in between is never looser.
+fn currentUmask() c.mode_t {
+    const m = umask(0o777);
+    _ = umask(m);
+    return m;
+}
+
+/// False when the user may not write `path`, such as a file set to 0444.
+/// Saving renames over the file, which the folder's permissions allow, so
+/// the caller asks first.
+pub fn writable(path: [:0]const u8) bool {
+    return access(path, w_ok) == 0;
 }
 
 /// Absolute path for `path`, following symlinks so a save lands on the real
@@ -138,9 +157,12 @@ test "save replaces the text, keeps the file's mode and tags and leaves no temp 
     const path = try std.fmt.bufPrintSentinel(&buf, "{s}/run.sh", .{dir}, 0);
     defer _ = c.unlink(path);
 
+    const was = umask(0o022);
+    defer _ = umask(was);
     try t.expectError(error.FileNotFound, read(t.allocator, path));
     try write(path, "old");
     try t.expectEqual(@as(c.mode_t, 0o644), modeOf(path));
+    try t.expect(writable(path));
     _ = c.chmod(path, 0o755);
     try t.expectEqual(@as(c_int, 0), setxattr(path, "dev.hkay.zag.test", "red", 3, 0, 0));
     try write(path, "new text");
@@ -153,6 +175,22 @@ test "save replaces the text, keeps the file's mode and tags and leaves no temp 
     try t.expectEqualStrings("new text", got);
     try t.expectEqual(@as(c.mode_t, 0o755), modeOf(path));
     try t.expectEqual(@as(usize, 1), entries(dir));
+}
+
+test "a new file takes the umask and a read-only file reads as not writable" {
+    var tmpl = "/tmp/ze-test-XXXXXX".*;
+    const dir = std.mem.span(mkdtemp(&tmpl).?);
+    defer _ = c.rmdir(dir);
+    var buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&buf, "{s}/secret.txt", .{dir}, 0);
+    defer _ = c.unlink(path);
+
+    const was = umask(0o077);
+    defer _ = umask(was);
+    try write(path, "x");
+    try t.expectEqual(@as(c.mode_t, 0o600), modeOf(path));
+    _ = c.chmod(path, 0o444);
+    try t.expect(!writable(path));
 }
 
 extern "c" fn mkfifo(path: [*:0]const u8, mode: c.mode_t) c_int;

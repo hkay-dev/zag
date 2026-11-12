@@ -2462,6 +2462,10 @@ fn save(d: *Doc, as: bool) bool {
         if (!std.meta.eql(@as(?files.Stamp, now), d.file.stamp) and !askOverwrite(d)) return false;
     }
     const to = fresh orelse d.file.path.?;
+    if (files.exists(to) and !files.writable(to) and !askReadOnly(to)) {
+        if (fresh) |z| gpa.free(z);
+        return false;
+    }
     files.write(to, d.file.ed.text()) catch {
         alert("Couldn't save this file.", to);
         if (fresh) |z| gpa.free(z);
@@ -2990,6 +2994,15 @@ fn askOverwrite(d: *Doc) bool {
     if (background) return true;
     var buf: [300]u8 = undefined;
     return askAlert(changedTitle(d, &buf), "Saving replaces that version with yours.", &.{ "Save Anyway", "Cancel" }) == 1000;
+}
+
+/// Saving over a file set read-only, which the rename in `files.write`
+/// would otherwise replace without a word.
+fn askReadOnly(path: []const u8) bool {
+    if (background) return true;
+    var buf: [300]u8 = undefined;
+    const title = std.fmt.bufPrint(&buf, "{s} is read-only.", .{std.fs.path.basename(path)}) catch "This file is read-only.";
+    return askAlert(title, "Saving replaces it with your version, which stays read-only.", &.{ "Save Anyway", "Cancel" }) == 1000;
 }
 
 // ---- settings ----
