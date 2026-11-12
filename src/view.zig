@@ -1862,6 +1862,7 @@ fn closeTab(d: *Doc, at: usize) void {
         if (!keepOrDrop(d)) return;
         // A Save As can close tabs left of it, so take its place after saving.
         j = d.at;
+        if (tabCount(d) == 1) return closeTab(d, j);
     }
     var pg = takeTab(d, j) orelse return;
     pg.deinit();
