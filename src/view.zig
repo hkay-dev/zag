@@ -7597,11 +7597,21 @@ fn cut(d: *Doc) void {
     reveal(d);
 }
 
+/// The prompt is one line: a paste drops its trailing line break, and
+/// Quick Open and the palette take only its first line.
+fn promptPaste(d: *Doc, s: []const u8) void {
+    var t = std.mem.trimEnd(u8, s, "\r\n");
+    if (d.mode == .open or d.mode == .command) {
+        if (std.mem.indexOfAny(u8, t, "\r\n")) |i| t = t[0..i];
+    }
+    if (t.len > 0) promptType(d, t);
+}
+
 fn paste(d: *Doc) void {
     const s = objc.utf8(msg(Id, pasteboard(), "stringForType:", .{NSPasteboardTypeString}));
     // An image or file on the clipboard has no text: the selection stays.
     if (s.len == 0) return;
-    if (d.mode != .edit) return promptType(d, s);
+    if (d.mode != .edit) return promptPaste(d, s);
     const at = d.file.ed.sel()[0];
     d.file.ed.paste(gpa, s) catch {};
     if (std.mem.indexOfScalar(u8, s, '\n') != null or s.len > 40) {
