@@ -316,8 +316,10 @@ pub const Editor = struct {
         var a = pos;
         var z = pos;
         const k = if (pos < t.len) class(t[pos]) else if (pos > 0) class(t[pos - 1]) else return null;
-        while (a > 0 and t[a - 1] != '\n' and class(t[a - 1]) == k) a -= 1;
-        while (z < t.len and t[z] != '\n' and class(t[z]) == k) z += 1;
+        // A line break (`\n`, or the `\r` of CRLF) is never part of a word.
+        if (k == 2) return .{ pos, pos };
+        while (a > 0 and class(t[a - 1]) == k) a -= 1;
+        while (z < t.len and class(t[z]) == k) z += 1;
         return .{ a, z };
     }
 
@@ -665,6 +667,7 @@ test "word and line queries leave selection and motion state alone" {
     e.want = 5;
     e.typing = true;
     try t_.expectEqual(@as(?[2]usize, .{ 4, 7 }), e.wordAt(5));
+    try t_.expectEqual(@as(?[2]usize, .{ 7, 7 }), e.wordAt(7));
     try t_.expectEqual([2]usize{ 0, 9 }, e.lineAt(5));
     try t_.expectEqual([2]usize{ 9, 15 }, e.lineAt(15));
     try t_.expectEqual([2]usize{ 0, 3 }, e.sel());
