@@ -2480,6 +2480,19 @@ fn save(d: *Doc, as: bool) bool {
         d.file.lang = syntax.forPath(abs);
         clearSyntax(d);
         named(d);
+    } else if (d.file.stamp == null) {
+        // A file opened before it existed got a path that `realpath` couldn't
+        // resolve; resolve it now so it matches the tree's path for the file.
+        if (files.absolute(gpa, d.file.path.?)) |abs| {
+            if (std.mem.eql(u8, abs, d.file.path.?)) {
+                gpa.free(abs);
+            } else {
+                preview.rename(d.win.window, d.file.path.?, abs);
+                gpa.free(d.file.path.?);
+                d.file.path = abs;
+                named(d);
+            }
+        } else |_| {}
     }
     d.file.ed.buf.markSaved();
     dropDraft(&d.file.draft);
