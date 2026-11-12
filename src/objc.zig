@@ -108,10 +108,11 @@ pub fn str(s: []const u8) Id {
 }
 
 /// The UTF-8 bytes of an NSString, valid until the autorelease pool drains.
+/// The length comes from the string, so an embedded NUL byte doesn't cut it short.
 pub fn utf8(ns: Id) []const u8 {
     if (ns == null) return "";
-    const p = msg(?[*:0]const u8, ns, "UTF8String", .{}) orelse return "";
-    return std.mem.span(p);
+    const p = msg(?[*]const u8, ns, "UTF8String", .{}) orelse return "";
+    return p[0..msg(usize, ns, "lengthOfBytesUsingEncoding:", .{@as(usize, 4)})];
 }
 
 pub extern fn CFRelease(cf: *anyopaque) void;
