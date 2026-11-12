@@ -1852,6 +1852,9 @@ fn newTab(d: *Doc) void {
 /// left at the end.
 fn closeTab(d: *Doc, at: usize) void {
     if (tabCount(d) == 1) {
+        // The card next to it may still be folding away: finish that first,
+        // so closing the last card left closes the window.
+        endSiblingFold(d);
         if (d.win.cards.pane != null) return msg(void, d.win.window, "performClose:", .{@as(Id, null)});
         if (d.file.loses() and !keepOrDrop(d)) return;
         return foldCard(d);
@@ -2023,6 +2026,18 @@ fn reorderTab(d: *Doc, j: usize, k: usize) void {
     const at = if (k + 1 < tabCount(d)) slotOf(d, tabPage(d, k + 1).id) orelse 0 else d.slots.items.len;
     d.slots.insert(gpa, at, s) catch {};
     refresh(d);
+}
+
+/// Snaps shut the fold of `d`'s sibling card, if one is under way, and
+/// takes the folded card out.
+fn endSiblingFold(d: *Doc) void {
+    const w = d.win;
+    const leaf = nodeOf(w.cards, d) orelse return;
+    const up = leaf.up orelse return;
+    const g = up.going orelse return;
+    if (up.kids[g] == leaf) return;
+    up.share.snap(up.share.to);
+    dropFolded(w, w.cards);
 }
 
 /// A closing card's split springs it shut (without a bounce) while its
