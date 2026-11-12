@@ -7699,7 +7699,7 @@ fn formatJson(d: *Doc) void {
     if (!ok) d.note = if (d.file.ed.hasSel()) "selection isn't valid JSON" else "not valid JSON";
 }
 
-fn zoom(_: *Doc, by: f64) void {
+fn zoom(by: f64) void {
     const size = if (by == 0) settings.default_size else std.math.clamp(conf.size + by, settings.size_min, settings.size_max);
     var buf: [24]u8 = undefined;
     store(.size, settings.decimal(&buf, size));
@@ -7791,9 +7791,11 @@ const menu_bar = .{
         .{ .title = "Markdown Preview", .sel = "markdownPreview:", .key = "m", .mods = objc.cmd_key | objc.shift_key, .to = .view, .run = markdownPreview },
         .{ .sep = true },
         .{ .title = "Font…", .sel = "orderFrontFontPanel:", .key = "t", .mods = objc.cmd_key | objc.shift_key, .to = .fonts },
-        .{ .title = "Bigger", .sel = "zoomIn:", .key = "=", .mods = objc.cmd_key, .to = .view, .run = zoom, .args = .{1} },
-        .{ .title = "Smaller", .sel = "zoomOut:", .key = "-", .mods = objc.cmd_key, .to = .view, .run = zoom, .args = .{-1} },
-        .{ .title = "Actual Size", .sel = "zoomReset:", .key = "0", .mods = objc.cmd_key, .to = .view, .run = zoom, .args = .{0} },
+        .{ .title = "Bigger", .sel = "zoomIn:", .key = "=", .mods = objc.cmd_key, .to = .app, .run = zoom, .args = .{1} },
+        // ⌘+ arrives as ⇧⌘=, which the item above doesn't match.
+        .{ .title = "Bigger", .sel = "zoomIn:", .key = "+", .mods = objc.cmd_key, .hidden = true },
+        .{ .title = "Smaller", .sel = "zoomOut:", .key = "-", .mods = objc.cmd_key, .to = .app, .run = zoom, .args = .{-1} },
+        .{ .title = "Actual Size", .sel = "zoomReset:", .key = "0", .mods = objc.cmd_key, .to = .app, .run = zoom, .args = .{0} },
         .{ .sep = true },
         .{ .title = "Soft Wrap", .sel = "toggleWrap:", .key = "z", .mods = objc.opt_key, .to = .app, .run = flip, .args = .{.wrap}, .check = .wrap },
         .{ .title = "Line Numbers", .sel = "toggleLineNumbers:", .key = "l", .mods = objc.cmd_key | objc.shift_key, .to = .app, .run = flip, .args = .{.@"line-numbers"}, .check = .line_numbers },
@@ -7865,6 +7867,10 @@ fn fillMenu(menu: Id, comptime entries: anytype, delegate: Id) void {
             const it = menuItem(menu, e.title, e.sel, pluck([]const u8, e, "key", ""), pluck(usize, e, "mods", 0));
             if (pluck(Target, e, "to", .system) == .fonts) {
                 msg(void, it, "setTarget:", .{msg(Id, objc.class("NSFontManager"), "sharedFontManager", .{})});
+            }
+            if (pluck(bool, e, "hidden", false)) {
+                msg(void, it, "setHidden:", .{true});
+                msg(void, it, "setAllowsKeyEquivalentWhenHidden:", .{true});
             }
         }
     }
