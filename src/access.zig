@@ -563,6 +563,7 @@ fn setTextFocused(self: Id, _: Sel, on: bool) callconv(.c) void {
 fn tabsFrame(self: Id, _: Sel) callconv(.c) Rect {
     const d = docOf(self) orelse return .{};
     const n = ax.tabs(d);
+    if (n == 0) return .{};
     const first = ax.tabRect(d, ax.tabAtIndex(d, 0));
     const last = ax.tabRect(d, ax.tabAtIndex(d, n - 1));
     return screen(d.win.view, .{ .x = first.x, .y = first.y, .w = @max(last.x + last.w - first.x, 0), .h = first.h });
