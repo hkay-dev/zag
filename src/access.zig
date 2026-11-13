@@ -37,21 +37,34 @@ fn before(a: Key, b: Key) bool {
     return a.key < b.key;
 }
 
-/// Where `k` is, or would go.
-fn lowerBound(k: Key) usize {
+/// Where `k` is, or would go, in `items`.
+fn lowerBoundIn(items: []const Entry, k: Key) usize {
     var lo: usize = 0;
-    var hi = held.items.len;
+    var hi = items.len;
     while (lo < hi) {
         const mid = lo + (hi - lo) / 2;
-        if (before(held.items[mid].key, k)) lo = mid + 1 else hi = mid;
+        if (before(items[mid].key, k)) lo = mid + 1 else hi = mid;
     }
     return lo;
 }
 
-fn find(k: Key) ?*Held {
-    const i = lowerBound(k);
-    if (i < held.items.len and !before(k, held.items[i].key)) return &held.items[i].h;
+/// Where `k` is, or would go.
+fn lowerBound(k: Key) usize {
+    return lowerBoundIn(held.items, k);
+}
+
+fn findIn(items: []Entry, k: Key) ?*Held {
+    const i = lowerBoundIn(items, k);
+    if (i < items.len and !before(k, items[i].key)) return &items[i].h;
     return null;
+}
+
+fn find(k: Key) ?*Held {
+    return findIn(held.items, k);
+}
+
+fn entryBefore(_: void, a: Entry, b: Entry) bool {
+    return before(a.key, b.key);
 }
 
 /// Every element made so far, retained.
@@ -60,6 +73,13 @@ var held: std.ArrayList(Entry) = .empty;
 /// Bumped each time a list of children is built, to tell which ones it kept.
 var stamp: u32 = 0;
 var classes: [5]Id = @splat(null);
+const TextCache = struct {
+    owner: usize = 0,
+    id: u32 = 0,
+    changes: u64 = 0,
+    str: Id = null,
+};
+var text_cache: TextCache = .{};
 
 /// Each element's instance variables. `owner` is 0 once it's let go.
 /// A row keeps where it last was in the tree; a text area keeps the tab,
@@ -155,10 +175,14 @@ fn post(obj: Id, comptime name: []const u8) void {
     NSAccessibilityPostNotification(obj, objc.str(name));
 }
 
+fn voiceOverOn() bool {
+    return msg(bool, msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{}), "isVoiceOverEnabled", .{});
+}
+
 /// After an edit or a caret move in `d`: tells VoiceOver, when it has
 /// asked about `d`'s text before.
 pub fn changed(d: *Doc) void {
-    if (held.items.len == 0) return;
+    if (held.items.len == 0 or !voiceOverOn()) return;
     const obj = (find(.{ .kind = .text, .owner = @intFromPtr(d), .key = 0 }) orelse return).obj;
     if (slot(obj, .id).* != d.file.id or slot(obj, .changes).* != d.file.ed.buf.changes) {
         slot(obj, .id).* = d.file.id;
@@ -174,7 +198,7 @@ pub fn changed(d: *Doc) void {
 
 /// Card `d` took the typing.
 pub fn focused(d: *Doc) void {
-    if (held.items.len == 0) return;
+    if (held.items.len == 0 or !voiceOverOn()) return;
     post(textOf(d), "AXFocusedUIElementChanged");
 }
 
@@ -206,7 +230,13 @@ fn sweep(ctx: anytype) void {
     var keep: usize = 0;
     for (held.items) |e| {
         if (ctx.gone(e.key, e.h)) {
-            if (dead.append(gpa, e.h.obj)) |_| continue else |_| {}
+            if (dead.append(gpa, e.h.obj)) |_| {
+                if (e.key.kind == .text and e.key.owner == text_cache.owner and text_cache.str != null) {
+                    msg(void, text_cache.str, "release", .{});
+                    text_cache = .{};
+                }
+                continue;
+            } else |_| {}
         }
         held.items[keep] = e;
         keep += 1;
@@ -221,18 +251,9 @@ fn sweep(ctx: anytype) void {
 
 // ---- making elements ----
 
-fn element(kind: Kind, owner: usize, key: u64, parent: Id) Id {
-    const k: Key = .{ .kind = kind, .owner = owner, .key = key };
-    if (find(k)) |h| {
-        h.stamp = stamp;
-        return h.obj;
-    }
+fn newElement(kind: Kind, owner: usize, key: u64, parent: Id) Id {
     const obj = msg(Id, msg(Id, classes[@intFromEnum(kind)], "alloc", .{}), "init", .{});
     if (obj == null) return null;
-    held.insert(gpa, lowerBound(k), .{ .key = k, .h = .{ .obj = obj, .stamp = stamp } }) catch {
-        msg(void, obj, "release", .{});
-        return null;
-    };
     slot(obj, .owner).* = owner;
     slot(obj, .key).* = key;
     const role: []const u8 = switch (kind) {
@@ -245,6 +266,21 @@ fn element(kind: Kind, owner: usize, key: u64, parent: Id) Id {
     msg(void, obj, "setAccessibilityRole:", .{objc.str(role)});
     if (kind == .row) msg(void, obj, "setAccessibilitySubrole:", .{objc.str("AXOutlineRow")});
     msg(void, obj, "setAccessibilityParent:", .{parent});
+    return obj;
+}
+
+fn element(kind: Kind, owner: usize, key: u64, parent: Id) Id {
+    const k: Key = .{ .kind = kind, .owner = owner, .key = key };
+    if (find(k)) |h| {
+        h.stamp = stamp;
+        return h.obj;
+    }
+    const obj = newElement(kind, owner, key, parent);
+    if (obj == null) return null;
+    held.insert(gpa, lowerBound(k), .{ .key = k, .h = .{ .obj = obj, .stamp = stamp } }) catch {
+        msg(void, obj, "release", .{});
+        return null;
+    };
     return obj;
 }
 
@@ -446,7 +482,21 @@ fn textLabel(self: Id, _: Sel) callconv(.c) Id {
 
 fn textValue(self: Id, _: Sel) callconv(.c) Id {
     const d = docOf(self) orelse return objc.str("");
-    return nsText(d.file.ed.text());
+    const owner = @intFromPtr(d);
+    const id = d.file.id;
+    const changes = d.file.ed.buf.changes;
+    if (text_cache.str != null and text_cache.owner == owner and text_cache.id == id and text_cache.changes == changes) {
+        return text_cache.str;
+    }
+    const s = nsText(d.file.ed.text());
+    if (text_cache.str != null) msg(void, text_cache.str, "release", .{});
+    text_cache = .{
+        .owner = owner,
+        .id = id,
+        .changes = changes,
+        .str = msg(Id, s, "retain", .{}),
+    };
+    return s;
 }
 
 fn textCount(self: Id, _: Sel) callconv(.c) isize {
@@ -636,14 +686,40 @@ fn outlineChildren(self: Id, _: Sel) callconv(.c) Id {
     const w = winOf(self) orelse return list;
     if (!ax.sidebar(w)) return list;
     stamp +%= 1;
-    for (0..ax.rows().len) |i| add(list, rowOf(w, i));
+    const parent = outlineOf(w);
+    const rows = ax.rows();
+    const old_len = held.items.len;
+    const owner = @intFromPtr(w);
+    const gen = ax.treeGen();
+    for (rows, 0..) |row, i| {
+        const key = hashRel(row.rel);
+        const k: Key = .{ .kind = .row, .owner = owner, .key = key };
+        const obj = if (findIn(held.items[0..old_len], k)) |h| blk: {
+            h.stamp = stamp;
+            break :blk h.obj;
+        } else blk: {
+            const made = newElement(.row, owner, key, parent);
+            if (made == null) break :blk null;
+            held.append(gpa, .{ .key = k, .h = .{ .obj = made, .stamp = stamp } }) catch {
+                msg(void, made, "release", .{});
+                break :blk null;
+            };
+            break :blk made;
+        };
+        if (obj != null) {
+            slot(obj, .idx).* = i;
+            slot(obj, .gen).* = gen;
+            add(list, obj);
+        }
+    }
+    if (held.items.len > old_len) std.mem.sort(Entry, held.items, {}, entryBefore);
     sweep(struct {
         owner: usize,
         now: u32,
         fn gone(s: @This(), k: Key, h: Held) bool {
             return k.kind == .row and k.owner == s.owner and h.stamp != s.now;
         }
-    }{ .owner = @intFromPtr(w), .now = stamp });
+    }{ .owner = owner, .now = stamp });
     return list;
 }
 
@@ -660,11 +736,16 @@ fn rowAt(self: Id) ?struct { w: *Win, i: usize } {
     const w = winOf(self) orelse return null;
     const rows = ax.rows();
     const i = slot(self, .idx).*;
-    if (slot(self, .gen).* == ax.treeGen() and i < rows.len) return .{ .w = w, .i = i };
+    const gen = ax.treeGen();
+    if (slot(self, .gen).* == gen and i < rows.len) return .{ .w = w, .i = i };
     const key = slot(self, .key).*;
+    if (i < rows.len and hashRel(rows[i].rel) == key) {
+        slot(self, .gen).* = gen;
+        return .{ .w = w, .i = i };
+    }
     for (rows, 0..) |row, k| if (hashRel(row.rel) == key) {
         slot(self, .idx).* = k;
-        slot(self, .gen).* = ax.treeGen();
+        slot(self, .gen).* = gen;
         return .{ .w = w, .i = k };
     };
     return null;

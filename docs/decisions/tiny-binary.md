@@ -23,9 +23,9 @@ Ghostty's terminal core. ze drops all three.
 - **libc for file I/O.** Taking `std.process.Init.Minimal` keeps `std.Io.Threaded` out of
   `main`, and reading, saving and the quick open walk use `open`, `read`, `mkstemp`, `rename`
   and `readdir` directly.
-- **`panic = std.debug.no_panic` and `std_options_debug_threaded_io = null`** in the root file,
-  release builds only. The defaults pull in a DWARF reader and every `std.Io.Threaded` function
-  through its vtable. Together they were about half the binary: 218 KB before, 107 KB after.
+- **`panic = std.debug.no_panic`, `std_options_debug_threaded_io = null`, `std_options.signal_stack_size = null`, and `unwind_tables = .none`**
+  in release builds. Turning off the panic handler and debug Io dropped the DWARF reader and `std.Io.Threaded` vtable (218 KB to 107 KB);
+  clearing `signal_stack_size` and unwind tables dropped Zig's 256 KB `__thread_bss` signal stack, its pre-`main` `sigaltstack` call, and 46 KB of `__eh_frame` and `__unwind_info`.
 - `main` returns `void`. An error return makes `start.zig` log through `std.log`, which needs the
   debug Io and brings it all back.
 - **The caret is a `CALayer`** (zig-editor#scw1), so moving it never redraws the text, and its

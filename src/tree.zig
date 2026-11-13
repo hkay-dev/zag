@@ -4,6 +4,7 @@ const std = @import("std");
 const c = std.c;
 const Allocator = std.mem.Allocator;
 const files = @import("files.zig");
+extern "c" fn dirfd(dir: *c.DIR) c_int;
 
 /// Rows past this are left out, so a huge open folder can't stall drawing.
 pub const max_rows = 50_000;
@@ -134,36 +135,41 @@ pub const Tree = struct {
     fn list(t: *Tree, gpa: Allocator, path: *std.ArrayList(u8), rel: usize, depth: u16) !void {
         const a = t.arena.allocator();
         try path.append(gpa, 0);
-        const stamp = files.stamp(path.items[0 .. path.items.len - 1 :0]);
         const dir = c.opendir(@ptrCast(path.items.ptr));
-        if (stamp) |s| try t.read.append(a, .{ .path = try a.dupeSentinel(u8, path.items[0 .. path.items.len - 1], 0), .stamp = if (dir == null) null else s });
         path.items.len -= 1;
         const dh = dir orelse {
+            try t.read.append(a, .{ .path = try a.dupeSentinel(u8, path.items, 0), .stamp = null });
             if (depth == 0) t.unreadable = true;
             return;
         };
-        const len = path.items.len;
         var entries: std.ArrayList(Entry) = .empty;
-        while (c.readdir(dh)) |ent| {
-            const name = ent.name[0..ent.namlen];
-            if (name[0] == '.') {
-                if (!t.show_hidden) continue;
-                if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+        {
+            defer _ = c.closedir(dh);
+            const fd = dirfd(dh);
+            var st: c.Stat = undefined;
+            const stamp: ?files.Stamp = if (c.fstat(fd, &st) == 0) blk: {
+                const m = st.mtime();
+                break :blk .{ .sec = m.sec, .nsec = m.nsec, .size = st.size };
+            } else null;
+            try t.read.append(a, .{ .path = try a.dupeSentinel(u8, path.items, 0), .stamp = stamp });
+            while (c.readdir(dh)) |ent| {
+                const name = ent.name[0..ent.namlen];
+                if (name.len == 0) continue;
+                if (name[0] == '.') {
+                    if (!t.show_hidden) continue;
+                    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+                }
+                var is_dir = ent.type == c.DT.DIR;
+                if (ent.type == c.DT.LNK or ent.type == c.DT.UNKNOWN) {
+                    // A link to a folder shows as a folder, and a filesystem
+                    // that doesn't report types gets a stat.
+                    var est: c.Stat = undefined;
+                    is_dir = c.fstatat(fd, @ptrCast(&ent.name), &est, 0) == 0 and est.mode & c.S.IFMT == c.S.IFDIR;
+                }
+                try entries.append(a, .{ .name = try a.dupe(u8, name), .dir = is_dir });
             }
-            var is_dir = ent.type == c.DT.DIR;
-            if (ent.type == c.DT.LNK or ent.type == c.DT.UNKNOWN) {
-                // A link to a folder shows as a folder, and a filesystem
-                // that doesn't report types gets a stat.
-                path.shrinkRetainingCapacity(len);
-                try path.append(gpa, '/');
-                try path.appendSlice(gpa, name);
-                try path.append(gpa, 0);
-                var st: c.Stat = undefined;
-                is_dir = c.stat(@ptrCast(path.items.ptr), &st) == 0 and st.mode & c.S.IFMT == c.S.IFDIR;
-            }
-            try entries.append(a, .{ .name = try a.dupe(u8, name), .dir = is_dir });
         }
-        _ = c.closedir(dh);
+        const len = path.items.len;
         std.mem.sort(Entry, entries.items, {}, before);
         for (entries.items) |e| {
             if (t.rows.items.len >= max_rows) {

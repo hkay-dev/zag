@@ -13,6 +13,7 @@ const msg = objc.msg;
 const release = @import("builtin").mode != .debug;
 pub const panic = if (release) std.debug.no_panic else std.debug.FullPanic(std.debug.defaultPanic);
 pub const std_options_debug_threaded_io: ?*std.Io.Threaded = if (release) null else std.Io.Threaded.global_single_threaded;
+pub const std_options: std.Options = .{ .signal_stack_size = if (release) null else 1 << 18 };
 /// The self-driving bench, only in `-Dbench=true` builds.
 const bench = if (@import("build_options").bench) @import("bench.zig") else struct {
     fn start() void {}

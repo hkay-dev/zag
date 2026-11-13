@@ -37,11 +37,14 @@ const Options = struct {
 pub fn scanWithOptions(gpa: Allocator, root: []const u8, include_hidden: bool, extra_skips: []const []const u8) !Files {
     var f: Files = .{ .gpa = gpa, .arena = .init(gpa) };
     errdefer f.deinit();
-    var path: std.ArrayList(u8) = .empty;
-    defer path.deinit(gpa);
-    try path.appendSlice(gpa, root);
+    const root_z = try gpa.dupeSentinel(u8, root, 0);
+    defer gpa.free(root_z);
+    const root_fd = c.open(root_z.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true });
+    if (root_fd < 0) return f;
+    var rel: std.ArrayList(u8) = .empty;
+    defer rel.deinit(gpa);
     const opts: Options = .{ .include_hidden = include_hidden, .extra_skips = extra_skips };
-    try walk(&f, gpa, &path, root.len + 1, isHome(root), &opts);
+    try walk(&f, gpa, root_fd, &rel, isHome(root), &opts);
     return f;
 }
 
@@ -52,36 +55,49 @@ fn isHome(root: []const u8) bool {
     return home.len > 1 and std.mem.eql(u8, std.mem.trimEnd(u8, root, "/"), std.mem.trimEnd(u8, home, "/"));
 }
 
-fn walk(f: *Files, gpa: Allocator, path: *std.ArrayList(u8), rel: usize, home: bool, opts: *const Options) !void {
-    try path.append(gpa, 0);
-    const dir = c.opendir(@ptrCast(path.items.ptr)) orelse return path.shrinkRetainingCapacity(path.items.len - 1);
-    path.items.len -= 1;
+fn walk(f: *Files, gpa: Allocator, dir_fd: c.fd_t, rel: *std.ArrayList(u8), home: bool, opts: *const Options) !void {
+    const dir = c.fdopendir(dir_fd) orelse {
+        _ = c.close(dir_fd);
+        return;
+    };
     defer _ = c.closedir(dir);
-    const len = path.items.len;
+    const len = rel.items.len;
+    defer rel.shrinkRetainingCapacity(len);
     while (c.readdir(dir)) |ent| {
         if (f.paths.items.len >= max_files) return;
         const name = ent.name[0..ent.namlen];
         if (name.len == 0 or isAlwaysSkipped(name) or (name[0] == '.' and !opts.include_hidden)) continue;
-        path.shrinkRetainingCapacity(len);
-        try path.append(gpa, '/');
-        try path.appendSlice(gpa, name);
-        const kind = if (ent.type == c.DT.UNKNOWN) try typeOf(gpa, path, false) else ent.type;
+        const name_z: [*:0]const u8 = @ptrCast(&ent.name);
+        const kind = if (ent.type == c.DT.UNKNOWN) typeOf(dir_fd, name_z, false) else ent.type;
         switch (kind) {
-            c.DT.DIR => if (!isSkipped(name, opts.extra_skips) and !(home and std.mem.eql(u8, name, "Library"))) try walk(f, gpa, path, rel, false, opts),
-            c.DT.REG => try f.paths.append(gpa, try f.arena.allocator().dupe(u8, path.items[rel..])),
+            c.DT.DIR => if (!isSkipped(name, opts.extra_skips) and !(home and std.mem.eql(u8, name, "Library"))) {
+                rel.shrinkRetainingCapacity(len);
+                if (len > 0) try rel.append(gpa, '/');
+                try rel.appendSlice(gpa, name);
+                const sub_fd = c.openat(dir_fd, name_z, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true, .NOFOLLOW = true });
+                if (sub_fd >= 0) try walk(f, gpa, sub_fd, rel, false, opts);
+            },
+            c.DT.REG => try f.paths.append(gpa, try dupeRel(f.arena.allocator(), rel.items[0..len], name)),
             // A link to a folder isn't walked, so a link cycle can't fill the list.
-            c.DT.LNK => if (try typeOf(gpa, path, true) == c.DT.REG) try f.paths.append(gpa, try f.arena.allocator().dupe(u8, path.items[rel..])),
+            c.DT.LNK => if (typeOf(dir_fd, name_z, true) == c.DT.REG) try f.paths.append(gpa, try dupeRel(f.arena.allocator(), rel.items[0..len], name)),
             else => {},
         }
     }
 }
 
-/// The `DT` type of `path`, following a link only when `follow` is set.
-fn typeOf(gpa: Allocator, path: *std.ArrayList(u8), follow: bool) !u8 {
-    try path.append(gpa, 0);
-    defer path.items.len -= 1;
+fn dupeRel(arena: Allocator, prefix: []const u8, name: []const u8) ![]const u8 {
+    if (prefix.len == 0) return arena.dupe(u8, name);
+    const buf = try arena.alloc(u8, prefix.len + 1 + name.len);
+    @memcpy(buf[0..prefix.len], prefix);
+    buf[prefix.len] = '/';
+    @memcpy(buf[prefix.len + 1 ..], name);
+    return buf;
+}
+
+/// The `DT` type of `name_z` under `dir_fd`, following a link only when `follow` is set.
+fn typeOf(dir_fd: c.fd_t, name_z: [*:0]const u8, follow: bool) u8 {
     var st: c.Stat = undefined;
-    if (c.fstatat(c.AT.FDCWD, @ptrCast(path.items.ptr), &st, if (follow) 0 else c.AT.SYMLINK_NOFOLLOW) != 0) return c.DT.UNKNOWN;
+    if (c.fstatat(dir_fd, name_z, &st, if (follow) 0 else c.AT.SYMLINK_NOFOLLOW) != 0) return c.DT.UNKNOWN;
     return switch (st.mode & c.S.IFMT) {
         c.S.IFDIR => c.DT.DIR,
         c.S.IFREG => c.DT.REG,
@@ -170,17 +186,37 @@ pub fn best(paths: []const []const u8, q: []const u8, out: []usize) usize {
 /// and recent files come first when `q` is empty and rank higher when it matches.
 /// A boosted path still has to match `q`.
 pub fn bestWithBoost(paths: []const []const u8, q: []const u8, out: []usize, boosts: []const Boost) usize {
+    var dummy: usize = 0;
+    return bestCounted(paths, q, boosts, out, &dummy);
+}
+
+/// Like `bestWithBoost`, and sets `matched.*` to the total number of matching
+/// paths in `names` in the same pass.
+pub fn bestCounted(names: []const []const u8, q: []const u8, boosts: []const Boost, out: []usize, matched: *usize) usize {
+    matched.* = 0;
+    var max_boost: i32 = 0;
+    for (boosts, 0..) |b, bi| {
+        if (b.amount <= 0) continue;
+        var sum: i32 = b.amount;
+        for (boosts[bi + 1 ..]) |b2| {
+            if (b2.amount > 0 and std.mem.eql(u8, b.path, b2.path)) sum +|= b2.amount;
+        }
+        max_boost = @max(max_boost, sum);
+    }
     var scores: [32]i32 = undefined;
     const cap = @min(out.len, scores.len);
     var n: usize = 0;
-    for (paths, 0..) |p, i| {
+    for (names, 0..) |p, i| {
         var s = score(p, q) orelse continue;
+        matched.* += 1;
+        if (cap == 0) continue;
+        if (n == cap and s +| max_boost <= scores[cap - 1]) continue;
         for (boosts) |b| {
             if (std.mem.eql(u8, b.path, p)) s +|= b.amount;
         }
+        if (n == cap and s <= scores[cap - 1]) continue;
         var at = n;
         while (at > 0 and scores[at - 1] < s) at -= 1;
-        if (at >= cap) continue;
         if (n < cap) n += 1;
         var j = n - 1;
         while (j > at) : (j -= 1) {
@@ -222,4 +258,19 @@ test "boosts lift open files to the top" {
     const n = bestWithBoost(&paths, "", &out, &.{.{ .path = "c.zig", .amount = 1000 }});
     try t.expectEqual(@as(usize, 3), n);
     try t.expectEqualStrings("c.zig", paths[out[0]]);
+}
+
+test "bestCounted counts all matches even beyond output capacity and skips below boost bound" {
+    const paths = [_][]const u8{ "a.zig", "b.zig", "c.zig", "d.zig", "README.md" };
+    var out: [2]usize = undefined;
+    var matched: usize = 0;
+    const n = bestCounted(&paths, "zig", &.{.{ .path = "d.zig", .amount = 1000 }}, &out, &matched);
+    try t.expectEqual(@as(usize, 2), n);
+    try t.expectEqual(@as(usize, 4), matched);
+    try t.expectEqualStrings("d.zig", paths[out[0]]);
+    try t.expectEqualStrings("a.zig", paths[out[1]]);
+
+    var zero_out: [0]usize = undefined;
+    try t.expectEqual(@as(usize, 0), bestCounted(&paths, "zig", &.{}, &zero_out, &matched));
+    try t.expectEqual(@as(usize, 4), matched);
 }

@@ -9,6 +9,24 @@ pub const default_tab_width = 4;
 const spaces: [256]u8 = @splat(' ');
 
 pub const Motion = enum { left, right, word_left, word_right, home, end, line_start, line_end, top, bottom };
+pub const IndentMarks = struct { tab: bool = false, two: bool = false, four: bool = false };
+
+pub fn indentMarks(b: *const Buffer) IndentMarks {
+    var m: IndentMarks = .{};
+    const t = b.text.items;
+    for (b.starts.items[1..]) |s| {
+        const rest = t[s..];
+        if (rest.len == 0) continue;
+        if (rest[0] == '\t') {
+            m.tab = true;
+        } else if (rest.len >= 2 and rest[0] == ' ' and rest[1] == ' ') {
+            m.two = true;
+            if (rest.len >= 4 and rest[2] == ' ' and rest[3] == ' ') m.four = true;
+        }
+        if (m.tab and m.two and m.four) break;
+    }
+    return m;
+}
 
 pub const Editor = struct {
     buf: Buffer,
@@ -25,19 +43,27 @@ pub const Editor = struct {
 
     pub fn init(gpa: Allocator, bytes: []const u8) !Editor {
         var e: Editor = .{ .buf = try Buffer.init(gpa, bytes) };
-        e.detectStyle(bytes);
+        e.detectStyle();
+        return e;
+    }
+
+    pub fn initOwned(gpa: Allocator, bytes: []u8) !Editor {
+        var e: Editor = .{ .buf = try Buffer.initOwned(gpa, bytes) };
+        e.detectStyle();
         return e;
     }
 
     /// Picks the line ending and indent that Return and Tab insert from the
     /// file's own text.
-    fn detectStyle(e: *Editor, bytes: []const u8) void {
+    fn detectStyle(e: *Editor) void {
+        const b = &e.buf;
         e.eol = "\n";
-        if (std.mem.indexOfScalar(u8, bytes, '\n')) |i| {
-            if (i > 0 and bytes[i - 1] == '\r') e.eol = "\r\n";
+        if (b.starts.items.len > 1) {
+            const nl = b.starts.items[1] - 1;
+            if (nl > 0 and b.text.items[nl - 1] == '\r') e.eol = "\r\n";
         }
-        e.indent = "    ";
-        if (std.mem.indexOf(u8, bytes, "\n\t") != null and std.mem.indexOf(u8, bytes, "\n    ") == null) e.indent = "\t";
+        const m = indentMarks(b);
+        e.indent = if (m.tab and !m.four) "\t" else "    ";
     }
 
     pub fn deinit(e: *Editor, gpa: Allocator) void {
@@ -498,30 +524,33 @@ pub const Editor = struct {
     /// `replaceAll` with a case rule and whole-word matching.
     pub fn replaceAllWith(e: *Editor, gpa: Allocator, q: []const u8, with: []const u8, spots: [][2]usize, opts: SearchOpts) !usize {
         const t = e.text();
+        if (q.len == 0 or q.len > t.len) return 0;
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(gpa);
         var n: usize = 0;
         var first: ?usize = null;
         var done: usize = 0;
         var i: usize = 0;
+        const end = t.len - q.len + 1;
         const sensitive = opts.sensitive(q);
-        while (q.len > 0 and i + q.len <= t.len) {
-            if (!matches(t, i, q, sensitive, opts.whole_word)) {
-                i += 1;
+        while (i < end) {
+            const p = candidate(t, i, end, q, sensitive) orelse break;
+            if (!matches(t, p, q, sensitive, opts.whole_word)) {
+                i = p + 1;
                 continue;
             }
             if (first == null) {
-                first = i;
-                done = i;
+                first = p;
+                done = p;
             }
-            try out.appendSlice(gpa, t[done..i]);
+            try out.appendSlice(gpa, t[done..p]);
             if (n < spots.len) {
                 const start = first.? + out.items.len;
                 spots[n] = .{ start, start + with.len };
             }
             try out.appendSlice(gpa, with);
             n += 1;
-            i += q.len;
+            i = p + q.len;
             done = i;
         }
         const start = first orelse return 0;
@@ -706,7 +735,7 @@ pub const Editor = struct {
         const cur = fix(e.cur, a, z, old_len, bytes.len);
         try e.buf.replace(gpa, a, old_len - z, bytes[a .. bytes.len - z], e.cur, false);
         e.buf.markSaved();
-        e.detectStyle(bytes);
+        e.detectStyle();
         e.select(anchor, cur);
     }
 };
@@ -767,14 +796,58 @@ fn findEither(t: []const u8, from: usize, a: u8, b: u8) ?usize {
     return null;
 }
 
+/// Last index in `[lo, hi)` holding byte `a` or `b`, 32 bytes at a time.
+fn findEitherBack(t: []const u8, lo: usize, hi: usize, a: u8, b: u8) ?usize {
+    const V = @Vector(32, u8);
+    var i = hi;
+    while (i - lo >= 32) {
+        i -= 32;
+        const v: V = t[i..][0..32].*;
+        const hit = (v == @as(V, @splat(a))) | (v == @as(V, @splat(b)));
+        if (std.simd.lastTrue(hit)) |k| return i + k;
+    }
+    while (i > lo) {
+        i -= 1;
+        if (t[i] == a or t[i] == b) return i;
+    }
+    return null;
+}
+
 /// Next spot at or after `i`, before `stop`, where `q` could start.
 fn candidate(t: []const u8, i: usize, stop: usize, q: []const u8, sensitive: bool) ?usize {
-    if (sensitive) return std.mem.indexOfPos(u8, t[0 .. stop + q.len - 1], i, q);
+    if (sensitive) {
+        if (q.len <= 4) return std.mem.indexOfScalarPos(u8, t[0..stop], i, q[0]);
+        return std.mem.indexOfPos(u8, t[0 .. stop + q.len - 1], i, q);
+    }
     return findEither(t[0..stop], i, std.ascii.toLower(q[0]), std.ascii.toUpper(q[0]));
+}
+
+/// Last spot in `[lo, hi)` where `q` could start.
+fn candidateBack(t: []const u8, lo: usize, hi: usize, q: []const u8, sensitive: bool) ?usize {
+    if (sensitive) {
+        if (q.len <= 4) return findEitherBack(t, lo, hi, q[0], q[0]);
+        const k = std.mem.lastIndexOf(u8, t[lo .. hi + q.len - 1], q) orelse return null;
+        return lo + k;
+    }
+    return findEitherBack(t, lo, hi, std.ascii.toLower(q[0]), std.ascii.toUpper(q[0]));
 }
 
 fn search(t: []const u8, q: []const u8, from: usize, back: bool) ?usize {
     return searchWith(t, q, from, back, .{});
+}
+
+/// First match of `q` at or after `from`, before `stop`, without wrapping.
+pub fn nextMatch(t: []const u8, q: []const u8, from: usize, stop: usize, opts: SearchOpts) ?usize {
+    if (q.len == 0 or q.len > t.len) return null;
+    const end = @min(stop, t.len - q.len + 1);
+    const sensitive = opts.sensitive(q);
+    var i = from;
+    while (i < end) {
+        const p = candidate(t, i, end, q, sensitive) orelse return null;
+        if (matches(t, p, q, sensitive, opts.whole_word)) return p;
+        i = p + 1;
+    }
+    return null;
 }
 
 /// The match of `q` at or after `from`, or the last one before `from` when
@@ -785,19 +858,23 @@ pub fn searchWith(t: []const u8, q: []const u8, from: usize, back: bool, opts: S
     const start = @min(from, end);
     const sensitive = opts.sensitive(q);
     for (0..2) |pass| {
-        const prefix = back == (pass == 0);
-        var i: usize = if (prefix) 0 else start;
-        const stop = if (prefix) start else end;
-        var found: ?usize = null;
-        while (i < stop) {
-            const p = candidate(t, i, stop, q, sensitive) orelse break;
-            if (matches(t, p, q, sensitive, opts.whole_word)) {
-                if (!back) return p;
-                found = p;
+        if (!back) {
+            var i: usize = if (pass == 0) start else 0;
+            const stop = if (pass == 0) end else start;
+            while (i < stop) {
+                const p = candidate(t, i, stop, q, sensitive) orelse break;
+                if (matches(t, p, q, sensitive, opts.whole_word)) return p;
+                i = p + 1;
             }
-            i = p + 1;
+        } else {
+            const lo: usize = if (pass == 0) 0 else start;
+            var hi: usize = if (pass == 0) start else end;
+            while (hi > lo) {
+                const p = candidateBack(t, lo, hi, q, sensitive) orelse break;
+                if (matches(t, p, q, sensitive, opts.whole_word)) return p;
+                hi = p;
+            }
         }
-        if (found) |p| return p;
     }
     return null;
 }
@@ -894,8 +971,10 @@ pub fn prevChar(t: []const u8, i: usize) usize {
     return if (i == 0) 0 else charStart(t, i - 1);
 }
 
+const Decoded = struct { cp: u21, len: usize };
+
 /// The codepoint at `i` and its byte length; bad bytes read as U+FFFD.
-pub fn decode(t: []const u8, i: usize) struct { cp: u21, len: usize } {
+pub fn decode(t: []const u8, i: usize) Decoded {
     const n = std.unicode.utf8ByteSequenceLength(t[i]) catch return .{ .cp = 0xFFFD, .len = 1 };
     if (i + n > t.len) return .{ .cp = 0xFFFD, .len = 1 };
     const cp = std.unicode.utf8Decode(t[i .. i + n]) catch return .{ .cp = 0xFFFD, .len = 1 };
@@ -917,14 +996,7 @@ fn isExtend(cp: u21) bool {
     };
 }
 
-/// The end of the user-visible character that starts at `i`: a code point
-/// with the extending code points after it, the code points that zero width
-/// joiners join to it, or both halves of a flag. Control characters, line
-/// breaks among them, always stand alone.
-pub fn nextCluster(t: []const u8, i: usize) usize {
-    if (i >= t.len) return t.len;
-    if (t[i] < 0x80 and (t[i] < 0x20 or i + 1 == t.len or t[i + 1] < 0x80)) return i + 1;
-    const first = decode(t, i);
+fn nextClusterFrom(t: []const u8, i: usize, first: Decoded) usize {
     var j = i + first.len;
     if (isFlag(first.cp) and j < t.len) {
         const d = decode(t, j);
@@ -938,6 +1010,16 @@ pub fn nextCluster(t: []const u8, i: usize) usize {
         j += d.len;
     }
     return j;
+}
+
+/// The end of the user-visible character that starts at `i`: a code point
+/// with the extending code points after it, the code points that zero width
+/// joiners join to it, or both halves of a flag. Control characters, line
+/// breaks among them, always stand alone.
+pub fn nextCluster(t: []const u8, i: usize) usize {
+    if (i >= t.len) return t.len;
+    if (t[i] < 0x80 and (t[i] < 0x20 or i + 1 == t.len or t[i + 1] < 0x80)) return i + 1;
+    return nextClusterFrom(t, i, decode(t, i));
 }
 
 /// The start of the user-visible character that ends at `i`; the reverse of
@@ -988,7 +1070,7 @@ fn width(cp: u21) usize {
 
 /// One user-visible character on screen: its first codepoint, the cells it
 /// takes and its byte length.
-pub const Cell = struct { cp: u21, w: usize, len: usize };
+pub const Cell = struct { cp: u21, w: usize, len: usize, cp_len: u4 = 1 };
 
 /// The character at byte `i`, at column `col`, with tab stops every
 /// `default_tab_width` columns.
@@ -1003,10 +1085,10 @@ pub fn cellsTab(l: []const u8, i: usize, col: usize, tw: usize) Cell {
     if (l[i] == '\t') return .{ .cp = '\t', .w = tw - col % tw, .len = 1 };
     if (l[i] < 0x80 and (l[i] < 0x20 or i + 1 == l.len or l[i + 1] < 0x80)) return .{ .cp = l[i], .w = 1, .len = 1 };
     const d = decode(l, i);
-    const end = nextCluster(l, i);
+    const end = nextClusterFrom(l, i, d);
     var w = width(d.cp);
     if (w == 1 and std.mem.indexOf(u8, l[i + d.len .. end], "\u{FE0F}") != null) w = 2;
-    return .{ .cp = d.cp, .w = w, .len = end - i };
+    return .{ .cp = d.cp, .w = w, .len = end - i, .cp_len = @intCast(d.len) };
 }
 
 /// Display column of byte `n`, starting at byte `from` and column `col0`.
@@ -1620,4 +1702,63 @@ test "tab width sets tab stops, indent and outdent" {
     o.tab_width = 2;
     try o.outdent(gpa_t);
     try t_.expectEqualStrings("  a", o.text());
+}
+
+test "nextMatch stops at stop without wrapping and respects options" {
+    const s = "foo bar foo food Foo";
+    try t_.expectEqual(@as(?usize, 0), nextMatch(s, "foo", 0, s.len, .{}));
+    try t_.expectEqual(@as(?usize, 8), nextMatch(s, "foo", 1, s.len, .{}));
+    try t_.expectEqual(@as(?usize, null), nextMatch(s, "foo", 1, 8, .{}));
+    try t_.expectEqual(@as(?usize, 8), nextMatch(s, "foo", 1, 9, .{}));
+    try t_.expectEqual(@as(?usize, 8), nextMatch(s, "foo", 1, 100, .{}));
+    try t_.expectEqual(@as(?usize, 17), nextMatch(s, "Foo", 0, s.len, .{}));
+    try t_.expectEqual(@as(?usize, null), nextMatch(s, "Foo", 18, s.len, .{}));
+    try t_.expectEqual(@as(?usize, 17), nextMatch(s, "foo", 12, s.len, .{ .whole_word = true }));
+    try t_.expectEqual(@as(?usize, null), nextMatch(s, "foo", 12, s.len, .{ .whole_word = true, .case_mode = .sensitive }));
+    try t_.expectEqual(@as(?usize, null), nextMatch(s, "", 0, s.len, .{}));
+    try t_.expectEqual(@as(?usize, null), nextMatch("hi", "longer", 0, 2, .{}));
+}
+
+test "backward searchWith handles long, short, SIMD blocks, and whole-word matches" {
+    var buf: [160]u8 = @splat('x');
+    @memcpy(buf[5..11], "Target");
+    @memcpy(buf[75..81], "target");
+    @memcpy(buf[140..146], "Target");
+    const s: []const u8 = &buf;
+    try t_.expectEqual(@as(?usize, 140), searchWith(s, "target", 0, true, .{}));
+    try t_.expectEqual(@as(?usize, 75), searchWith(s, "target", 140, true, .{}));
+    try t_.expectEqual(@as(?usize, 5), searchWith(s, "target", 75, true, .{}));
+    try t_.expectEqual(@as(?usize, 140), searchWith(s, "Target", 0, true, .{}));
+    try t_.expectEqual(@as(?usize, 5), searchWith(s, "Target", 140, true, .{}));
+    try t_.expectEqual(@as(?usize, 140), searchWith(s, "Target", 5, true, .{}));
+    const w = "foobar foo foobaz";
+    try t_.expectEqual(@as(?usize, 7), searchWith(w, "foo", w.len, true, .{ .whole_word = true }));
+    try t_.expectEqual(@as(?usize, 7), searchWith(w, "foo", 7, true, .{ .whole_word = true }));
+    const wlong = "prefixword_1234 prefixword";
+    try t_.expectEqual(@as(?usize, 16), searchWith(wlong, "prefixword", 16, true, .{ .whole_word = true }));
+    try t_.expectEqual(@as(?usize, 16), searchWith(wlong, "prefixword", wlong.len, true, .{ .whole_word = true }));
+}
+
+test "indentMarks detects tab, two-space, and four-space lines and stops early" {
+    var e1 = try Editor.init(gpa_t, "fn a()\n\tb\n  c\n    d\n");
+    defer e1.deinit(gpa_t);
+    try t_.expectEqual(IndentMarks{ .tab = true, .two = true, .four = true }, indentMarks(&e1.buf));
+
+    var e2 = try Editor.init(gpa_t, "\tfirst\n  second\n");
+    defer e2.deinit(gpa_t);
+    try t_.expectEqual(IndentMarks{ .tab = false, .two = true, .four = false }, indentMarks(&e2.buf));
+
+    var e3 = try Editor.init(gpa_t, "a\n    b\n");
+    defer e3.deinit(gpa_t);
+    try t_.expectEqual(IndentMarks{ .tab = false, .two = true, .four = true }, indentMarks(&e3.buf));
+
+    const owned = try gpa_t.dupe(u8, "a\r\n\tb\r\n");
+    var e4 = try Editor.initOwned(gpa_t, owned);
+    defer e4.deinit(gpa_t);
+    try t_.expectEqualStrings("\r\n", e4.eol);
+    try t_.expectEqualStrings("\t", e4.indent);
+    try t_.expectEqual(@as(u4, 1), cells("a", 0, 0).cp_len);
+    try t_.expectEqual(@as(u4, 2), cells("ü", 0, 0).cp_len);
+    try t_.expectEqual(@as(u4, 3), cells("漢", 0, 0).cp_len);
+    try t_.expectEqual(@as(u4, 4), cells("😀", 0, 0).cp_len);
 }

@@ -59,11 +59,92 @@ pub fn setRoot(dir: []const u8) void {
     refreshAll();
 }
 
+var quick_root: ?[:0]u8 = null;
+var quick_hidden: bool = false;
+var quick_gen: u64 = 0;
+
+extern fn dispatch_get_global_queue(identifier: isize, flags: usize) *anyopaque;
+extern fn dispatch_async_f(queue: *anyopaque, ctx: ?*anyopaque, work: *const fn (?*anyopaque) callconv(.c) void) void;
+
+const QuickJob = struct {
+    dir: [:0]u8,
+    show_hidden: bool,
+    gen: u64,
+    files: ?finder.Files = null,
+};
+
+var quick_busy: bool = false;
+
+fn bgRescanQuick(dir: []const u8, show_hidden: bool) void {
+    if (quick_busy) return;
+    quick_gen +%= 1;
+    const job = gpa.create(QuickJob) catch return;
+    job.* = .{
+        .dir = gpa.dupeSentinel(u8, dir, 0) catch {
+            gpa.destroy(job);
+            return;
+        },
+        .show_hidden = show_hidden,
+        .gen = quick_gen,
+    };
+    quick_busy = true;
+    dispatch_async_f(dispatch_get_global_queue(0, 0), job, bgRescanWork);
+}
+
+fn bgRescanWork(ctx: ?*anyopaque) callconv(.c) void {
+    const job: *QuickJob = @ptrCast(@alignCast(ctx orelse return));
+    job.files = finder.scanWithOptions(gpa, job.dir, job.show_hidden, &.{}) catch null;
+    dispatch_async_f(&_dispatch_main_q, job, bgRescanDone);
+}
+
+fn bgRescanDone(ctx: ?*anyopaque) callconv(.c) void {
+    const job: *QuickJob = @ptrCast(@alignCast(ctx orelse return));
+    defer {
+        quick_busy = false;
+        gpa.free(job.dir);
+        if (job.files) |*fl| fl.deinit();
+        gpa.destroy(job);
+    }
+    if (job.gen != quick_gen) return;
+    const qr = quick_root orelse return;
+    if (!std.mem.eql(u8, qr, job.dir) or conf.show_hidden != job.show_hidden) return;
+    const scanned = job.files orelse return;
+    job.files = null;
+    var old_quick = quick;
+    defer if (old_quick) |*oq| oq.deinit();
+    quick = scanned;
+    for (docs.items) |o| {
+        if (o.mode != .open) continue;
+        var saved: ?[]const u8 = null;
+        if (old_quick) |*oq| {
+            if (o.pick < o.npicks) {
+                const idx = o.picks[o.pick];
+                if (idx < oq.paths.items.len) saved = oq.paths.items[idx];
+            }
+        }
+        pickFiles(o, true);
+        if (saved) |sp| {
+            const new_paths = quick.?.paths.items;
+            for (o.picks[0..o.npicks], 0..) |idx, k| {
+                if (idx < new_paths.len and std.mem.eql(u8, new_paths[idx], sp)) {
+                    o.pick = k;
+                    break;
+                }
+            }
+        }
+        refresh(o);
+    }
+}
+
 /// Scans quick open again; `fresh` must not crossfade picks from the palette.
-fn rescanQuick(dir: []const u8, fresh: ?*Doc) void {
+fn rescanQuick(dir: []const u8, _: ?*Doc) void {
+    quick_gen +%= 1;
     if (quick) |*q| q.deinit();
     quick = finder.scanWithOptions(gpa, dir, conf.show_hidden, &.{}) catch null;
-    for (docs.items) |o| if (o.mode == .open) pickFiles(o, o == fresh);
+    if (quick_root) |r| gpa.free(r);
+    quick_root = if (quick != null) gpa.dupeSentinel(u8, dir, 0) catch null else null;
+    quick_hidden = conf.show_hidden;
+    for (docs.items) |o| if (o.mode == .open) pickFiles(o, true);
 }
 
 /// Reads the rows again. The row under each window's mouse and its keyboard
@@ -167,10 +248,12 @@ fn revealFile(rel: []const u8) void {
 
 fn refreshAll() void {
     for (docs.items) |d| refresh(d);
+    for (wins.items) |w| msg(void, w.view, "setNeedsDisplay:", .{true});
 }
 
 fn refreshWin(w: *Win) void {
     for (docs.items) |d| if (d.win == w) refresh(d);
+    msg(void, w.view, "setNeedsDisplay:", .{true});
 }
 
 // ---- look ----
@@ -479,14 +562,28 @@ const Ink = struct {
 
     /// Like `text`, for the bytes `from..to` of `s`, which start at display
     /// column `col0` (a wrapped row). `kinds` covers all of `s`.
+    const Cut = struct { target: usize, byte: usize = 0, col: usize = 0 };
+
     fn run(k: *Ink, s: []const u8, from: usize, to: usize, col0: usize, kinds: ?[]const syntax.Kind, th: *const Theme, color: Rgb, x: f64, y: f64, skip: usize, max: usize) usize {
+        return k.runCut(s, from, to, col0, kinds, th, color, x, y, skip, max, null);
+    }
+
+    inline fn runCut(k: *Ink, s: []const u8, from: usize, to: usize, col0: usize, kinds: ?[]const syntax.Kind, th: *const Theme, color: Rgb, x: f64, y: f64, skip: usize, max: usize, cut_out: ?*Cut) usize {
         // Trailing marks start after the last character that isn't a space or tab.
         const trail = if (k.invis == .trailing) std.mem.trimEnd(u8, s, " \t\r").len else 0;
         var col = col0;
         var i = from;
+        if (cut_out) |ct| {
+            ct.byte = from;
+            ct.col = col0;
+        }
         while (i < to) {
             const c = editor.cellsTab(s, i, col, k.tw);
             const rel = col - col0;
+            if (cut_out) |ct| if (rel <= ct.target) {
+                ct.byte = i;
+                ct.col = col;
+            };
             if (rel >= skip + max) break;
             const blank = s[i] == ' ' or s[i] == '\t';
             const mark = blank and k.invis != .none and (k.invis == .all or i >= trail);
@@ -504,7 +601,7 @@ const Ink = struct {
                 if (mark) {
                     // A space is a centered dot; a tab an arrow at its stop's start.
                     k.put(glyph(@as(u21, if (s[i] == '\t') 0x2192 else 0x00B7), false), paint, gx, y);
-                } else if (c.len > editor.decode(s, i).len) {
+                } else if (c.len > c.cp_len) {
                     // A cluster of several code points (a decomposed accent, a
                     // joined emoji) draws as one line so Core Text shapes it.
                     k.flush();
@@ -516,6 +613,10 @@ const Ink = struct {
             col += c.w;
             i += c.len;
         }
+        if (cut_out) |ct| if (i == to and col - col0 <= ct.target) {
+            ct.byte = i;
+            ct.col = col;
+        };
         return (col - col0) -| skip;
     }
 };
@@ -1228,6 +1329,18 @@ fn tick(self: Id, _: Sel, _: Id) callconv(.c) void {
             for (docs.items) |d| if (d.win == w) moveCaret(d, now);
             return redrawSide(w);
         }
+        if (w.cards_only) {
+            var any = false;
+            for (docs.items) |d| if (d.win == w) {
+                const shaking = (now - d.card_shake_t0) / shake_time;
+                if (d.busy or (shaking >= 0 and shaking < 1)) {
+                    msg(void, self, "setNeedsDisplayInRect:", .{cardDirtyRect(d)});
+                    any = true;
+                } else moveCaret(d, now);
+            };
+            if (!any) msg(void, self, "setNeedsDisplay:", .{true});
+            return;
+        }
         return msg(void, self, "setNeedsDisplay:", .{true});
     }
     // Tabs or rows that slid under a still mouse: look again once, as
@@ -1264,6 +1377,7 @@ const Page = struct {
     ed: Editor,
     path: ?[:0]u8 = null,
     lang: *const syntax.Lang = &syntax.plain,
+    states: std.ArrayList(syntax.State) = .empty,
     stamp: ?files.Stamp = null,
     sx: f64 = 0,
     sy: f64 = 0,
@@ -1340,6 +1454,7 @@ const Page = struct {
     /// Closing its tab: an untitled file's draft goes too.
     fn deinit(p: *Page) void {
         p.ed.deinit(gpa);
+        p.states.deinit(gpa);
         if (p.path) |s| gpa.free(s);
         dropDraft(&p.draft);
     }
@@ -1378,6 +1493,9 @@ const Doc = struct {
     /// How far the tabs are scrolled when they don't fit.
     tab_x: Tween = .{ .dur = scroll_time },
     slots_seen: bool = false,
+    was_dirty: bool = false,
+    wide_line: usize = 0,
+    wide_id: u32 = 0,
     /// The tab under the mouse, and whether it's over its close button.
     hover: u32 = 0,
     hover_x: bool = false,
@@ -1637,8 +1755,6 @@ const Doc = struct {
     palette: bool = false,
     drag: Drag = .char,
     drag_from: [2]usize = .{ 0, 0 },
-    /// Syntax state at the start of each line, known for this many lines.
-    states: std.ArrayList(syntax.State) = .empty,
     /// Syntax kinds of the lines that the last frame drew in `lex[0]`, so
     /// a frame lexes only the lines that it didn't draw before; `lex[1]` is
     /// the frame before, swapped in as the next one fills. Bound: the
@@ -1684,6 +1800,17 @@ const Doc = struct {
     hint_hot: ?usize = null,
     hint_lit: usize = 0,
     hint_hot_t: Tween = .{ .dur = fade_time },
+    dissolve_rep: Id = null,
+    dissolve_w: f64 = 0,
+    dissolve_h: f64 = 0,
+    dissolve_scale: f64 = 0,
+    wrap_ptr: usize = 0,
+    wrap_len: usize = 0,
+    wrap_chg: u64 = std.math.maxInt(u64),
+    wrap_cols: usize = 0,
+    wrap_tw: usize = 0,
+    wrap_hang: bool = false,
+    wrap_segs: std.ArrayList(Seg) = .empty,
 
     /// Unsaved changes to a file, on show or in any page. Untitled files
     /// keep themselves as drafts, so they don't count.
@@ -1705,9 +1832,11 @@ const Doc = struct {
         dropSteps(&d.predo);
         d.pundo.deinit(gpa);
         d.predo.deinit(gpa);
-        d.states.deinit(gpa);
         for (&d.lex) |*x| x.deinit();
         d.vfirst.deinit(gpa);
+        d.wrap_segs.deinit(gpa);
+        dropDissolve(d);
+        if (d.dissolve_rep != null) msg(void, d.dissolve_rep, "release", .{});
         dropHead(d);
         for (d.pages.items) |*p| p.deinit();
         d.pages.deinit(gpa);
@@ -1741,6 +1870,8 @@ const Win = struct {
     hov_stale: bool = false,
     /// Only the sidebar's strip has frames to draw, so `tick` redraws just that.
     part: bool = false,
+    /// Only one or more cards have frames to draw, so `tick` invalidates just their rects.
+    cards_only: bool = false,
     /// How far the sidebar is scrolled.
     side_y: f64 = 0,
     /// The mouse went down outside the cards' text (the sidebar, the title
@@ -2061,6 +2192,7 @@ fn focus(d: *Doc) void {
     named(d);
     refresh(old);
     refresh(d);
+    redrawSide(w);
 }
 
 /// Reads a file into a page, at the caret and scroll it had last time. A
@@ -2079,24 +2211,25 @@ fn loadPage(abs: [:0]const u8) ?Page {
             return null;
         },
     };
-    defer gpa.free(bytes);
     if (looksBinary(bytes)) {
+        gpa.free(bytes);
         alert("This looks like a binary file.", abs);
         return null;
     }
-    var ed = Editor.init(gpa, bytes) catch return null;
+    var ed = Editor.initOwned(gpa, bytes) catch return null;
     styleEditor(&ed);
     const z = gpa.dupeSentinel(u8, abs, 0) catch {
         ed.deinit(gpa);
         return null;
     };
+    const t = ed.text();
     var sy: f64 = 0;
     if (placeOf(abs)) |pl| {
-        const c = editor.charStart(bytes, @min(pl.cur, bytes.len));
+        const c = editor.charStart(t, @min(pl.cur, t.len));
         ed.select(c, c);
         sy = pl.sy;
     }
-    return .{ .ed = ed, .path = z, .lang = syntax.detect(abs, firstLine(bytes)), .stamp = files.stamp(abs), .sy = sy, .id = newId(), .rise = true, .new_file = missing, .locked = !missing and !files.writable(abs) };
+    return .{ .ed = ed, .path = z, .lang = syntax.detect(abs, firstLine(t)), .stamp = files.stamp(abs), .sy = sy, .id = newId(), .rise = true, .new_file = missing, .locked = !missing and !files.writable(abs) };
 }
 
 /// The text's first line, which `syntax.detect` reads for a `#!` or `<?php`.
@@ -2121,8 +2254,8 @@ fn blankPage() ?Page {
 /// doesn't show one of its own.
 fn styleEditor(ed: *Editor) void {
     ed.tab_width = conf.tab_width;
-    const t = ed.text();
-    if (std.mem.indexOf(u8, t, "\n\t") == null and std.mem.indexOf(u8, t, "\n  ") == null) {
+    const m = editor.indentMarks(&ed.buf);
+    if (!m.tab and !m.two) {
         ed.indent = if (conf.indent_with == .tabs) "\t" else "    ";
     }
 }
@@ -2158,8 +2291,9 @@ fn park(d: *Doc) bool {
 fn install(d: *Doc, pg: Page) void {
     d.file = pg;
     d.center_at = std.math.maxInt(usize);
-    clearSyntax(d);
+    for (&d.lex) |*x| x.clear();
     d.vfirst.clearRetainingCapacity();
+    d.wrap_ptr = 0;
     d.mode = .edit;
     d.ys.snap(d.file.sy);
     d.xs.snap(d.file.sx);
@@ -2268,12 +2402,26 @@ fn dissolveFrom(d: *Doc) bool {
     if (restoring or d.closing or !d.slots_seen or !msg(bool, w.window, "isVisible", .{})) return false;
     const r: Rect = .{ .x = d.org.x + gap, .y = d.org.y + top_h, .w = @max(d.size.x - 2 * gap, 0), .h = @max(bottom(d) - top_h, 0) };
     if (r.w < 1 or r.h < 1) return false;
-    const rep = msg(Id, w.view, "bitmapImageRepForCachingDisplayInRect:", .{r});
-    if (rep == null) return false;
+    dropDissolve(d);
+    const scale = @max(msg(f64, w.window, "backingScaleFactor", .{}), 1);
+    const rep = if (d.dissolve_rep != null and d.dissolve_w == r.w and d.dissolve_h == r.h and d.dissolve_scale == scale)
+        d.dissolve_rep
+    else blk: {
+        if (d.dissolve_rep != null) {
+            msg(void, d.dissolve_rep, "release", .{});
+            d.dissolve_rep = null;
+        }
+        const created = msg(Id, w.view, "bitmapImageRepForCachingDisplayInRect:", .{r});
+        if (created == null) return false;
+        d.dissolve_rep = msg(Id, created, "retain", .{});
+        d.dissolve_w = r.w;
+        d.dissolve_h = r.h;
+        d.dissolve_scale = scale;
+        break :blk d.dissolve_rep;
+    };
     msg(void, w.view, "cacheDisplayInRect:toBitmapImageRep:", .{ r, rep });
     const img = msg(Id, rep, "CGImage", .{});
     if (img == null) return false;
-    dropDissolve(d);
     const layer = msg(Id, objc.class("CALayer"), "layer", .{});
     const t = objc.class("CATransaction");
     msg(void, t, "begin", .{});
@@ -3608,16 +3756,19 @@ pub fn restoreSession() bool {
     _ = draftsDir(&db);
     const list = msg(Id, defaults(), "stringArrayForKey:", .{objc.str("session")});
     restoring = true;
+    var opened: std.ArrayList(*Win) = .empty;
+    defer opened.deinit(gpa);
     const n = if (list != null) msg(usize, list, "count", .{}) else 0;
     for (0..n) |i| {
         const entry = objc.utf8(msg(Id, list, "objectAtIndex:", .{i}));
         const tab = std.mem.indexOfScalar(u8, entry, '\t') orelse continue;
         var it = std.mem.splitScalar(u8, entry[tab + 1 ..], '\t');
-        restoreWindow(entry[0..tab], &it);
+        if (restoreWindow(entry[0..tab], &it)) |w| opened.append(gpa, w) catch showWin(w.window);
     }
     restoring = false;
     if (tree_stale) rebuildTree();
     refreshAll();
+    for (opened.items) |w| showWin(w.window);
     // Files that went away since last time are left out, and said so.
     if (gone_n > 0) {
         var buf: [120]u8 = undefined;
@@ -3631,19 +3782,20 @@ pub fn restoreSession() bool {
 }
 
 /// A window from one session line, or none when none of its files are left.
-fn restoreWindow(frame: []const u8, it: *std.mem.SplitIterator(u8, .scalar)) void {
-    const leaf = gpa.create(Node) catch return;
-    const w = newWin(leaf) orelse return;
+fn restoreWindow(frame: []const u8, it: *std.mem.SplitIterator(u8, .scalar)) ?*Win {
+    const leaf = gpa.create(Node) catch return null;
+    const w = newWin(leaf) orelse return null;
     var lit: ?*Doc = null;
     const n = restoreNode(w, it, &lit) orelse {
         // Nothing of the line is left: the window closes, holding a card for its layout.
         // Only the delegate is set, so closing tears it down without finishWin
         // centering it and writing that frame over the saved one.
-        const d = newPane(w) orelse return;
+        const d = newPane(w) orelse return null;
         leaf.* = .{ .pane = d };
         w.focus = d;
         msg(void, w.window, "setDelegate:", .{w.view});
-        return msg(void, w.window, "close", .{});
+        msg(void, w.window, "close", .{});
+        return null;
     };
     gpa.destroy(leaf);
     w.cards = n;
@@ -3651,7 +3803,7 @@ fn restoreWindow(frame: []const u8, it: *std.mem.SplitIterator(u8, .scalar)) voi
     finishWin(w);
     named(w.focus);
     msg(void, w.window, "setFrameFromString:", .{objc.str(frame)});
-    showWin(w.window);
+    return w;
 }
 
 /// The cards that `it` describes next, leaving out files that are gone and
@@ -3806,8 +3958,7 @@ var quitting = false;
 /// An untitled tab with the text of the draft at `abs`.
 fn loadDraft(abs: [:0]const u8) ?Page {
     const bytes = files.read(gpa, abs) catch return null;
-    defer gpa.free(bytes);
-    var ed = Editor.init(gpa, bytes) catch return null;
+    var ed = Editor.initOwned(gpa, bytes) catch return null;
     styleEditor(&ed);
     const own = gpa.dupeSentinel(u8, abs, 0) catch {
         ed.deinit(gpa);
@@ -4526,7 +4677,12 @@ fn startPrompt(d: *Doc, m: Mode) void {
                 setRoot(gpa.dupe(u8, std.fs.path.dirname(p) orelse "/") catch return);
                 break :blk root.?;
             };
-            rescanQuick(r, if (was_palette) d else null);
+            if (quick != null and quick_root != null and std.mem.eql(u8, quick_root.?, r) and quick_hidden == conf.show_hidden) {
+                pickFiles(d, true);
+                bgRescanQuick(r, conf.show_hidden);
+            } else {
+                rescanQuick(r, if (was_palette) d else null);
+            }
         },
         .command => {
             listCommands();
@@ -4574,15 +4730,23 @@ fn pickFiles(d: *Doc, fresh: bool) void {
     d.prev_none = live and d.npicks == 0;
     d.pick_t0 = CACurrentMediaTime();
     const q = d.prompt.items;
+    const has_q = std.mem.trim(u8, q, " ").len > 0;
     if (d.mode == .open) {
         var boosts: [32]finder.Boost = undefined;
-        d.npicks = finder.bestWithBoost(names, q, &d.picks, quickBoosts(d, &boosts, q));
-    } else d.npicks = finder.best(names, q, &d.picks);
-    if (std.mem.trim(u8, q, " ").len == 0) {
-        d.pmatches = names.len;
+        const b = quickBoosts(d, &boosts, q);
+        if (has_q) {
+            d.npicks = finder.bestCounted(names, q, b, &d.picks, &d.pmatches);
+        } else {
+            d.npicks = finder.bestWithBoost(names, q, &d.picks, b);
+            d.pmatches = names.len;
+        }
     } else {
-        d.pmatches = 0;
-        for (names) |p| d.pmatches += @intFromBool(finder.score(p, q) != null);
+        if (has_q) {
+            d.npicks = finder.bestCounted(names, q, &.{}, &d.picks, &d.pmatches);
+        } else {
+            d.npicks = finder.best(names, q, &d.picks);
+            d.pmatches = names.len;
+        }
     }
     d.pick = 0;
     d.plist.snap(0);
@@ -4622,7 +4786,7 @@ fn quickBoosts(d: *const Doc, out: []finder.Boost, q: []const u8) []const finder
 
 /// A menu item the palette lists, with its shortcut, whether it's checked,
 /// and whether Late-Night has set it, which dims it.
-const Command = struct { item: Id, keys: []const u8, on: bool, grey: bool };
+const Command = struct { item: Id, act: Sel, tag: isize, keys: []const u8, on: bool, grey: bool };
 var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
 var cmd_names: std.ArrayList([]const u8) = .empty;
 var cmds: std.ArrayList(Command) = .empty;
@@ -4681,16 +4845,17 @@ fn addCommands(menu: Id, prefix: []const u8) void {
             continue;
         }
         // The same command in two menus, or under a second key, is listed once.
-        if (act == palette_sel or act == window_sel or act == shortcuts_sel or listedAlready(act, msg(isize, it, "tag", .{}))) continue;
+        const tag = msg(isize, it, "tag", .{});
+        if (act == palette_sel or act == window_sel or act == shortcuts_sel or listedAlready(act, tag)) continue;
         // Each built-in theme is a command of its own: "Theme: Paper (Light)".
         const name = (if (act == scheme_sel)
-            std.fmt.allocPrint(a, "Theme: {s} ({s})", .{ title, if (settings.schemes[@intCast(msg(isize, it, "tag", .{}))].dark) "Dark" else "Light" })
+            std.fmt.allocPrint(a, "Theme: {s} ({s})", .{ title, if (settings.schemes[@intCast(tag)].dark) "Dark" else "Light" })
         else if (section.len > 0)
             std.fmt.allocPrint(a, "{s}: {s}", .{ section, title })
         else
             a.dupe(u8, title)) catch return;
         cmd_names.append(a, name) catch return;
-        cmds.append(a, .{ .item = msg(Id, it, "retain", .{}), .keys = keysOf(a, it) catch "", .on = isChecked(it), .grey = greyed(it) }) catch {
+        cmds.append(a, .{ .item = msg(Id, it, "retain", .{}), .act = act, .tag = tag, .keys = keysOf(a, it) catch "", .on = isChecked(it), .grey = greyed(it) }) catch {
             msg(void, it, "release", .{});
             return;
         };
@@ -4700,7 +4865,7 @@ fn addCommands(menu: Id, prefix: []const u8) void {
 /// Whether the palette already lists a command that runs `act` with `tag`.
 fn listedAlready(act: Sel, tag: isize) bool {
     for (cmds.items) |c| {
-        if (msg(Sel, c.item, "action", .{}) == act and msg(isize, c.item, "tag", .{}) == tag) return true;
+        if (c.act == act and c.tag == tag) return true;
     }
     return false;
 }
@@ -5468,16 +5633,70 @@ fn nextSeg(d: *const Doc, l: []const u8, s: Seg) Seg {
     return segFrom(d, l, .{ .k = s.k + 1, .start = s.end, .col = s.ecol });
 }
 
+fn wrapCache(dc: *const Doc, l: []const u8, first: *Seg) ?[]const Seg {
+    if (!wrapping()) {
+        first.* = segFrom(dc, l, .{});
+        return null;
+    }
+    const d: *Doc = @constCast(dc);
+    const ptr = @intFromPtr(l.ptr);
+    const chg = d.file.ed.buf.changes;
+    const cols = d.file.ed.buf.wraps_cols;
+    const tw = d.file.ed.tabWidth();
+    const hang = conf.hanging_indent;
+    if (d.wrap_ptr == ptr and d.wrap_len == l.len and d.wrap_chg == chg and d.wrap_cols == cols and d.wrap_tw == tw and d.wrap_hang == hang and d.wrap_segs.items.len > 0) {
+        return d.wrap_segs.items;
+    }
+    var s = segFrom(dc, l, .{});
+    if (s.end >= l.len) {
+        first.* = s;
+        return null;
+    }
+    d.wrap_segs.clearRetainingCapacity();
+    d.wrap_segs.append(gpa, s) catch {
+        d.wrap_ptr = 0;
+        first.* = s;
+        return null;
+    };
+    while (s.end < l.len) {
+        s = nextSeg(dc, l, s);
+        d.wrap_segs.append(gpa, s) catch {
+            d.wrap_ptr = 0;
+            first.* = d.wrap_segs.items[0];
+            return null;
+        };
+    }
+    d.wrap_ptr = ptr;
+    d.wrap_len = l.len;
+    d.wrap_chg = chg;
+    d.wrap_cols = cols;
+    d.wrap_tw = tw;
+    d.wrap_hang = hang;
+    return d.wrap_segs.items;
+}
+
 /// The row of line `l` that holds byte `p`; a byte at a wrap starts the next row.
 fn segOf(d: *const Doc, l: []const u8, p: usize) Seg {
-    var s = segFrom(d, l, .{});
+    var first: Seg = undefined;
+    if (wrapCache(d, l, &first)) |segs| {
+        var lo: usize = 0;
+        var hi: usize = segs.len - 1;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (p < segs[mid].end) hi = mid else lo = mid + 1;
+        }
+        return segs[lo];
+    }
+    var s = first;
     while (p >= s.end and s.end < l.len) s = nextSeg(d, l, s);
     return s;
 }
 
 /// Row `k` of line `l`, or its last row.
 fn segN(d: *const Doc, l: []const u8, k: usize) Seg {
-    var s = segFrom(d, l, .{});
+    var first: Seg = undefined;
+    if (wrapCache(d, l, &first)) |segs| return segs[@min(k, segs.len - 1)];
+    var s = first;
     while (s.k < k and s.end < l.len) s = nextSeg(d, l, s);
     return s;
 }
@@ -5677,7 +5896,17 @@ fn refresh(d: *Doc) void {
     d.center_at = d.file.ed.cur;
     d.center_changes = d.file.ed.buf.changes;
     trackFocus(d);
-    msg(void, d.win.view, "setNeedsDisplay:", .{true});
+    if (d.size.x >= 160 + 2 * gap and d.size.y >= 100 + 2 * gap and d.fin.x >= 160 + 2 * gap and d.fin.y >= 100 + 2 * gap and !d.closing and !cardsMoving(d.win.cards)) {
+        msg(void, d.win.view, "setNeedsDisplayInRect:", .{cardDirtyRect(d)});
+        for (docs.items) |o| if (o != d and o.win == d.win and (o.mode == .find or o.mode == .replace)) {
+            msg(void, d.win.view, "setNeedsDisplayInRect:", .{cardDirtyRect(o)});
+        };
+    } else msg(void, d.win.view, "setNeedsDisplay:", .{true});
+    const now_dirty = d.dirty();
+    if (now_dirty != d.was_dirty) {
+        d.was_dirty = now_dirty;
+        redrawSide(d.win);
+    }
     if (d.file.path == null) untitledChanged(d);
     preview.update(d, themeOf(d.win));
     var edited = false;
@@ -5841,12 +6070,12 @@ pub const ax = struct {
 // ---- syntax colors ----
 
 fn syncStates(d: *Doc, upto: usize) void {
-    const invalid = syntax.syncStates(gpa, d.file.lang, &d.file.ed.buf, &d.states, upto) catch {
-        d.states.clearRetainingCapacity();
+    const s = syntax.syncStatesShift(gpa, d.file.lang, &d.file.ed.buf, &d.file.states, upto) catch {
+        d.file.states.clearRetainingCapacity();
         d.lex[0].clear();
         return;
     };
-    if (invalid[0] != invalid[1]) d.lex[0].drop(invalid[0], invalid[1]);
+    d.lex[0].shiftAndDrop(s);
 }
 
 /// Syntax kinds for some lines, in line order.
@@ -5875,11 +6104,34 @@ const Kinds = struct {
         }
         x.lines.shrinkRetainingCapacity(kept);
     }
+
+    fn shiftAndDrop(x: *Kinds, s: syntax.Sync) void {
+        if (s.delta) |delta| {
+            var kept: usize = 0;
+            for (x.lines.items) |e| {
+                if (e.line < s.shift_at) {
+                    if (e.line >= s.from and e.line < s.end) continue;
+                    x.lines.items[kept] = e;
+                    kept += 1;
+                } else {
+                    const nl = @as(isize, @intCast(e.line)) + delta;
+                    if (nl < @as(isize, @intCast(s.shift_at))) continue;
+                    const u: usize = @intCast(nl);
+                    if (u >= s.from and u < s.end) continue;
+                    x.lines.items[kept] = .{ .line = u, .at = e.at };
+                    kept += 1;
+                }
+            }
+            x.lines.shrinkRetainingCapacity(kept);
+        } else if (s.from != s.end) {
+            x.drop(s.from, s.end);
+        }
+    }
 };
 
 /// For a new language or file: every line lexes again.
 fn clearSyntax(d: *Doc) void {
-    d.states.clearRetainingCapacity();
+    d.file.states.clearRetainingCapacity();
     for (&d.lex) |*x| x.clear();
 }
 
@@ -5900,7 +6152,7 @@ fn lineKinds(d: *Doc, i: usize, l: []const u8, walk: *usize) ?usize {
     while (walk.* < old.len and old[walk.*].line < i) walk.* += 1;
     if (walk.* < old.len and old[walk.*].line == i) {
         @memcpy(out, d.lex[1].kinds.items[old[walk.*].at..][0..l.len]);
-    } else _ = syntax.lexLine(d.file.lang, l, d.states.items[i], out);
+    } else _ = syntax.lexLine(d.file.lang, l, d.file.states.items[i], out);
     return at;
 }
 
@@ -5947,15 +6199,40 @@ fn retitleNow(self: Id, _: Sel, _: Id) callconv(.c) void {
 const Icon = enum { closed, opened, sidebar, plus, close, folder, parents, crumb, check, lock };
 /// SF Symbols, which come with macOS, so they cost Zag no size.
 const icon_names = [_][:0]const u8{ "chevron.right", "chevron.down", "sidebar.left", "plus", "xmark", "folder.fill", "chevron.down", "chevron.forward", "checkmark", "lock.fill" };
+const CachedIcon = struct { img: Id = null, cg: Id = null, size: Point = .{}, dev_px: f64 = 0 };
 /// Symbol images for the light and dark themes, tinted and made on first use.
-var icons: [2][icon_names.len]Id = @splat(@splat(null));
+var icons: [2][icon_names.len]CachedIcon = @splat(@splat(.{}));
 
 /// After the colors or the font size change.
 fn dropIcons() void {
-    for (&icons) |*set| for (set) |*i| if (i.* != null) {
-        msg(void, i.*, "release", .{});
-        i.* = null;
+    for (&icons) |*set| for (set) |*c| {
+        if (c.cg) |cg| objc.CFRelease(cg);
+        if (c.img != null) msg(void, c.img, "release", .{});
+        c.* = .{};
     };
+    for (kind_icons.items) |*e| {
+        for (&e.cgs) |*slot| {
+            if (slot.cg) |cg| objc.CFRelease(cg);
+            slot.* = .{};
+        }
+    }
+}
+
+fn cacheCG(img: Id, rect: Rect) Id {
+    const gc = msg(Id, objc.class("NSGraphicsContext"), "currentContext", .{});
+    if (gc == null) return null;
+    var prop = rect;
+    const cg = msg(Id, img, "CGImageForProposedRect:context:hints:", .{ &prop, gc, @as(Id, null) });
+    if (cg) |p| _ = objc.CFRetain(p);
+    return cg;
+}
+
+fn drawCG(ctx: Id, cg: Id, r: Rect) void {
+    objc.CGContextSaveGState(ctx);
+    objc.CGContextTranslateCTM(ctx, r.x, r.y + r.h);
+    objc.CGContextScaleCTM(ctx, 1, -1);
+    CGContextDrawImage(ctx, .{ .x = 0, .y = 0, .w = r.w, .h = r.h }, cg);
+    objc.CGContextRestoreGState(ctx);
 }
 
 /// A row's name at `room` wide: the whole line when it fits, else the cut one
@@ -5997,13 +6274,14 @@ fn iconFor(name: []const u8) Id {
     return img;
 }
 
-const KindIcon = struct { key: [16]u8, len: u8, img: Id };
+const KindCg = struct { cg: Id = null, s: f64 = 0, px: f64 = 0 };
+const KindIcon = struct { key: [16]u8, len: u8, img: Id, cgs: [3]KindCg = @splat(.{}) };
 /// By lowercase extension, "" for none.
 var kind_icons: std.ArrayList(KindIcon) = .empty;
 
 fn icon(which: Icon, dark: bool, th: *const Theme) Id {
     const slot = &icons[@intFromBool(dark)][@intFromEnum(which)];
-    if (slot.* != null) return slot.*;
+    if (slot.img != null) return slot.img;
     const scale: f64, const weight: f64 = switch (which) {
         .closed, .opened => .{ 0.6, 0.3 },
         .close => .{ 0.55, 0.3 },
@@ -6024,8 +6302,9 @@ fn icon(which: Icon, dark: bool, th: *const Theme) Id {
     const img = msg(Id, objc.class("NSImage"), "imageWithSystemSymbolName:accessibilityDescription:", .{ objc.str(icon_names[@intFromEnum(which)]), @as(Id, null) });
     if (img == null) return null;
     const made = msg(Id, img, "imageWithSymbolConfiguration:", .{msg(Id, sized, "configurationByApplyingConfiguration:", .{tint})});
-    slot.* = msg(Id, made, "retain", .{});
-    return slot.*;
+    slot.img = msg(Id, made, "retain", .{});
+    slot.size = if (slot.img != null) msg(Point, slot.img, "size", .{}) else .{};
+    return slot.img;
 }
 
 fn tileSize() f64 {
@@ -6034,7 +6313,31 @@ fn tileSize() f64 {
 
 /// A file's icon from `iconFor`, `s` square, with its top left at `x`, `y`.
 fn tile(img: Id, x: f64, y: f64, s: f64) void {
-    if (img != null) msg(void, img, "drawInRect:fromRect:operation:fraction:respectFlipped:hints:", .{ Rect{ .x = x, .y = y, .w = s, .h = s }, Rect{}, @as(usize, 2), @as(f64, 1), true, @as(Id, null) });
+    if (img == null) return;
+    const gc = msg(Id, objc.class("NSGraphicsContext"), "currentContext", .{});
+    const ctx = if (gc != null) msg(Id, gc, "CGContext", .{}) else null;
+    if (ctx != null) {
+        for (kind_icons.items) |*e| if (e.img == img) {
+            var hit: Id = null;
+            for (e.cgs) |slot| if (slot.cg != null and slot.px == dev_px and slot.s == s) {
+                hit = slot.cg;
+                break;
+            };
+            if (hit == null) {
+                if (e.cgs[2].cg) |old| objc.CFRelease(old);
+                e.cgs[2] = e.cgs[1];
+                e.cgs[1] = e.cgs[0];
+                e.cgs[0] = .{ .cg = cacheCG(img, .{ .w = s, .h = s }), .s = s, .px = dev_px };
+                hit = e.cgs[0].cg;
+            }
+            if (hit) |cg| {
+                drawCG(ctx, cg, .{ .x = x, .y = y, .w = s, .h = s });
+                return;
+            }
+            break;
+        };
+    }
+    msg(void, img, "drawInRect:fromRect:operation:fraction:respectFlipped:hints:", .{ Rect{ .x = x, .y = y, .w = s, .h = s }, Rect{}, @as(usize, 2), @as(f64, 1), true, @as(Id, null) });
 }
 
 /// A capsule behind a button under the mouse, centered on `cx`, `cy`: `a`
@@ -6150,6 +6453,31 @@ fn drawIcon(img: Id, x: f64, y: f64, s: f64) void {
 /// Draws `img` centered in the `w` by `h` box at `x`, `y`, at opacity `a`.
 fn drawIconIn(img: Id, x: f64, y: f64, w: f64, h: f64, a: f64) void {
     if (img == null) return;
+    const gc = msg(Id, objc.class("NSGraphicsContext"), "currentContext", .{});
+    const ctx = if (gc != null) msg(Id, gc, "CGContext", .{}) else null;
+    if (ctx != null) {
+        for (&icons) |*set| for (set) |*c| if (c.img == img) {
+            if (c.cg != null and c.dev_px != dev_px) {
+                objc.CFRelease(c.cg.?);
+                c.cg = null;
+            }
+            if (c.cg == null) {
+                c.cg = cacheCG(img, .{ .w = c.size.x, .h = c.size.y });
+                c.dev_px = dev_px;
+            }
+            if (c.cg) |cg| {
+                const r: Rect = .{ .x = @round(x + (w - c.size.x) / 2), .y = @round(y + (h - c.size.y) / 2), .w = c.size.x, .h = c.size.y };
+                objc.CGContextSaveGState(ctx);
+                if (a < 1) objc.CGContextSetAlpha(ctx, a);
+                objc.CGContextTranslateCTM(ctx, r.x, r.y + r.h);
+                objc.CGContextScaleCTM(ctx, 1, -1);
+                CGContextDrawImage(ctx, .{ .x = 0, .y = 0, .w = r.w, .h = r.h }, cg);
+                objc.CGContextRestoreGState(ctx);
+                return;
+            }
+            break;
+        };
+    }
     const size = msg(Point, img, "size", .{});
     const r: Rect = .{ .x = @round(x + (w - size.x) / 2), .y = @round(y + (h - size.y) / 2), .w = size.x, .h = size.y };
     msg(void, img, "drawInRect:fromRect:operation:fraction:respectFlipped:hints:", .{ r, Rect{}, @as(usize, 2), a, true, @as(Id, null) });
@@ -7200,7 +7528,7 @@ fn statusLine(d: *Doc, room: f64, now: f64) void {
     d.stat_kind = kind;
     d.stat = uiLine(buf[0..n], path_font, avail);
     d.stat_w = lineW(d.stat);
-    d.stat_ln_w = textW(buf[0..ln_end], path_font);
+    d.stat_ln_w = if (d.stat) |l| CTLineGetOffsetForStringIndex(l, @intCast(ln_end), null) else 0;
 }
 
 /// `s` as a line in `fnt` that takes the context's fill color, cut with an
@@ -7321,6 +7649,18 @@ fn cardShade(d: *const Doc, ctx: Id, dark: bool, now: f64) void {
     if (zen_k > 0) cardShadow(ctx, dark, zen_k * (0.5 + 0.5 * d.win.key_a.at(now)), card.x, card.y, card.w, card.h);
 }
 
+fn cardDirtyRect(d: *const Doc) Rect {
+    const card = cardRect(d);
+    const xm = shadow_m + 6;
+    const ym = shadow_m;
+    return .{
+        .x = d.org.x + card.x - xm,
+        .y = d.org.y + card.y - ym,
+        .w = @max(card.w + 2 * xm, 0),
+        .h = @max(card.h + 2 * ym, 0),
+    };
+}
+
 /// Draws a window: its chrome, each card in its pane, then the sidebar and
 /// the buttons by the traffic lights.
 fn draw(w: *Win, ctx: Id, dirty: Rect) void {
@@ -7374,10 +7714,29 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     const end_lx: f64 = if (shown) side_w else gap;
     place(w.cards, .{ .x = w.lx - gap, .w = r.w - w.lx + gap, .h = r.h }, .{ .x = end_lx - gap, .w = r.w - end_lx + gap, .h = r.h }, now);
     objc.CGContextClipToRect(ctx, dirty);
-    objc.CGContextClearRect(ctx, .{ .w = r.w, .h = r.h });
+    objc.CGContextSaveGState(ctx);
+    CGContextAddRect(ctx, dirty);
+    for (docs.items) |d| if (d.win == w) {
+        const grown = std.math.clamp(@min((d.size.x - 2 * gap) / 160, (d.size.y - 2 * gap) / 100), 0, 1);
+        if (grown < 1) continue;
+        const shaking = (now - d.card_shake_t0) / shake_time;
+        if (shaking >= 0 and shaking < 1) continue;
+        const body: Rect = .{ .x = d.org.x + gap, .y = d.org.y, .w = d.size.x - gap, .h = d.size.y };
+        if (!hits(dirty, body)) continue;
+        const card = cardRect(d);
+        const inset = card_radius + 2;
+        const iw = card.w - 2 * inset;
+        const ih = card.h - 2 * inset;
+        if (iw > 0 and ih > 0) {
+            CGContextAddRect(ctx, .{ .x = d.org.x + card.x + inset, .y = d.org.y + card.y + inset, .w = iw, .h = ih });
+        }
+    };
+    CGContextEOClip(ctx);
+    objc.CGContextClearRect(ctx, dirty);
+    fillA(ctx, chrome(th, dark, w.z.x), chromeAlpha(th, dark, w.z.x), dirty.x, dirty.y, dirty.w, dirty.h);
+    objc.CGContextRestoreGState(ctx);
     // Text upright for every draw: a strip-only one skips the cards, whose drawPane also sets it.
     objc.flipText(ctx);
-    fillA(ctx, chrome(th, dark, w.z.x), chromeAlpha(th, dark, w.z.x), 0, 0, r.w, r.h);
     const key = msg(bool, w.window, "isKeyWindow", .{});
     const many = w.cards.pane == null;
     for (&w.hot_t, [3]u8{ 1, 2, 4 }) |*t, bit| t.aim(if (w.hot == bit) 1 else 0, now);
@@ -7399,6 +7758,7 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     busy = busy or w.press_t.moving(now);
     const down = w.press_t.at(now);
     var gliding = false;
+    var cards_busy = false;
     for (docs.items) |d| if (d.win == w) {
         // A card springing in or folding away fades with its size.
         const grown = std.math.clamp(@min((d.size.x - 2 * gap) / 160, (d.size.y - 2 * gap) / 100), 0, 1);
@@ -7408,20 +7768,22 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
         const body: Rect = .{ .x = d.org.x + gap, .y = d.org.y, .w = d.size.x - gap, .h = d.size.y };
         const shade: Rect = .{ .x = body.x - shadow_m, .y = body.y, .w = body.w - gap + 2 * shadow_m, .h = body.h };
         const shaking = (now - d.card_shake_t0) / shake_time;
-        if (hits(dirty, shade)) {
+        const is_shaking = shaking >= 0 and shaking < 1;
+        if (hits(dirty, if (is_shaking) cardDirtyRect(d) else shade)) {
             objc.CGContextSaveGState(ctx);
             objc.CGContextTranslateCTM(ctx, d.org.x, d.org.y);
-            if (shaking >= 0 and shaking < 1) objc.CGContextTranslateCTM(ctx, 6 * @sin(2 * std.math.pi * 3 * shaking) * (1 - shaking), 0);
+            if (is_shaking) objc.CGContextTranslateCTM(ctx, 6 * @sin(2 * std.math.pi * 3 * shaking) * (1 - shaking), 0);
             if (grown < 1) {
                 objc.CGContextSetAlpha(ctx, grown);
                 objc.CGContextBeginTransparencyLayer(ctx, null);
             }
-            if (hits(dirty, body)) drawPane(d, ctx, th, dark, key, many, now, resizing) else cardShade(d, ctx, dark, now);
+            if (hits(dirty, body) or is_shaking) drawPane(d, ctx, th, dark, key, many, now, resizing) else cardShade(d, ctx, dark, now);
             if (grown < 1) objc.CGContextEndTransparencyLayer(ctx);
             objc.CGContextRestoreGState(ctx);
-            busy = busy or (shaking >= 0 and shaking < 1);
         }
-        busy = busy or d.busy;
+        if (grown < 1) {
+            busy = busy or d.busy or is_shaking;
+        } else cards_busy = cards_busy or d.busy or is_shaking;
         gliding = gliding or d.cx.moving(now) or d.cy.moving(now);
     };
     // A gap that just snapped flashes a faint guide down its middle.
@@ -7440,21 +7802,23 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     // highlight under the mouse.
     const hy = headY();
     if (slid > 0.002 and root != null) {
-        objc.CGContextSaveGState(ctx);
-        objc.CGContextClipToRect(ctx, .{ .w = side_w * slid, .h = r.h });
-        objc.CGContextTranslateCTM(ctx, side_w * (slid - 1), 0);
-        // Sliding, the strip draws into a layer that fades as a whole, so
-        // the list's bottom fade stays as it is at rest.
-        const sliding = slid < 1;
-        if (sliding) {
-            objc.CGContextSetAlpha(ctx, slid * slid);
-            objc.CGContextBeginTransparencyLayer(ctx, null);
+        if (hits(dirty, .{ .w = side_w * slid, .h = r.h })) {
+            objc.CGContextSaveGState(ctx);
+            objc.CGContextClipToRect(ctx, .{ .w = side_w * slid, .h = r.h });
+            objc.CGContextTranslateCTM(ctx, side_w * (slid - 1), 0);
+            // Sliding, the strip draws into a layer that fades as a whole, so
+            // the list's bottom fade stays as it is at rest.
+            const sliding = slid < 1;
+            if (sliding) {
+                objc.CGContextSetAlpha(ctx, slid * slid);
+                objc.CGContextBeginTransparencyLayer(ctx, null);
+            }
+            drawSide(w, ctx, th, dark, key, chrome(th, dark, w.z.x), 1, sliding, now);
+            hoverPill(ctx, th, w.hot_t[1].at(now), if (w.press == 2) down else 0, side_w - gap - 20, hy);
+            drawIcon(icon(.plus, dark, th), side_w - gap - 30, hy - 10, 20);
+            if (sliding) objc.CGContextEndTransparencyLayer(ctx);
+            objc.CGContextRestoreGState(ctx);
         }
-        drawSide(w, ctx, th, dark, key, chrome(th, dark, w.z.x), 1, sliding, now);
-        hoverPill(ctx, th, w.hot_t[1].at(now), if (w.press == 2) down else 0, side_w - gap - 20, hy);
-        drawIcon(icon(.plus, dark, th), side_w - gap - 30, hy - 10, 20);
-        if (sliding) objc.CGContextEndTransparencyLayer(ctx);
-        objc.CGContextRestoreGState(ctx);
     } else {
         w.hov.park();
         w.sel.park();
@@ -7484,8 +7848,9 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
         or dots_busy or (w.menu_card == null and w.menu_a.moving(now)) or (w.hot_t[0].moving(now) and toggleInSide(shown, slid)) or
         w.hot_t[2].moving(now) or w.pin_t.moving(now) or !w.kc.s.settled() or w.kc.a.moving(now);
     // Only the sidebar's strip moves when its rows' highlights are all that does.
-    w.part = !busy and side_busy and shown and slid >= 1;
-    w.busy = busy or side_busy or w.peek.moving(now);
+    w.part = !busy and !cards_busy and side_busy and shown and slid >= 1;
+    w.cards_only = cards_busy and !busy and !side_busy;
+    w.busy = busy or cards_busy or side_busy or w.peek.moving(now);
     if (w.busy or gliding) msg(void, w.link, "setPaused:", .{false});
 }
 
@@ -7646,7 +8011,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     d.vy = d.ys.at(now);
     d.vx = d.xs.at(now);
     // The Markdown preview follows the previewed file down the page.
-    if (d.file.id == preview_id) {
+    if (preview.shownFor(d.file.id)) {
         const range = scrollRange(d);
         const span = range[1] - range[0];
         const fr = if (span > 0) std.math.clamp((d.vy - range[0]) / span, 0, 1) else 0;
@@ -7659,8 +8024,11 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // inside its rounded corners.
     cardShade(d, ctx, dark, now);
     pill(ctx, th.bg, 1, card.x, card.y, card.w, card.h, card_radius);
-    objc.CGContextSaveGState(ctx);
-    clipRound(ctx, card.x, card.y, card.w, card.h, card_radius);
+    const rect_only = d.pbar.at(now) == 0 and d.panel.at(now) <= 0.5 and (top_h - card.y) >= card_radius and stripH(d) >= card_radius;
+    if (!rect_only) {
+        objc.CGContextSaveGState(ctx);
+        clipRound(ctx, card.x, card.y, card.w, card.h, card_radius);
+    }
     objc.flipText(ctx);
 
     const total = totalRows(d);
@@ -7680,6 +8048,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
 
     // The screen rows in view, and the line and part of it each one shows.
     var vis: [400]VRow = undefined;
+    var vis_cut: [400]struct { byte: usize, col: usize } = undefined;
     var nvis: usize = 0;
     if (first < last) {
         var i = lineOfRow(d, first);
@@ -7697,6 +8066,13 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             }
         }
     }
+    const wide_snap: WideSnap = .{
+        .touched = b.touched,
+        .touched_end = b.touched_end,
+        .shifted = b.lines_shifted,
+        .shift_at = b.shift_at,
+        .delta = b.line_delta,
+    };
     syncStates(d, if (nvis > 0) vis[nvis - 1].line else 0);
 
     // A file freshly read from disk fades in, rising a few points into
@@ -7704,7 +8080,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     const base_a = d.load.at(now);
     objc.CGContextSaveGState(ctx);
     // Text stops above the status strip rather than running under it.
-    objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = card.w, .h = card.h - stripH(d) * (1 - d.pbar.at(now)) });
+    const text_bottom = card.y + card.h - stripH(d) * (1 - d.pbar.at(now));
+    objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = top_h, .w = card.w, .h = @max(text_bottom - top_h, 0) });
     if (base_a < 1) {
         objc.CGContextSetAlpha(ctx, base_a);
         if (d.file.rise) objc.CGContextTranslateCTM(ctx, 0, (1 - base_a) * load_rise);
@@ -7806,16 +8183,19 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             var at = sg.start;
             var col = sg.col;
             var j = sg.start -| (fm.pills.len - 1);
-            while (j < sg.end and j + fm.pills.len <= l.len) : (j += 1) if (editor.matches(l, j, fm.pills, fm.sensitive, find_opts.whole_word)) {
-                const lo = @max(j, sg.start);
-                const hi = @min(j + fm.pills.len, sg.end);
+            const stop = @min(sg.end + fm.pills.len - 1, l.len);
+            while (j < sg.end and j + fm.pills.len <= l.len) {
+                const m_at = editor.nextMatch(l, fm.pills, j, stop, find_opts) orelse break;
+                if (m_at >= sg.end) break;
+                const lo = @max(m_at, sg.start);
+                const hi = @min(m_at + fm.pills.len, sg.end);
                 const c0 = editor.colOfTab(l, at, col, lo, tw);
                 col = editor.colOfTab(l, lo, c0, hi, tw);
                 at = hi;
                 if (c0 - sg.col > skip + cols) break;
-                if (col - sg.col + sg.ind + 1 >= skip and ls + j != s[0]) pill(ctx, th.match, match_alpha * m_a, ox + (f(c0 - sg.col + sg.ind) - f(skip)) * cw, y + 2, f(col - c0) * cw, lh - 4, 3);
-                j += fm.pills.len - 1;
-            };
+                if (col - sg.col + sg.ind + 1 >= skip and ls + m_at != s[0]) pill(ctx, th.match, match_alpha * m_a, ox + (f(c0 - sg.col + sg.ind) - f(skip)) * cw, y + 2, f(col - c0) * cw, lh - 4, 3);
+                j = m_at + fm.pills.len;
+            }
         }
     }
 
@@ -7861,7 +8241,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             }
         }
         lexed = std.math.maxInt(usize);
-        for (vis[0..nvis], first..) |*v, row| {
+        for (vis[0..nvis], 0.., first..) |*v, vi, row| {
             if (pass == 1 and v.reach == 2) continue;
             if (pass >= 2 and v.reach != 2) continue;
             const l = b.line(v.line);
@@ -7874,7 +8254,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             if (pass == 0) {
                 if (v.line != lexed) {
                     lexed = v.line;
-                    kinds = if (d.file.lang != &syntax.plain and v.line < d.states.items.len) lineKinds(d, v.line, l, &walk) else null;
+                    kinds = if (d.file.lang != &syntax.plain and v.line < d.file.states.items.len) lineKinds(d, v.line, l, &walk) else null;
                 }
                 v.kinds = kinds;
             }
@@ -7885,10 +8265,15 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             // A wrapped row's hanging indent moves it right.
             const ind = v.seg.ind;
             const back = @min(cols, 2);
+            const cut_rel = (skip + cols - back) -| ind;
             const used = if (pass > 0)
-                k.run(l, v.seg.start, v.seg.end, v.seg.col, ks, th, th.fg, ox + f(cols - back) * cw, row_y + baseline, (skip + cols - back) -| ind, back + 1)
-            else
-                k.run(l, v.seg.start, v.seg.end, v.seg.col, ks, th, th.fg, ox + f(ind) * cw, row_y + baseline, skip, (cols + 1) -| ind) + ind;
+                k.run(l, vis_cut[vi].byte, v.seg.end, vis_cut[vi].col, ks, th, th.fg, ox + f(cols - back) * cw, row_y + baseline, cut_rel - (vis_cut[vi].col - v.seg.col), back + 1)
+            else blk: {
+                var ct: Ink.Cut = .{ .target = cut_rel };
+                const u = k.runCut(l, v.seg.start, v.seg.end, v.seg.col, ks, th, th.fg, ox + f(ind) * cw, row_y + baseline, skip, (cols + 1) -| ind, &ct) + ind;
+                vis_cut[vi] = .{ .byte = ct.byte, .col = ct.col };
+                break :blk u;
+            };
             if (pass == 0) {
                 v.reach = if (used > cols) 2 else if (used == cols) 1 else 0;
                 any_reach = any_reach or used >= cols;
@@ -7915,8 +8300,12 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
 
     drawGutter(d, &k, th, vis[0..nvis], first, here.row, tx);
     objc.CGContextRestoreGState(ctx);
+    if (rect_only) {
+        objc.CGContextSaveGState(ctx);
+        clipRound(ctx, card.x, card.y, card.w, card.h, card_radius);
+    }
 
-    drawBar(d, ctx, th, card, now);
+    drawBar(d, ctx, th, card, wide_snap, now);
     // Find's matches tick the card's right edge, fading with its band.
     drawTicks(d, ctx, th, card, fm.pills, fm.cur, fm.pills_a);
 
@@ -7968,7 +8357,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     drawHint(d, ctx, th, &k, card, now);
 
     drawHeader(d, ctx, th, &k, dark, ka, card, zt, now);
-    // Ends the card clip that drawPane set at its top.
+    // Ends the card clip that drawPane set at its top (or around the header).
     objc.CGContextRestoreGState(ctx);
     drawRing(d, ctx, th, dark, card, zt, now);
     d.busy = scenery(d, now);
@@ -8030,7 +8419,15 @@ fn drawGutter(d: *Doc, k: *Ink, th: *const Theme, vis: []const VRow, first: usiz
 // The bars' hold costs no frames; drawPane arms a one-shot timer for its end.
 // They show while the page moves, while the pointer is near them, and while
 // a knob is held, and remember where they drew for `barDown`.
-fn drawBar(d: *Doc, ctx: Id, th: *const Theme, card: Rect, now: f64) void {
+const WideSnap = struct { touched: usize, touched_end: usize, shifted: bool, shift_at: usize, delta: ?isize };
+
+fn lineWide(l: []const u8, tw: usize) usize {
+    var tabs: usize = 0;
+    while (tabs < l.len and l[tabs] == '\t') tabs += 1;
+    return l.len + tabs * (tw - 1);
+}
+
+fn drawBar(d: *Doc, ctx: Id, th: *const Theme, card: Rect, snap: WideSnap, now: f64) void {
     const bar_room = textH(d);
     const range = scrollRange(d);
     const bar_span = range[1] - range[0];
@@ -8042,17 +8439,66 @@ fn drawBar(d: *Doc, ctx: Id, th: *const Theme, card: Rect, now: f64) void {
         d.hmax = 0;
     } else {
         const b = &d.file.ed.buf;
-        if (d.wide_chg != b.changes) {
-            d.wide_chg = b.changes;
+        if (d.wide_chg != b.changes or d.wide_id != d.file.id) {
             const tw = d.file.ed.tabWidth();
-            var wide: usize = 0;
-            for (0..b.lines()) |i| {
-                const l = b.line(i);
-                var tabs: usize = 0;
-                while (tabs < l.len and l[tabs] == '\t') tabs += 1;
-                wide = @max(wide, l.len + tabs * (tw - 1));
+            const prev_chg = d.wide_chg;
+            const same_file = d.wide_id == d.file.id and prev_chg != std.math.maxInt(u64);
+            d.wide_chg = b.changes;
+            d.wide_id = d.file.id;
+            var full = !same_file;
+            if (!full and snap.touched < b.lines()) {
+                const end = @min(snap.touched_end, b.lines());
+                if (!snap.shifted) {
+                    if (d.wide_line >= snap.touched and d.wide_line < end) {
+                        const w = lineWide(b.line(d.wide_line), tw);
+                        if (w >= d.wide) d.wide = w else full = true;
+                    }
+                    if (!full) {
+                        for (snap.touched..end) |i| {
+                            const w = lineWide(b.line(i), tw);
+                            if (w > d.wide) {
+                                d.wide = w;
+                                d.wide_line = i;
+                            }
+                        }
+                    }
+                } else if (b.changes == prev_chg + 1 and snap.delta != null) {
+                    const delta = snap.delta.?;
+                    const shifted_old = @as(isize, @intCast(d.wide_line)) + delta;
+                    if (d.wide_line < snap.shift_at) {
+                        // widest line is untouched above the edit
+                    } else if (shifted_old >= @as(isize, @intCast(end))) {
+                        d.wide_line = @intCast(shifted_old);
+                    } else if (d.wide_line == snap.shift_at and snap.shift_at < b.lines()) {
+                        const w = lineWide(b.line(snap.shift_at), tw);
+                        if (w >= d.wide) d.wide = w else full = true;
+                    } else full = true;
+                    if (!full) {
+                        for (snap.shift_at..end) |i| {
+                            const w = lineWide(b.line(i), tw);
+                            if (w > d.wide) {
+                                d.wide = w;
+                                d.wide_line = i;
+                            }
+                        }
+                    }
+                } else full = true;
+            } else if (!full and snap.touched >= b.lines()) {
+                full = true;
             }
-            d.wide = wide;
+            if (full) {
+                var wide: usize = 0;
+                var wide_line: usize = 0;
+                for (0..b.lines()) |i| {
+                    const w = lineWide(b.line(i), tw);
+                    if (w > wide) {
+                        wide = w;
+                        wide_line = i;
+                    }
+                }
+                d.wide = wide;
+                d.wide_line = wide_line;
+            }
         }
         d.hmax = @max(@max(0, f(d.wide + 2) * cw - textw), d.file.sx);
     }
@@ -8423,8 +8869,7 @@ fn drawTicks(d: *Doc, ctx: Id, th: *const Theme, card: Rect, q: []const u8, cur:
         const t = d.file.ed.text();
         var from: usize = 0;
         while (d.ticks.items.len < max_ticks) {
-            const p = editor.searchWith(t, q, from, false, find_opts) orelse break;
-            if (p < from) break;
+            const p = editor.nextMatch(t, q, from, t.len, find_opts) orelse break;
             const r: u32 = @intCast(rowColOf(d, p).row);
             const n = d.ticks.items.len;
             if (n == 0 or d.ticks.items[n - 1] != r) d.ticks.append(gpa, r) catch break;
@@ -11053,7 +11498,11 @@ fn movedPath(old: []const u8, new: []const u8) void {
         preview.rename(pg.id, np);
         gpa.free(p);
         pg.path = np;
-        pg.lang = langOf(pg, np);
+        const lang = langOf(pg, np);
+        if (lang != pg.lang) {
+            pg.lang = lang;
+            pg.states.clearRetainingCapacity();
+        }
         pg.stamp = files.stamp(np);
         if (j == d.at) {
             clearSyntax(d);
@@ -11277,12 +11726,10 @@ pub fn previewText(id: u32) ?[]const u8 {
 }
 
 /// The tab the Markdown preview shows, and how far down it was last scrolled.
-var preview_id: u32 = 0;
 var preview_frac: f64 = -1;
 
 fn markdownPreview(d: *Doc) void {
     preview.setTypography(conf.font(), conf.size, conf.spacing);
-    preview_id = d.file.id;
     preview_frac = -1;
     preview.toggle(d, themeOf(d.win));
 }
@@ -11700,8 +12147,8 @@ fn fillMenu(menu: Id, comptime entries: anytype, delegate: Id) void {
                     separator(menu);
                     msg(void, menuItem(menu, if (sc.dark) "Dark Mode" else "Light Mode", "", "", 0), "setEnabled:", .{false});
                 }
-                // Each theme shows a swatch of its colors.
-                msg(void, pick(menu, sc.title, e.sel, i, pluck(isize, e, "indent", 0)), "setImage:", .{swatch(sc)});
+                // Each theme shows a swatch lazily when its menu opens.
+                _ = pick(menu, sc.title, e.sel, i, pluck(isize, e, "indent", 0));
             }
         } else if (@hasField(T, "titles")) {
             inline for (e.titles, 0..) |title, i| _ = pick(menu, title, e.sel, i, pluck(isize, e, "indent", 0));
@@ -11829,7 +12276,13 @@ fn greyed(it: Id) bool {
 /// Late-Night has set, with a tooltip that says why and how to get it back.
 pub fn validate(_: Id, _: Sel, it: Id) callconv(.c) bool {
     const r = ruleOf(it) orelse return true;
-    if (r.check) |c| msg(void, it, "setState:", .{@as(isize, @intFromBool(checked(c, @intCast(msg(isize, it, "tag", .{})))))});
+    if (r.check) |c| {
+        const tag: usize = @intCast(msg(isize, it, "tag", .{}));
+        msg(void, it, "setState:", .{@as(isize, @intFromBool(checked(c, tag)))});
+        if (c == .scheme and tag < settings.schemes.len and msg(Id, it, "image", .{}) == null) {
+            msg(void, it, "setImage:", .{swatch(settings.schemes[tag])});
+        }
+    }
     const off = r.grey and conf.late_night;
     if (r.grey) msg(void, it, "setToolTip:", .{if (off) objc.str(late_night_why) else @as(Id, null)});
     return !off;
@@ -11931,3 +12384,6 @@ extern fn objc_getProtocol(name: [*:0]const u8) ?*anyopaque;
 extern fn class_addProtocol(cls: Id, protocol: ?*anyopaque) bool;
 extern fn CTLineGetOffsetForStringIndex(line: Id, index: isize, secondary: ?*f64) f64;
 extern fn CGContextClipToRects(ctx: Id, rects: [*]const Rect, count: usize) void;
+extern "c" fn CGContextEOClip(ctx: Id) void;
+extern "c" fn CGContextAddRect(ctx: Id, rect: Rect) void;
+extern "c" fn CGContextDrawImage(ctx: Id, rect: Rect, image: Id) void;

@@ -25,6 +25,8 @@ pub const Buffer = struct {
     /// the whole suffix instead. Both reset when the syntax cache catches up.
     touched_end: usize = 0,
     lines_shifted: bool = true,
+    shift_at: usize = 0,
+    line_delta: ?isize = null,
     /// Runs of non-white-space bytes, counted on first `wordCount` and then
     /// maintained at the splice boundaries; null until something asks.
     words: ?usize = null,
@@ -41,6 +43,20 @@ pub const Buffer = struct {
         errdefer b.deinit(gpa);
         try b.text.ensureTotalCapacityPrecise(gpa, bytes.len);
         b.text.appendSliceAssumeCapacity(bytes);
+        try b.fillStarts(gpa);
+        return b;
+    }
+
+    /// Takes unconditional ownership of `bytes` and indexes its line starts.
+    pub fn initOwned(gpa: Allocator, bytes: []u8) !Buffer {
+        var b: Buffer = .{ .text = .fromOwnedSlice(bytes) };
+        errdefer b.deinit(gpa);
+        try b.fillStarts(gpa);
+        return b;
+    }
+
+    fn fillStarts(b: *Buffer, gpa: Allocator) !void {
+        const bytes = b.text.items;
         try b.starts.ensureTotalCapacityPrecise(gpa, std.mem.count(u8, bytes, "\n") + 1);
         b.starts.appendAssumeCapacity(0);
         var pos: usize = 0;
@@ -48,7 +64,6 @@ pub const Buffer = struct {
             pos = i + 1;
             b.starts.appendAssumeCapacity(@intCast(pos));
         }
-        return b;
     }
 
     pub fn deinit(b: *Buffer, gpa: Allocator) void {
@@ -198,9 +213,23 @@ pub const Buffer = struct {
         const delta: i64 = @as(i64, @intCast(new.len)) - @as(i64, @intCast(end - start));
         for (b.starts.items[first + 1 + added.items.len ..]) |*s| s.* = @intCast(@as(i64, s.*) + delta);
         if (b.units.items.len > 0) b.spliceUnits(gpa, first, last, added.items.len);
+        const old_lines = last - first;
+        const new_lines = added.items.len;
+        const prev_end = b.touched_end;
         b.touched = @min(b.touched, first);
-        b.touched_end = @max(b.touched_end, first + added.items.len + 1);
-        b.lines_shifted = b.lines_shifted or last - first != added.items.len;
+        b.touched_end = @max(b.touched_end, first + new_lines + 1);
+        if (old_lines != new_lines) {
+            const d_lines: isize = @as(isize, @intCast(new_lines)) - @as(isize, @intCast(old_lines));
+            if (!b.lines_shifted) {
+                b.lines_shifted = true;
+                b.shift_at = first;
+                b.line_delta = if (prev_end > first + 1) null else d_lines;
+            } else {
+                b.line_delta = null;
+            }
+        } else if (b.lines_shifted and first <= b.shift_at) {
+            b.line_delta = null;
+        }
     }
 
     /// Recounts the edited lines' units and shifts the lines after them.
@@ -416,4 +445,59 @@ test "word count tracks splitting and joining words at either boundary" {
     try t.expectEqual(@as(?usize, 2), b.words);
     _ = try b.redo(t.allocator);
     try t.expectEqual(@as(?usize, 0), b.words);
+}
+
+test "initOwned takes ownership of bytes and builds exact line starts" {
+    for ([_][]const u8{ "", "one", "\n", "one\ntwo\n", "one\r\n\r\ntwo" }) |src| {
+        const owned = try t.allocator.dupe(u8, src);
+        var b = try Buffer.initOwned(t.allocator, owned);
+        defer b.deinit(t.allocator);
+        try t.expectEqualStrings(src, b.text.items);
+        try t.expectEqual(src.len, b.text.capacity);
+        try t.expectEqual(std.mem.count(u8, src, "\n") + 1, b.starts.capacity);
+        try expectStarts(&b);
+    }
+}
+
+test "line_delta tracks single Return, Backspace line join, and stacked Returns" {
+    var b = try Buffer.init(t.allocator, "one\ntwo\nthree");
+    defer b.deinit(t.allocator);
+    // Reset initial sync state as syntax sync does.
+    b.touched = std.math.maxInt(usize);
+    b.touched_end = 0;
+    b.lines_shifted = false;
+    b.line_delta = null;
+
+    // Single Return at end of line 0.
+    try b.replace(t.allocator, 3, 3, "\n", 3, false);
+    try t.expect(b.lines_shifted);
+    try t.expectEqual(@as(usize, 0), b.shift_at);
+    try t.expectEqual(@as(?isize, 1), b.line_delta);
+
+    // Same-line edit after shift_at keeps line_delta; at or before clears it.
+    try b.replace(t.allocator, 5, 5, "x", 5, false);
+    try t.expectEqual(@as(?isize, 1), b.line_delta);
+    try b.replace(t.allocator, 0, 0, "y", 0, false);
+    try t.expectEqual(@as(?isize, null), b.line_delta);
+
+    // Reset and test Backspace line join.
+    b.touched = std.math.maxInt(usize);
+    b.touched_end = 0;
+    b.lines_shifted = false;
+    b.line_delta = null;
+    try b.replace(t.allocator, 4, 5, "", 5, false);
+    try t.expect(b.lines_shifted);
+    try t.expectEqual(@as(usize, 0), b.shift_at);
+    try t.expectEqual(@as(?isize, -1), b.line_delta);
+
+    // Reset and test two stacked Returns.
+    b.touched = std.math.maxInt(usize);
+    b.touched_end = 0;
+    b.lines_shifted = false;
+    b.line_delta = null;
+    try b.replace(t.allocator, 4, 4, "\n", 4, false);
+    try t.expectEqual(@as(?isize, 1), b.line_delta);
+    try b.replace(t.allocator, 5, 5, "\n", 5, false);
+    try t.expect(b.lines_shifted);
+    try t.expectEqual(@as(?isize, null), b.line_delta);
 }

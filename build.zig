@@ -15,6 +15,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
         .strip = optimize != .debug,
+        .unwind_tables = if (optimize == .debug) .sync else .none,
     });
     // `-Dbench=true` compiles in the self-driving bench (src/bench.zig, run
     // by scripts/bench.sh). Shipped builds leave it out.

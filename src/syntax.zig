@@ -262,15 +262,50 @@ fn isWord(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_' or c >= 0x80;
 }
 
+pub const Sync = struct {
+    from: usize,
+    end: usize,
+    shift_at: usize = 0,
+    delta: ?isize = null,
+};
+
 /// Repairs cached line-start states and returns the half-open range whose
 /// kinds must be forgotten. Same-line-count edits stop at state convergence.
 pub fn syncStates(gpa: std.mem.Allocator, lang: *const Lang, b: *Buffer, states: *std.ArrayList(State), upto: usize) ![2]usize {
+    if (b.lines_shifted) b.line_delta = null;
+    const res = try syncStatesShift(gpa, lang, b, states, upto);
+    return .{ res.from, res.end };
+}
+
+/// Repairs cached line-start states, preserving shifted suffix states when a
+/// single line-count delta is known.
+pub fn syncStatesShift(gpa: std.mem.Allocator, lang: *const Lang, b: *Buffer, states: *std.ArrayList(State), upto: usize) !Sync {
     const first = b.touched;
-    var invalid = [2]usize{ first, std.math.maxInt(usize) };
+    var res: Sync = .{ .from = first, .end = std.math.maxInt(usize) };
     if (first < states.items.len) {
+        var converge = !b.lines_shifted;
         if (b.lines_shifted) {
-            states.shrinkRetainingCapacity(first + 1);
-        } else {
+            if (b.line_delta) |delta| {
+                if (b.shift_at == first and first + 1 < states.items.len) {
+                    if (delta > 0) {
+                        const add_n: usize = @intCast(delta);
+                        const slot = try states.addManyAt(gpa, first + 1, add_n);
+                        @memset(slot, .normal);
+                    } else if (delta < 0) {
+                        const rem_n = @min(@as(usize, @intCast(-delta)), states.items.len - (first + 1));
+                        states.replaceRangeAssumeCapacity(first + 1, rem_n, &.{});
+                    }
+                    res.shift_at = first;
+                    res.delta = delta;
+                    converge = true;
+                } else {
+                    states.shrinkRetainingCapacity(first + 1);
+                }
+            } else {
+                states.shrinkRetainingCapacity(first + 1);
+            }
+        }
+        if (converge) {
             var i = first;
             while (i + 1 < states.items.len and i < b.lines()) : (i += 1) {
                 // Past what this frame needs: drop the rest rather than lex to the end.
@@ -282,7 +317,7 @@ pub fn syncStates(gpa: std.mem.Allocator, lang: *const Lang, b: *Buffer, states:
                 const after = lexLine(lang, b.line(i), states.items[i], null);
                 states.items[i + 1] = after;
                 if (i + 1 >= b.touched_end and before == after) {
-                    invalid[1] = i + 1;
+                    res.end = i + 1;
                     break;
                 }
             }
@@ -299,7 +334,15 @@ pub fn syncStates(gpa: std.mem.Allocator, lang: *const Lang, b: *Buffer, states:
     b.touched = std.math.maxInt(usize);
     b.touched_end = 0;
     b.lines_shifted = false;
-    return invalid;
+    b.line_delta = null;
+    return res;
+}
+
+fn staysNormal(lang: *const Lang, s: []const u8) bool {
+    if (lang.block_comment and std.mem.indexOf(u8, s, "/*") != null) return false;
+    if (lang.triple and (std.mem.indexOf(u8, s, "\"\"\"") != null or std.mem.indexOf(u8, s, "'''") != null)) return false;
+    if (lang.backtick and std.mem.indexOfScalar(u8, s, '`') != null) return false;
+    return true;
 }
 
 /// Lexes one line that begins in `state`, writing a kind per byte into
@@ -311,6 +354,7 @@ pub fn lexLine(lang: *const Lang, s: []const u8, state: State, out: ?[]Kind) Sta
         mark(out, 0, s.len, diffKind(s));
         return .normal;
     }
+    if (out == null and state == .normal and staysNormal(lang, s)) return .normal;
     var st = state;
     var i: usize = if (lang.keys and st == .normal) keyAt(lang, s, out) else 0;
     while (i < s.len) {
@@ -375,9 +419,11 @@ pub fn lexLine(lang: *const Lang, s: []const u8, state: State, out: ?[]Kind) Sta
                 } else if (isWord(c) or c == '@') {
                     i += 1;
                     while (i < s.len and isWord(s[i])) i += 1;
-                    if (c == '@' or isKeyword(lang, s[start..i])) {
-                        kind = .keyword;
-                    } else if (lang.names) kind = nameKind(s[start..i], s, i);
+                    if (out != null) {
+                        if (c == '@' or isKeyword(lang, s[start..i])) {
+                            kind = .keyword;
+                        } else if (lang.names) kind = nameKind(s[start..i], s, i);
+                    }
                 } else i += 1;
             },
         }
@@ -427,6 +473,7 @@ fn nameKind(w: []const u8, s: []const u8, end: usize) Kind {
 /// `[section]` line in one with `#` comments, and returns where lexing goes
 /// on from; 0 when the line starts with neither.
 fn keyAt(lang: *const Lang, s: []const u8, out: ?[]Kind) usize {
+    if (out == null) return 0;
     var i: usize = 0;
     while (i < s.len and (s[i] == ' ' or s[i] == '\t')) i += 1;
     if (i + 1 < s.len and s[i] == '-' and s[i + 1] == ' ') i += 2;
@@ -458,6 +505,7 @@ fn lexMarkdown(s: []const u8, state: State, out: ?[]Kind) State {
         mark(out, 0, s.len, .string);
         return if (fence == (state == .fence)) .normal else .fence;
     }
+    if (out == null) return .normal;
     mark(out, 0, s.len, .text);
     if (rest.len > 0 and rest[0] == '#') {
         var h = i;
@@ -839,5 +887,72 @@ test "incremental kinds converge inside and outside multiline regions" {
         _ = try expectIncremental(case[0], &b, &states, &cached);
         _ = try b.undo(t.allocator);
         _ = try expectIncremental(case[0], &b, &states, &cached);
+    }
+}
+
+test "syncStatesShift converges on Return and Backspace-join" {
+    var b = try Buffer.init(t.allocator, "int a;\n/* open\ninside\nclose */\nint b;\nint c;");
+    defer b.deinit(t.allocator);
+    var states: std.ArrayList(State) = .empty;
+    defer states.deinit(t.allocator);
+
+    _ = try syncStatesShift(t.allocator, &c_like, &b, &states, b.lines() - 1);
+
+    // Return outside multiline region converges at line 2 with delta = +1.
+    const e0 = b.lineEnd(0);
+    try b.replace(t.allocator, e0, e0, "\n", e0, false);
+    const r1 = try syncStatesShift(t.allocator, &c_like, &b, &states, b.lines() - 1);
+    try t.expectEqual(Sync{ .from = 0, .end = 2, .shift_at = 0, .delta = 1 }, r1);
+
+    // Return inside block comment propagates .block_comment and converges at line 5.
+    const e3 = b.lineEnd(3);
+    try b.replace(t.allocator, e3, e3, "\n", e3, false);
+    const r2 = try syncStatesShift(t.allocator, &c_like, &b, &states, b.lines() - 1);
+    try t.expectEqual(Sync{ .from = 3, .end = 5, .shift_at = 3, .delta = 1 }, r2);
+    try t.expectEqual(State.block_comment, states.items[4]);
+
+    // Backspace-join inside block comment converges at line 4 with delta = -1.
+    try b.replace(t.allocator, e3, e3 + 1, "", e3 + 1, false);
+    const r3 = try syncStatesShift(t.allocator, &c_like, &b, &states, b.lines() - 1);
+    try t.expectEqual(Sync{ .from = 3, .end = 4, .shift_at = 3, .delta = -1 }, r3);
+
+    // Backspace-join on line 0 converges at line 1 with delta = -1.
+    try b.replace(t.allocator, e0, e0 + 1, "", e0 + 1, false);
+    const r4 = try syncStatesShift(t.allocator, &c_like, &b, &states, b.lines() - 1);
+    try t.expectEqual(Sync{ .from = 0, .end = 1, .shift_at = 0, .delta = -1 }, r4);
+
+    // Verify every cached line state matches a full fresh lex.
+    var st: State = .normal;
+    for (0..b.lines()) |i| {
+        try t.expectEqual(st, states.items[i]);
+        st = lexLine(&c_like, b.line(i), st, null);
+    }
+
+    // Two stacked Returns clear line_delta and fall back to suffix invalidation.
+    try b.replace(t.allocator, e0, e0, "\n", e0, false);
+    try b.replace(t.allocator, e0 + 1, e0 + 1, "\n", e0 + 1, false);
+    const r5 = try syncStatesShift(t.allocator, &c_like, &b, &states, b.lines() - 1);
+    try t.expectEqual(Sync{ .from = 0, .end = std.math.maxInt(usize), .shift_at = 0, .delta = null }, r5);
+}
+
+test "state-only lexLine and lexMarkdown match full lexing" {
+    var scratch: [128]Kind = undefined;
+    const cases = .{
+        .{ &c_like, State.normal, "int x = 1; // /* ignored" },
+        .{ &c_like, State.normal, "int x = 1; /* start" },
+        .{ &c_like, State.block_comment, "still comment */ int y = 2;" },
+        .{ &css, State.normal, "  color: red;" },
+        .{ &css, State.normal, "  color: /* open" },
+        .{ &python, State.normal, "x = '''multi" },
+        .{ &js, State.normal, "const s = `tmpl" },
+        .{ &markdown, State.normal, "## heading with `code` and **bold**" },
+        .{ &markdown, State.normal, "```zig" },
+        .{ &markdown, State.fence, "inside" },
+        .{ &markdown, State.fence, "```" },
+    };
+    inline for (cases) |c| {
+        const full = lexLine(c[0], c[2], c[1], scratch[0..c[2].len]);
+        const fast = lexLine(c[0], c[2], c[1], null);
+        try t.expectEqual(full, fast);
     }
 }

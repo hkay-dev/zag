@@ -1,6 +1,5 @@
 //! Foundation parses Markdown; AppKit lays out the read-only preview.
 const std = @import("std");
-const access = @import("access.zig");
 const objc = @import("objc.zig");
 const settings = @import("settings.zig");
 const syntax = @import("syntax.zig");
@@ -57,6 +56,7 @@ const Deco = struct {
     key: u16,
 };
 var decos: [512]Deco = undefined;
+var deco_max_end: [decos.len]u32 = undefined;
 var deco_n: usize = 0;
 /// Where each heading starts in the rendered text, for `#heading` links.
 var heads: [256]u32 = undefined;
@@ -80,12 +80,16 @@ fn closed(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     path = null;
     owner = null;
     window = null;
+    seen_id = 0;
     msg(void, source, "release", .{});
     source = null;
     text = null;
     fade = false;
     deco_n = 0;
     head_n = 0;
+}
+pub fn shownFor(id: u32) bool {
+    return window != null and seen_id == id;
 }
 pub fn close(w: Id) void {
     if (owner == w) msg(void, window, "close", .{});
@@ -373,6 +377,8 @@ fn paint(part: Id, hint: Id, key_color: Id) void {
     var buf: [32]u8 = undefined;
     const lang = syntax.forPath(langPath(objc.utf8(hint), &buf));
     const bytes = objc.utf8(msg(Id, part, "string", .{}));
+    var kind_colors: [7]Id = undefined;
+    for (0..7) |ki| kind_colors[ki] = color(theme.kinds[ki]);
     var state: syntax.State = .normal;
     // `u` counts UTF-16 units, the attributed string's indexes.
     var u: usize = 0;
@@ -388,20 +394,41 @@ fn paint(part: Id, hint: Id, key_color: Id) void {
         for (line, 0..) |b, j| {
             const kd = if (kinds) |ks| ks[j] else .text;
             if (b & 0xC0 != 0x80 and kd != run_kind) {
-                if (run_kind != .text and u > run_start) attr(part, key_color, color(theme.kinds[@intFromEnum(run_kind)]), .{ .loc = run_start, .len = u - run_start });
+                if (run_kind != .text and u > run_start) attr(part, key_color, kind_colors[@intFromEnum(run_kind)], .{ .loc = run_start, .len = u - run_start });
                 run_start = u;
                 run_kind = kd;
             }
             // A lead byte of four starts a surrogate pair; continuation bytes add nothing.
             u += @as(usize, if (b & 0xC0 == 0x80) 0 else if (b >= 0xF0) 2 else 1);
         }
-        if (run_kind != .text and u > run_start) attr(part, key_color, color(theme.kinds[@intFromEnum(run_kind)]), .{ .loc = run_start, .len = u - run_start });
+        if (run_kind != .text and u > run_start) attr(part, key_color, kind_colors[@intFromEnum(run_kind)], .{ .loc = run_start, .len = u - run_start });
     }
 }
 fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     if (view.previewText(seen_id)) |bytes| {
         msg(void, source, "release", .{});
-        source = msg(Id, access.nsText(bytes), "retain", .{});
+        source = null;
+        if (std.unicode.utf8ValidateSlice(bytes)) {
+            source = msg(Id, msg(Id, objc.class("NSData"), "dataWithBytes:length:", .{ bytes.ptr, bytes.len }), "retain", .{});
+        } else {
+            var clean: std.ArrayList(u8) = .empty;
+            defer clean.deinit(view.gpa);
+            clean.ensureTotalCapacity(view.gpa, bytes.len) catch {};
+            var j: usize = 0;
+            while (j < bytes.len) {
+                const n = std.unicode.utf8ByteSequenceLength(bytes[j]) catch 0;
+                if (n > 0 and j + n <= bytes.len) {
+                    if (std.unicode.utf8Decode(bytes[j .. j + n])) |_| {
+                        clean.appendSlice(view.gpa, bytes[j .. j + n]) catch return;
+                        j += n;
+                        continue;
+                    } else |_| {}
+                }
+                clean.appendSlice(view.gpa, "\u{FFFD}") catch return;
+                j += 1;
+            }
+            source = msg(Id, msg(Id, objc.class("NSData"), "dataWithBytes:length:", .{ clean.items.ptr, clean.items.len }), "retain", .{});
+        }
     }
     if (source == null) return;
     const options = objc.new("NSAttributedStringMarkdownParsingOptions");
@@ -409,7 +436,7 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     msg(void, options, "setInterpretedSyntax:", .{@as(isize, 0)});
     // Relative links resolve against the file's folder.
     const folder: Id = if (msg(usize, path, "length", .{}) == 0) null else msg(Id, objc.class("NSURL"), "fileURLWithPath:isDirectory:", .{ msg(Id, path, "stringByDeletingLastPathComponent", .{}), true });
-    const parsed = msg(Id, msg(Id, objc.class("NSAttributedString"), "alloc", .{}), "initWithMarkdown:options:baseURL:error:", .{ msg(Id, source, "dataUsingEncoding:", .{@as(usize, 4)}), options, folder, @as(?*Id, null) });
+    const parsed = msg(Id, msg(Id, objc.class("NSAttributedString"), "alloc", .{}), "initWithMarkdown:options:baseURL:error:", .{ source, options, folder, @as(?*Id, null) });
     defer msg(void, parsed, "release", .{});
     const out = objc.new("NSMutableAttributedString");
     defer msg(void, out, "release", .{});
@@ -588,6 +615,19 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
             attr(out, key_style, style(dc.key | last_f), bottom);
         }
     }
+    if (deco_n > 1) {
+        for (1..deco_n) |di| {
+            const cur = decos[di];
+            var dj = di;
+            while (dj > 0 and decos[dj - 1].start > cur.start) : (dj -= 1) decos[dj] = decos[dj - 1];
+            decos[dj] = cur;
+        }
+    }
+    var max_end: u32 = 0;
+    for (0..deco_n) |di| {
+        max_end = @max(max_end, decos[di].end);
+        deco_max_end[di] = max_end;
+    }
     const clip = msg(Id, msg(Id, text, "enclosingScrollView", .{}), "contentView", .{});
     const position = msg(objc.Rect, clip, "bounds", .{});
     const store = msg(Id, text, "textStorage", .{});
@@ -701,11 +741,21 @@ fn backdrop(self: Id, _: objc.Sel, dirty: objc.Rect) callconv(.c) void {
     const k = scale();
     const left = origin.x + pad;
     const right = origin.x + width - pad;
-    for (decos[0..deco_n]) |dc| {
-        if (dc.end > len) continue;
+    if (deco_n == 0 or len == 0) return;
+    var lo: usize = 0;
+    var hi: usize = deco_n;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const hit = deco_max_end[mid] > 0 and
+            (lineEdge(tlm, tcs, @min(deco_max_end[mid], len) - 1, true) orelse 0) + origin.y + 12 * k >= dirty.y;
+        if (hit) hi = mid else lo = mid + 1;
+    }
+    for (decos[lo..deco_n]) |dc| {
+        if (dc.end == 0 or dc.end > len) continue;
         const top = origin.y + (lineEdge(tlm, tcs, dc.start, false) orelse continue);
+        if (top - 12 * k > dirty.y + dirty.h) break;
         const bottom = origin.y + (lineEdge(tlm, tcs, dc.end - 1, true) orelse continue);
-        if (bottom + 12 * k < dirty.y or top - 12 * k > dirty.y + dirty.h) continue;
+        if (bottom + 12 * k < dirty.y) continue;
         switch (dc.kind) {
             .code => {
                 const x = left + indents(dc.key)[1] * k;
