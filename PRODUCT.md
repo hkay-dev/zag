@@ -29,7 +29,7 @@ People open Zag from the Dock, Finder or a terminal (`zag notes.txt`, `zag .`), 
 ## Capabilities and Constraints
 
 - macOS 15 (Sequoia) or newer, Apple Silicon only. No input methods (US English only).
-- Version 0.1.0 executable: 388,624 bytes with its code signature (380 KiB rounded). Download: 313,068 bytes (306 KiB rounded).
+- Version 0.1.0 executable at 6130cad (2026-11-13): 436,560 bytes with its code signature (426 KiB rounded). App bundle: 477,646 bytes. Download: 366,957 bytes (358 KiB rounded).
 - Features: cards and splits (⌘D, ⇧⌘D), draggable tabs, folder sidebar (⌘\), Quick Open (⌘P), Command Palette (⌘K), Find and Replace, Go to Line, Markdown Preview (⇧⌘M), Typewriter Scrolling, Focus dimming, Zen Mode (⌃⌘Z), Late-Night Focus (⌃⌘N), Format JSON, syntax highlighting for about 25 languages, safe atomic saves, drafts, session restore, VoiceOver, Increase Contrast.
 - Themes: Paper, Ayu Light, One Light (light); Ink, Ayu Dark, One Dark, Black (dark).
 - Version 0.1.0. Download link: a GitHub release URL, filled in when the repo goes public.
