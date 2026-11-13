@@ -7,11 +7,11 @@ covers:
 
 # Zag's website
 
-Choose **Download for Mac** to download Zag. The number beside the button is the size of the compressed disk image. One KiB is 1,024 bytes.
+Choose **Download for Mac** to download Zag. The number beside the button is the size of the compressed disk image. One KiB is 1,024 bytes. The picture under the button is a real Zag window, in a light theme or a dark one to match the website's appearance.
 
 ## The square
 
-The orange square at the top of the page is Zag's whole program, drawn with one pixel for each byte. Move the pointer over it to read the bytes under the cursor, the way a hex editor shows them. On a narrow screen the page draws the square at half size and says so.
+The orange square under the app picture is Zag's whole program, drawn with one pixel for each byte. Move the pointer over it to read the bytes under the cursor, the way a hex editor shows them. On a narrow screen the page draws the square at half size and says so.
 
 ## Other editors at the same scale
 
@@ -31,8 +31,10 @@ In the writing preview, choose **Source** or **Preview**, or drag the divider to
 
 Choose **System**, **Light** or **Dark** in the header to change the website's appearance. Use the pause control beside it to stop the page's animation; the page then shows every section as a still picture. The page also stays still when your Mac has Reduce Motion turned on.
 
-## Checking the download
+## Opening and checking the download
 
-The **Download** section lists the disk image's file name, exact size and SHA-256 checksum. Run `shasum -a 256` on the file that you downloaded and compare the result. The drawing under the button shows how many copies of the download fit on one floppy disk, to scale.
+Zag isn't notarized yet, so macOS can block its first launch. Drag Zag into Applications, then copy the command from the **Download** section's note and run it once in Terminal.
+
+The same section shows the disk image's file name, exact size and SHA-256 checksum, with a **Copy** button for the checksum. Run `shasum -a 256` on the file that you downloaded and compare the result. The drawing under the button shows how many copies of the download fit on one floppy disk, to scale.
 
 Follow **User guide** for editing commands, shortcuts and settings. Follow **Source** to read Zag's code.
