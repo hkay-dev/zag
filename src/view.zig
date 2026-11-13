@@ -476,7 +476,17 @@ fn setFont() void {
     }
     msg(void, msg(Id, objc.class("NSFontManager"), "sharedFontManager", .{}), "setSelectedFont:isMultiple:", .{ font, false });
     // The Markdown preview's type follows the editor's.
-    preview.setTypography(conf.font(), conf.size, conf.spacing);
+    preview.fontChanged();
+}
+
+pub fn editorFont() Id {
+    return font;
+}
+pub fn editorSize() f64 {
+    return conf.size;
+}
+pub fn editorSpacing() f64 {
+    return conf.spacing;
 }
 
 /// The font and glyph that draw `cp`, falling back to a system font that
@@ -690,7 +700,7 @@ fn roundPath(ctx: Id, x: f64, y: f64, w: f64, h: f64, radius: f64) void {
 }
 
 /// A rounded rectangle: the card, the sidebar's selection, the icon tiles.
-fn pill(ctx: Id, c: Rgb, a: f64, x: f64, y: f64, w: f64, h: f64, radius: f64) void {
+pub fn pill(ctx: Id, c: Rgb, a: f64, x: f64, y: f64, w: f64, h: f64, radius: f64) void {
     objc.CGContextSetRGBFillColor(ctx, c[0], c[1], c[2], a);
     roundPath(ctx, x, y, w, h, radius);
     objc.CGContextFillPath(ctx);
@@ -4233,12 +4243,16 @@ fn buildThemes() void {
 }
 
 /// The transition shared by the editor and preview when their theme changes.
-pub fn themeFade() Id {
+pub fn fadeAnim(dur: f64, timing: []const u8) Id {
     const t = msg(Id, objc.class("CATransition"), "animation", .{});
     msg(void, t, "setType:", .{objc.str("fade")});
-    msg(void, t, "setDuration:", .{@as(f64, 0.25)});
-    msg(void, t, "setTimingFunction:", .{msg(Id, objc.class("CAMediaTimingFunction"), "functionWithName:", .{objc.str("easeInEaseOut")})});
+    msg(void, t, "setDuration:", .{dur});
+    msg(void, t, "setTimingFunction:", .{msg(Id, objc.class("CAMediaTimingFunction"), "functionWithName:", .{objc.str(timing)})});
     return t;
+}
+
+pub fn themeFade() Id {
+    return fadeAnim(0.25, "easeInEaseOut");
 }
 
 /// Crossfades the window to what draws next, for a theme or appearance
@@ -4339,7 +4353,7 @@ fn applySettings(old_conf: settings.Settings) void {
     const crossfade = look_changed or (!zen_changed and !std.meta.eql(old_themes, themes));
     side_w = conf.sidebar_width;
     if (font == null or fonts_changed) setFont();
-    preview.setTypography(conf.font(), conf.size, conf.spacing);
+    if (old_conf.spacing != conf.spacing) preview.fontChanged();
     if (hidden_changed) {
         tree.show_hidden = conf.show_hidden;
         tree_stale = true;
@@ -11615,10 +11629,9 @@ fn copy(d: *Doc) void {
 }
 
 fn putClipboard(text: []const u8) void {
-    const string = if (std.unicode.utf8ValidateSlice(text)) objc.str(text) else access.nsText(text);
     const pb = pasteboard();
     _ = msg(isize, pb, "clearContents", .{});
-    _ = msg(bool, pb, "setString:forType:", .{ string, NSPasteboardTypeString });
+    _ = msg(bool, pb, "setString:forType:", .{ access.nsText(text), NSPasteboardTypeString });
 }
 
 fn cut(d: *Doc) void {
@@ -11713,7 +11726,6 @@ pub fn previewText(id: u32) ?[]const u8 {
 var preview_frac: f64 = -1;
 
 fn markdownPreview(d: *Doc) void {
-    preview.setTypography(conf.font(), conf.size, conf.spacing);
     preview_frac = -1;
     preview.toggle(d, themeOf(d.win));
 }

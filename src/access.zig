@@ -16,14 +16,13 @@ const Id = objc.Id;
 const Sel = objc.Sel;
 const Rect = objc.Rect;
 const Point = objc.Point;
+const Range = objc.Range;
 const msg = objc.msg;
 const gpa = view.gpa;
 
 extern fn NSAccessibilityPostNotification(element: Id, name: Id) void;
 
-const Range = extern struct { loc: usize = 0, len: usize = 0 };
-
-const Kind = enum(u8) { text, tabs, tab, outline, row };
+const Kind = enum(u3) { text, tabs, tab, outline, row };
 
 /// What an element stands for: its kind, the card or window it's in, and
 /// for a tab its id, for a row a hash of its path.
@@ -48,19 +47,10 @@ fn lowerBoundIn(items: []const Entry, k: Key) usize {
     return lo;
 }
 
-/// Where `k` is, or would go.
-fn lowerBound(k: Key) usize {
-    return lowerBoundIn(held.items, k);
-}
-
 fn findIn(items: []Entry, k: Key) ?*Held {
     const i = lowerBoundIn(items, k);
     if (i < items.len and !before(k, items[i].key)) return &items[i].h;
     return null;
-}
-
-fn find(k: Key) ?*Held {
-    return findIn(held.items, k);
 }
 
 fn entryBefore(_: void, a: Entry, b: Entry) bool {
@@ -183,7 +173,7 @@ fn voiceOverOn() bool {
 /// asked about `d`'s text before.
 pub fn changed(d: *Doc) void {
     if (held.items.len == 0 or !voiceOverOn()) return;
-    const obj = (find(.{ .kind = .text, .owner = @intFromPtr(d), .key = 0 }) orelse return).obj;
+    const obj = (findIn(held.items, .{ .kind = .text, .owner = @intFromPtr(d), .key = 0 }) orelse return).obj;
     if (slot(obj, .id).* != d.file.id or slot(obj, .changes).* != d.file.ed.buf.changes) {
         slot(obj, .id).* = d.file.id;
         slot(obj, .changes).* = d.file.ed.buf.changes;
@@ -204,34 +194,31 @@ pub fn focused(d: *Doc) void {
 
 /// Card `d` is going: its elements go dead.
 pub fn drop(d: *Doc) void {
-    sweep(struct {
-        owner: usize,
-        fn gone(s: @This(), k: Key, _: Held) bool {
-            return k.owner == s.owner and (k.kind == .text or k.kind == .tabs or k.kind == .tab);
-        }
-    }{ .owner = @intFromPtr(d) });
+    sweep(@intFromPtr(d), null, (1 << @intFromEnum(Kind.text)) | (1 << @intFromEnum(Kind.tabs)) | (1 << @intFromEnum(Kind.tab)), false);
 }
 
 /// Window `w` is closing: its sidebar's elements go dead.
 pub fn dropWin(w: *Win) void {
-    sweep(struct {
-        owner: usize,
-        fn gone(s: @This(), k: Key, _: Held) bool {
-            return k.owner == s.owner and (k.kind == .outline or k.kind == .row);
-        }
-    }{ .owner = @intFromPtr(w) });
+    sweep(@intFromPtr(w), null, (1 << @intFromEnum(Kind.outline)) | (1 << @intFromEnum(Kind.row)), false);
 }
 
-/// Lets go of every element `ctx.gone` picks.
-fn sweep(ctx: anytype) void {
+/// Lets go of every matching element.
+fn sweep(owner: usize, win: ?*Win, kinds: u8, unstamped: bool) void {
     if (held.items.len == 0) return;
     var dead: std.ArrayList(Id) = .empty;
     defer dead.deinit(gpa);
     var keep: usize = 0;
     for (held.items) |e| {
-        if (ctx.gone(e.key, e.h)) {
+        const k = e.key;
+        const gone = (@as(u8, 1) << @intFromEnum(k.kind)) & kinds != 0 and
+            (!unstamped or e.h.stamp != stamp) and
+            if (win != null and (k.kind == .text or k.kind == .tabs)) blk: {
+                const d: *Doc = @ptrFromInt(k.owner);
+                break :blk ax.alive(d) and d.win == win.?;
+            } else k.owner == owner;
+        if (gone) {
             if (dead.append(gpa, e.h.obj)) |_| {
-                if (e.key.kind == .text and e.key.owner == text_cache.owner and text_cache.str != null) {
+                if (k.kind == .text and k.owner == text_cache.owner and text_cache.str != null) {
                     msg(void, text_cache.str, "release", .{});
                     text_cache = .{};
                 }
@@ -271,13 +258,13 @@ fn newElement(kind: Kind, owner: usize, key: u64, parent: Id) Id {
 
 fn element(kind: Kind, owner: usize, key: u64, parent: Id) Id {
     const k: Key = .{ .kind = kind, .owner = owner, .key = key };
-    if (find(k)) |h| {
+    if (findIn(held.items, k)) |h| {
         h.stamp = stamp;
         return h.obj;
     }
     const obj = newElement(kind, owner, key, parent);
     if (obj == null) return null;
-    held.insert(gpa, lowerBound(k), .{ .key = k, .h = .{ .obj = obj, .stamp = stamp } }) catch {
+    held.insert(gpa, lowerBoundIn(held.items, k), .{ .key = k, .h = .{ .obj = obj, .stamp = stamp } }) catch {
         msg(void, obj, "release", .{});
         return null;
     };
@@ -371,21 +358,7 @@ fn viewChildren(self: Id, _: Sel) callconv(.c) Id {
         if (ax.tabsShown(d)) add(list, tabsOf(d));
         add(list, textOf(d));
     }
-    sweep(struct {
-        w: *Win,
-        now: u32,
-        fn gone(s: @This(), k: Key, h: Held) bool {
-            if (h.stamp == s.now) return false;
-            return switch (k.kind) {
-                .outline => k.owner == @intFromPtr(s.w),
-                .text, .tabs => blk: {
-                    const d: *Doc = @ptrFromInt(k.owner);
-                    break :blk ax.alive(d) and d.win == s.w;
-                },
-                .tab, .row => false,
-            };
-        }
-    }{ .w = w, .now = stamp });
+    sweep(@intFromPtr(w), w, (1 << @intFromEnum(Kind.outline)) | (1 << @intFromEnum(Kind.text)) | (1 << @intFromEnum(Kind.tabs)), true);
     return list;
 }
 
@@ -454,18 +427,16 @@ fn toBytes(b: *buffer.Buffer, r: Range) [2]usize {
 /// An NSString of `s`, with each bad byte as U+FFFD so the units line up
 /// with `buffer.utf16Units`.
 pub fn nsText(s: []const u8) Id {
+    if (!std.mem.startsWith(u8, s, "\xEF\xBB\xBF") and std.unicode.utf8ValidateSlice(s)) return objc.str(s);
     var out: std.ArrayList(u16) = .empty;
     defer out.deinit(gpa);
     out.ensureTotalCapacity(gpa, s.len) catch return objc.str("");
+    var pair: [2]u16 = undefined;
     var i: usize = 0;
     while (i < s.len) {
-        const c = editor.decode(s, i);
-        if (c.cp >= 0x10000) {
-            const v = c.cp - 0x10000;
-            out.appendAssumeCapacity(@intCast(0xD800 + (v >> 10)));
-            out.appendAssumeCapacity(@intCast(0xDC00 + (v & 0x3FF)));
-        } else out.appendAssumeCapacity(@intCast(c.cp));
-        i += c.len;
+        const d = editor.decode(s, i);
+        out.appendSliceAssumeCapacity(objc.utf16(d.cp, &pair));
+        i += d.len;
     }
     return msg(Id, objc.class("NSString"), "stringWithCharacters:length:", .{ out.items.ptr, out.items.len });
 }
@@ -580,27 +551,25 @@ fn frameForRange(self: Id, _: Sel, r: Range) callconv(.c) Rect {
     return screen(d.win.view, .{ .x = tr.x, .y = a.y, .w = tr.w, .h = z.y + z.h - a.y });
 }
 
+fn charRange(d: *Doc, pos: usize) Range {
+    return toRange(&d.file.ed.buf, pos, editor.nextChar(d.file.ed.text(), pos));
+}
+
 /// The character under screen point `p`.
 fn rangeForPosition(self: Id, _: Sel, p: Point) callconv(.c) Range {
     const d = docOf(self) orelse return .{};
-    const t = d.file.ed.text();
-    const pos = ax.posAtPoint(d, fromScreen(d.win.view, p));
-    return toRange(&d.file.ed.buf, pos, editor.nextChar(t, pos));
+    return charRange(d, ax.posAtPoint(d, fromScreen(d.win.view, p)));
 }
 
 /// The whole character that unit `i` falls in.
 fn rangeForIndex(self: Id, _: Sel, i: isize) callconv(.c) Range {
     const d = docOf(self) orelse return .{};
-    const t = d.file.ed.text();
-    const pos = byteAt(&d.file.ed.buf, @intCast(@max(i, 0)));
-    return toRange(&d.file.ed.buf, pos, editor.nextChar(t, pos));
+    return charRange(d, byteAt(&d.file.ed.buf, @intCast(@max(i, 0))));
 }
 
 /// The text has one style for VoiceOver: all of it.
 fn styleRange(self: Id, _: Sel, _: isize) callconv(.c) Range {
-    const d = docOf(self) orelse return .{};
-    const b = &d.file.ed.buf;
-    return .{ .len = unitsTo(b, b.text.items.len) };
+    return .{ .len = @intCast(textCount(self, null)) };
 }
 
 fn textFocused(self: Id, _: Sel) callconv(.c) bool {
@@ -630,13 +599,7 @@ fn tabsChildren(self: Id, _: Sel) callconv(.c) Id {
     if (!ax.tabsShown(d)) return list;
     stamp +%= 1;
     for (0..ax.tabs(d)) |j| add(list, tabOf(d, ax.tabAtIndex(d, j)));
-    sweep(struct {
-        owner: usize,
-        now: u32,
-        fn gone(s: @This(), k: Key, h: Held) bool {
-            return k.kind == .tab and k.owner == s.owner and h.stamp != s.now;
-        }
-    }{ .owner = @intFromPtr(d), .now = stamp });
+    sweep(@intFromPtr(d), null, 1 << @intFromEnum(Kind.tab), true);
     return list;
 }
 
@@ -712,14 +675,8 @@ fn outlineChildren(self: Id, _: Sel) callconv(.c) Id {
             add(list, obj);
         }
     }
-    if (held.items.len > old_len) std.mem.sort(Entry, held.items, {}, entryBefore);
-    sweep(struct {
-        owner: usize,
-        now: u32,
-        fn gone(s: @This(), k: Key, h: Held) bool {
-            return k.kind == .row and k.owner == s.owner and h.stamp != s.now;
-        }
-    }{ .owner = owner, .now = stamp });
+    if (held.items.len > old_len) std.sort.heap(Entry, held.items, {}, entryBefore);
+    sweep(owner, null, 1 << @intFromEnum(Kind.row), true);
     return list;
 }
 

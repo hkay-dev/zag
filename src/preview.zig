@@ -4,9 +4,10 @@ const objc = @import("objc.zig");
 const settings = @import("settings.zig");
 const syntax = @import("syntax.zig");
 const view = @import("view.zig");
+const access = @import("access.zig");
 const Id = objc.Id;
 const msg = objc.msg;
-const Range = extern struct { loc: usize, len: usize };
+const Range = objc.Range;
 var window: Id = null;
 var text: Id = null;
 var target: Id = null;
@@ -23,13 +24,6 @@ var seen_id: u32 = std.math.maxInt(u32);
 var seen_changes: u64 = 0;
 /// The text last rendered, kept so a theme change still repaints after its tab closes.
 var source: Id = null;
-/// The editor's font (a PostScript name, "" for the system's monospaced font), size and line
-/// height. The preview's type scales with the size, and code uses the font.
-var face_buf: [128]u8 = undefined;
-var face_len: usize = 0;
-var ed_size: f64 = settings.default_size;
-var ed_spacing: f64 = default_spacing;
-const default_spacing = @as(settings.Settings, .{}).spacing;
 /// Fonts and paragraph styles don't depend on the theme, so each is made once and kept until
 /// the editor's typography changes.
 /// `fonts[block][traits]`: body, three heading sizes, mono; each with italic and bold added.
@@ -72,7 +66,7 @@ fn attr(s: Id, key: Id, value: Id, r: Range) void {
 }
 /// How much bigger than at the default size the editor's text is.
 fn scale() f64 {
-    return ed_size / settings.default_size;
+    return view.editorSize() / settings.default_size;
 }
 fn closed(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     msg(void, objc.class("NSObject"), "cancelPreviousPerformRequestsWithTarget:", .{target});
@@ -95,7 +89,7 @@ pub fn close(w: Id) void {
     if (owner == w) msg(void, window, "close", .{});
 }
 fn closeAction(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
-    close(owner);
+    msg(void, window, "close", .{});
 }
 /// File > Close Tab (⌘W) with the preview key: its delegate answers `closeTab:`, so the shortcut closes the window.
 fn closeTab(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
@@ -103,21 +97,13 @@ fn closeTab(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
 }
 /// Edit > Find (⌘F), Find Next (⌘G) and Find Previous (⇧⌘G) with the preview key: the window's
 /// delegate answers them and hands them to the text view's find bar.
-fn finder(tag: isize) void {
+fn findAction(_: Id, sel: objc.Sel, _: Id) callconv(.c) void {
     if (text == null) return;
+    const tag: isize = if (sel == objc.sel_registerName("findText:")) 1 else if (sel == objc.sel_registerName("findNext:")) 2 else 3;
     const item = objc.new("NSMenuItem");
     defer msg(void, item, "release", .{});
     msg(void, item, "setTag:", .{tag});
     msg(void, text, "performFindPanelAction:", .{item});
-}
-fn findText(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
-    finder(1);
-}
-fn findNext(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
-    finder(2);
-}
-fn findPrevious(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
-    finder(3);
 }
 /// Tab `id` was saved under a new path.
 pub fn rename(id: u32, new: []const u8) void {
@@ -160,25 +146,12 @@ pub fn update(d: anytype, th: *const settings.Theme) void {
     // `later` cancels the render already waiting, so a burst of typing renders once.
     objc.later(target, "render:", null, 0.15);
 }
-/// The editor's font (a PostScript name, "" for the system's monospaced font), size and line
-/// height changed: the preview's headings, body and code scale with them.
-pub fn setTypography(name: []const u8, size: f64, spacing: f64) void {
-    const n = @min(name.len, face_buf.len);
-    if (size == ed_size and spacing == ed_spacing and std.mem.eql(u8, face_buf[0..face_len], name[0..n])) return;
-    @memcpy(face_buf[0..n], name[0..n]);
-    face_len = n;
-    ed_size = size;
-    ed_spacing = spacing;
-    for (&fonts) |*row| {
-        for (row) |*f| {
-            if (f.* != null) msg(void, f.*, "release", .{});
-            f.* = null;
-        }
-    }
-    for (&styles) |*s| {
-        if (s.* != null) msg(void, s.*, "release", .{});
-        s.* = null;
-    }
+/// The editor's font, size or line height changed: the preview's headings, body and code scale with them.
+pub fn fontChanged() void {
+    for (fonts) |row| for (row) |f| msg(void, f, "release", .{});
+    for (styles) |s| msg(void, s, "release", .{});
+    fonts = @splat(@splat(null));
+    styles = @splat(null);
     if (window == null) return;
     resized(null, null, null);
     objc.later(target, "render:", null, 0.15);
@@ -202,9 +175,9 @@ pub fn toggle(d: anytype, th: *const settings.Theme) void {
         c.method("windowDidResize:", @ptrCast(&resized), "v@:@");
         c.method("markdownPreview:", @ptrCast(&closeAction), "v@:@");
         c.method("closeTab:", @ptrCast(&closeTab), "v@:@");
-        c.method("findText:", @ptrCast(&findText), "v@:@");
-        c.method("findNext:", @ptrCast(&findNext), "v@:@");
-        c.method("findPrevious:", @ptrCast(&findPrevious), "v@:@");
+        c.method("findText:", @ptrCast(&findAction), "v@:@");
+        c.method("findNext:", @ptrCast(&findAction), "v@:@");
+        c.method("findPrevious:", @ptrCast(&findAction), "v@:@");
         c.method("textView:clickedOnLink:atIndex:", @ptrCast(&clicked), "B@:@@Q");
         target = msg(Id, msg(Id, c.finish(), "alloc", .{}), "init", .{});
         const t = objc.ClassBuilder.begin("NSTextView", "ZagPreviewText");
@@ -246,14 +219,6 @@ pub fn toggle(d: anytype, th: *const settings.Theme) void {
     render(null, null, null);
     msg(void, window, "orderFront:", .{@as(Id, null)});
 }
-/// The editor's font at `size`, or the system's monospaced one.
-fn mono(size: f64) Id {
-    if (face_len > 0) {
-        const f = msg(Id, objc.class("NSFont"), "fontWithName:size:", .{ objc.str(face_buf[0..face_len]), size });
-        if (f != null) return f;
-    }
-    return msg(Id, objc.class("NSFont"), "monospacedSystemFontOfSize:weight:", .{ size, @as(f64, 0) });
-}
 /// The font for block kind `base` (0 body, 1 to 3 headings, 4 mono) with the italic (1) and bold (2) traits.
 fn font(base: usize, traits: usize) Id {
     const slot = &fonts[base][traits];
@@ -263,7 +228,7 @@ fn font(base: usize, traits: usize) Id {
         const f = switch (base) {
             0 => msg(Id, class, "systemFontOfSize:", .{15 * k}),
             1...3 => msg(Id, class, "systemFontOfSize:weight:", .{ k * @as(f64, if (base == 1) 26 else if (base == 2) 20 else 17), @as(f64, 0.3) }),
-            else => mono(ed_size),
+            else => view.editorFont(),
         };
         slot.* = msg(Id, if (traits == 0) f else msg(Id, msg(Id, objc.class("NSFontManager"), "sharedFontManager", .{}), "convertFont:toHaveTrait:", .{ f, traits }), "retain", .{});
     }
@@ -271,7 +236,8 @@ fn font(base: usize, traits: usize) Id {
 }
 /// Prose line height: 1.35 at the editor's default line height, following it up and down.
 fn lineHeight() f64 {
-    return std.math.clamp(1.35 * ed_spacing / default_spacing, 1.1, 2.2);
+    const default_spacing = @as(settings.Settings, .{}).spacing;
+    return std.math.clamp(1.35 * view.editorSpacing() / default_spacing, 1.1, 2.2);
 }
 /// The first-line and wrapped-line indents, unscaled, for style key `key`, before a code
 /// block's own padding.
@@ -355,27 +321,9 @@ fn note(kind: @FieldType(Deco, "kind"), id: usize, key: usize, start: usize, end
     decos[deco_n] = .{ .start = @intCast(start), .end = @intCast(end), .kind = kind, .id = id, .key = @intCast(key) };
     deco_n += 1;
 }
-/// A path syntax.forPath reads a fenced block's language from: "x.<ext>" for hint `hint`.
-fn langPath(hint: []const u8, buf: []u8) []const u8 {
-    const aliases = [_][2][]const u8{
-        .{ "python", "py" },     .{ "javascript", "js" }, .{ "typescript", "ts" }, .{ "rust", "rs" },
-        .{ "shell", "sh" },      .{ "console", "sh" },    .{ "ruby", "rb" },       .{ "golang", "go" },
-        .{ "c++", "cpp" },       .{ "objc", "m" },        .{ "kotlin", "kt" },     .{ "csharp", "cs" },
-        .{ "objective-c", "m" }, .{ "jsonc", "json" },
-    };
-    var low: [24]u8 = undefined;
-    if (hint.len > low.len) return "";
-    for (hint, 0..) |ch, j| low[j] = std.ascii.toLower(ch);
-    var ext: []const u8 = low[0..hint.len];
-    for (aliases) |a| {
-        if (std.mem.eql(u8, a[0], ext)) ext = a[1];
-    }
-    return std.fmt.bufPrint(buf, "x.{s}", .{ext}) catch "";
-}
 /// Colors a fenced code block's text by syntax.zig's lexer for the block's language `hint`.
 fn paint(part: Id, hint: Id, key_color: Id) void {
-    var buf: [32]u8 = undefined;
-    const lang = syntax.forPath(langPath(objc.utf8(hint), &buf));
+    const lang = syntax.forFence(objc.utf8(hint));
     const bytes = objc.utf8(msg(Id, part, "string", .{}));
     var kind_colors: [7]Id = undefined;
     for (0..7) |ki| kind_colors[ki] = color(theme.kinds[ki]);
@@ -407,28 +355,7 @@ fn paint(part: Id, hint: Id, key_color: Id) void {
 fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     if (view.previewText(seen_id)) |bytes| {
         msg(void, source, "release", .{});
-        source = null;
-        if (std.unicode.utf8ValidateSlice(bytes)) {
-            source = msg(Id, msg(Id, objc.class("NSData"), "dataWithBytes:length:", .{ bytes.ptr, bytes.len }), "retain", .{});
-        } else {
-            var clean: std.ArrayList(u8) = .empty;
-            defer clean.deinit(view.gpa);
-            clean.ensureTotalCapacity(view.gpa, bytes.len) catch {};
-            var j: usize = 0;
-            while (j < bytes.len) {
-                const n = std.unicode.utf8ByteSequenceLength(bytes[j]) catch 0;
-                if (n > 0 and j + n <= bytes.len) {
-                    if (std.unicode.utf8Decode(bytes[j .. j + n])) |_| {
-                        clean.appendSlice(view.gpa, bytes[j .. j + n]) catch return;
-                        j += n;
-                        continue;
-                    } else |_| {}
-                }
-                clean.appendSlice(view.gpa, "\u{FFFD}") catch return;
-                j += 1;
-            }
-            source = msg(Id, msg(Id, objc.class("NSData"), "dataWithBytes:length:", .{ clean.items.ptr, clean.items.len }), "retain", .{});
-        }
+        source = msg(Id, access.nsText(bytes), "retain", .{});
     }
     if (source == null) return;
     const options = objc.new("NSAttributedStringMarkdownParsingOptions");
@@ -436,7 +363,7 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     msg(void, options, "setInterpretedSyntax:", .{@as(isize, 0)});
     // Relative links resolve against the file's folder.
     const folder: Id = if (msg(usize, path, "length", .{}) == 0) null else msg(Id, objc.class("NSURL"), "fileURLWithPath:isDirectory:", .{ msg(Id, path, "stringByDeletingLastPathComponent", .{}), true });
-    const parsed = msg(Id, msg(Id, objc.class("NSAttributedString"), "alloc", .{}), "initWithMarkdown:options:baseURL:error:", .{ source, options, folder, @as(?*Id, null) });
+    const parsed = msg(Id, msg(Id, objc.class("NSAttributedString"), "alloc", .{}), "initWithMarkdownString:options:baseURL:error:", .{ source, options, folder, @as(?*Id, null) });
     defer msg(void, parsed, "release", .{});
     const out = objc.new("NSMutableAttributedString");
     defer msg(void, out, "release", .{});
@@ -658,11 +585,7 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
         fade = false;
     } else if (old_len > 0 and !msg(bool, old, "isEqualToString:", .{text_out})) {
         // New text crossfades in rather than jumping.
-        const t = msg(Id, objc.class("CATransition"), "animation", .{});
-        msg(void, t, "setType:", .{objc.str("fade")});
-        msg(void, t, "setDuration:", .{@as(f64, 0.12)});
-        msg(void, t, "setTimingFunction:", .{msg(Id, objc.class("CAMediaTimingFunction"), "functionWithName:", .{objc.str("easeOut")})});
-        msg(void, layer, "addAnimation:forKey:", .{ t, objc.str("render") });
+        msg(void, layer, "addAnimation:forKey:", .{ view.fadeAnim(0.12, "easeOut"), objc.str("render") });
     }
     msg(void, text, "setBackgroundColor:", .{color(theme.bg)});
     msg(void, window, "setBackgroundColor:", .{color(theme.bg)});
@@ -716,19 +639,11 @@ fn lineEdge(tlm: Id, tcs: Id, offset: usize, bottom: bool) ?f64 {
     const b = msg(objc.Rect, line, "typographicBounds", .{});
     return fr.y + b.y + (if (bottom) b.h else 0);
 }
-fn fill(ctx: Id, rgb: settings.Rgb, r: objc.Rect, radius: f64) void {
-    objc.CGContextSetRGBFillColor(ctx, rgb[0], rgb[1], rgb[2], 1);
-    if (radius <= 0 or r.w < 2 * radius or r.h < 2 * radius) return objc.CGContextFillRect(ctx, r);
-    const shape = objc.CGPathCreateWithRoundedRect(r, radius, radius, null);
-    objc.CGContextAddPath(ctx, shape);
-    objc.CGContextFillPath(ctx);
-    objc.CFRelease(shape.?);
-}
 /// Paints the background, then a bordered panel behind each code block, a bar beside each
 /// quote and a line through each rule.
 fn backdrop(self: Id, _: objc.Sel, dirty: objc.Rect) callconv(.c) void {
     const ctx = msg(Id, msg(Id, objc.class("NSGraphicsContext"), "currentContext", .{}), "CGContext", .{});
-    fill(ctx, theme.bg, dirty, 0);
+    view.pill(ctx, theme.bg, 1, dirty.x, dirty.y, dirty.w, dirty.h, 0);
     if (self != text) return;
     const tlm = msg(Id, self, "textLayoutManager", .{});
     const tcs = msg(Id, self, "textContentStorage", .{});
@@ -760,14 +675,11 @@ fn backdrop(self: Id, _: objc.Sel, dirty: objc.Rect) callconv(.c) void {
             .code => {
                 const x = left + indents(dc.key)[1] * k;
                 const box: objc.Rect = .{ .x = x, .y = top - 8 * k, .w = @max(0, right - x), .h = bottom - top + 16 * k };
-                fill(ctx, theme.rule, box, 6 * k);
-                fill(ctx, theme.panel, .{ .x = box.x + 1, .y = box.y + 1, .w = @max(0, box.w - 2), .h = @max(0, box.h - 2) }, 6 * k - 1);
+                view.pill(ctx, theme.rule, 1, box.x, box.y, box.w, box.h, 6 * k);
+                view.pill(ctx, theme.panel, 1, box.x + 1, box.y + 1, @max(0, box.w - 2), @max(0, box.h - 2), 6 * k - 1);
             },
-            .quote => {
-                const x = left + 6 * k;
-                fill(ctx, theme.muted, .{ .x = x, .y = top, .w = 3 * k, .h = bottom - top }, 1.5 * k);
-            },
-            .rule => fill(ctx, theme.rule, .{ .x = left, .y = @round((top + bottom) / 2), .w = @max(0, right - left), .h = 1 }, 0),
+            .quote => view.pill(ctx, theme.muted, 1, left + 6 * k, top, 3 * k, bottom - top, 1.5 * k),
+            .rule => view.pill(ctx, theme.rule, 1, left, @round((top + bottom) / 2), @max(0, right - left), 1, 0),
         }
     }
 }
