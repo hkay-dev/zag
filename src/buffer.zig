@@ -39,12 +39,7 @@ pub const Buffer = struct {
     wraps_from: usize = std.math.maxInt(usize),
 
     pub fn init(gpa: Allocator, bytes: []const u8) !Buffer {
-        var b: Buffer = .{};
-        errdefer b.deinit(gpa);
-        try b.text.ensureTotalCapacityPrecise(gpa, bytes.len);
-        b.text.appendSliceAssumeCapacity(bytes);
-        try b.fillStarts(gpa);
-        return b;
+        return initOwned(gpa, try gpa.dupe(u8, bytes));
     }
 
     /// Takes unconditional ownership of `bytes` and indexes its line starts.

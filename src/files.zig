@@ -84,10 +84,13 @@ pub fn writable(path: [:0]const u8) bool {
 /// Absolute path for `path`, following symlinks so a save lands on the real
 /// file. A file that doesn't exist yet is joined onto the current folder.
 pub fn absolute(gpa: Allocator, path: []const u8) ![:0]u8 {
-    var buf: [c.PATH_MAX]u8 = undefined;
-    const z = try gpa.dupeSentinel(u8, path, 0);
-    defer gpa.free(z);
-    if (c.realpath(z, &buf)) |p| return gpa.dupeSentinel(u8, std.mem.span(p), 0);
+    if (path.len <= c.PATH_MAX) {
+        var z: [c.PATH_MAX:0]u8 = undefined;
+        var buf: [c.PATH_MAX]u8 = undefined;
+        @memcpy(z[0..path.len], path);
+        z[path.len] = 0;
+        if (c.realpath(z[0..path.len :0], &buf)) |p| return gpa.dupeSentinel(u8, std.mem.span(p), 0);
+    }
     if (path.len > 0 and path[0] == '/') return gpa.dupeSentinel(u8, path, 0);
     const here = cwd(gpa) orelse return error.NoCwd;
     defer gpa.free(here);
@@ -100,8 +103,7 @@ pub fn isDir(path: [:0]const u8) bool {
 }
 
 pub fn exists(path: [:0]const u8) bool {
-    var st: c.Stat = undefined;
-    return c.stat(path, &st) == 0;
+    return stamp(path) != null;
 }
 
 /// Makes the folder that `path` goes in, and its parents.
@@ -123,12 +125,15 @@ pub fn makeParent(path: [:0]const u8) !void {
 /// When a file last changed and how big it is, to notice edits from other apps.
 pub const Stamp = struct { sec: i64, nsec: i64, size: i64 };
 
+pub fn stampOf(st: c.Stat) Stamp {
+    const m = st.mtime();
+    return .{ .sec = m.sec, .nsec = m.nsec, .size = st.size };
+}
+
 /// Null when the file doesn't exist.
 pub fn stamp(path: [:0]const u8) ?Stamp {
     var st: c.Stat = undefined;
-    if (c.stat(path, &st) != 0) return null;
-    const m = st.mtime();
-    return .{ .sec = m.sec, .nsec = m.nsec, .size = st.size };
+    return if (c.stat(path, &st) == 0) stampOf(st) else null;
 }
 
 pub fn cwd(gpa: Allocator) ?[]u8 {
@@ -154,14 +159,23 @@ fn entries(dir: [:0]const u8) usize {
 extern "c" fn setxattr(path: [*:0]const u8, name: [*:0]const u8, value: *const anyopaque, size: usize, position: u32, options: c_int) c_int;
 extern "c" fn getxattr(path: [*:0]const u8, name: [*:0]const u8, value: ?*anyopaque, size: usize, position: u32, options: c_int) isize;
 
-test "save replaces the text, keeps the file's mode and tags and leaves no temp file" {
-    var tmpl = "/tmp/ze-test-XXXXXX".*;
-    const dir = std.mem.span(mkdtemp(&tmpl).?);
-    defer _ = c.rmdir(dir);
-    var buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&buf, "{s}/run.sh", .{dir}, 0);
-    defer _ = c.unlink(path);
+const TestDir = struct {
+    dir: [19:0]u8 = "/tmp/ze-test-XXXXXX".*,
+    buf: [64]u8 = undefined,
+    fn file(d: *TestDir, name: []const u8) [:0]const u8 {
+        _ = mkdtemp(&d.dir).?;
+        return std.fmt.bufPrintSentinel(&d.buf, "{s}/{s}", .{ &d.dir, name }, 0) catch unreachable;
+    }
+    fn deinit(d: *TestDir) void {
+        _ = c.unlink(@ptrCast(&d.buf));
+        _ = c.rmdir(&d.dir);
+    }
+};
 
+test "save replaces the text, keeps the file's mode and tags and leaves no temp file" {
+    var tmp: TestDir = .{};
+    const path = tmp.file("run.sh");
+    defer tmp.deinit();
     const was = umask(0o022);
     defer _ = umask(was);
     try t.expectError(error.FileNotFound, read(t.allocator, path));
@@ -179,17 +193,13 @@ test "save replaces the text, keeps the file's mode and tags and leaves no temp 
     defer t.allocator.free(got);
     try t.expectEqualStrings("new text", got);
     try t.expectEqual(@as(c.mode_t, 0o755), modeOf(path));
-    try t.expectEqual(@as(usize, 1), entries(dir));
+    try t.expectEqual(@as(usize, 1), entries(&tmp.dir));
 }
 
 test "a new file takes the umask and a read-only file reads as not writable" {
-    var tmpl = "/tmp/ze-test-XXXXXX".*;
-    const dir = std.mem.span(mkdtemp(&tmpl).?);
-    defer _ = c.rmdir(dir);
-    var buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&buf, "{s}/secret.txt", .{dir}, 0);
-    defer _ = c.unlink(path);
-
+    var tmp: TestDir = .{};
+    const path = tmp.file("secret.txt");
+    defer tmp.deinit();
     const was = umask(0o077);
     defer _ = umask(was);
     try write(path, "x");
@@ -201,13 +211,10 @@ test "a new file takes the umask and a read-only file reads as not writable" {
 extern "c" fn mkfifo(path: [*:0]const u8, mode: c.mode_t) c_int;
 
 test "read turns down a FIFO with no writer instead of blocking" {
-    var tmpl = "/tmp/ze-test-XXXXXX".*;
-    const dir = std.mem.span(mkdtemp(&tmpl).?);
-    defer _ = c.rmdir(dir);
-    var buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&buf, "{s}/pipe", .{dir}, 0);
+    var tmp: TestDir = .{};
+    const path = tmp.file("pipe");
+    defer tmp.deinit();
     try t.expectEqual(@as(c_int, 0), mkfifo(path, 0o644));
-    defer _ = c.unlink(path);
     try t.expectError(error.NotAFile, read(t.allocator, path));
     try t.expectError(error.NotAFile, read(t.allocator, "/dev/zero"));
 }

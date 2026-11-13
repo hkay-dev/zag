@@ -34,8 +34,7 @@ pub fn start() void {
     c.method("begin:", @ptrCast(&begin), "v@:@");
     c.method("run:", @ptrCast(&run), "v@:@");
     _ = c.finish();
-    const b = objc.new("ZeBench");
-    msg(void, b, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("begin:"), @as(Id, null), @as(f64, 0) });
+    objc.later(objc.new("ZeBench"), "begin:", null, 0);
 }
 
 /// Right after launch: open the files, size the window and draw it once,
@@ -52,7 +51,7 @@ fn begin(self: Id, _: Sel, _: Id) callconv(.c) void {
     put("launch_ms", (wallNow() - procStart()) * 1000);
     memory("launch_mb", "launch_peak_mb");
     visible();
-    msg(void, self, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("run:"), @as(Id, null), @as(f64, 1.5) });
+    objc.later(self, "run:", null, 1.5);
 }
 
 /// 1 when any of the window shows on screen, 0 when other windows cover it
@@ -109,7 +108,7 @@ fn run(_: Id, _: Sel, _: Id) callconv(.c) void {
     memory("mem_tab_mb", "peak_tab_mb");
     for (0..20) |_| {
         view.stepTab(view.keyDoc().?, 1);
-        for (0..12) |_| step("anim_frame_ms", false, tick, .{});
+        for (0..12) |_| step("anim_frame_ms", false, send, .{"tick:"});
     }
     settle();
     memory("mem_anim_mb", "peak_anim_mb");
@@ -118,7 +117,7 @@ fn run(_: Id, _: Sel, _: Id) callconv(.c) void {
 
     // The command palette: open it, filter it a letter at a time, close it.
     for (0..20) |_| {
-        step("palette_ms", false, palette, .{});
+        step("palette_ms", false, send, .{"commandPalette:"});
         for ([_][]const u8{ "s", "p", "l", "i", "t" }) |ch| step("palette_ms", false, insert, .{ch});
         step("palette_ms", false, command, .{"cancelOperation:"});
         settle();
@@ -162,8 +161,12 @@ fn step(comptime metric: []const u8, comptime full: bool, comptime f: anytype, a
     const t0 = threadCpu();
     @call(.auto, f, args);
     if (full) msg(void, v, "setNeedsDisplay:", .{true});
+    finishFrame(pool, metric, t0);
+}
+
+fn finishFrame(pool: ?*anyopaque, comptime metric: ?[]const u8, t0: f64) void {
     msg(void, v, "displayIfNeeded", .{});
-    put(metric, (threadCpu() - t0) * 1000);
+    if (metric) |m| put(m, (threadCpu() - t0) * 1000);
     msg(void, objc.class("CATransaction"), "flush", .{});
     objc.objc_autoreleasePoolPop(pool);
 }
@@ -175,13 +178,8 @@ fn threadCpu() f64 {
 
 fn nothing() void {}
 
-/// What the display link does each frame.
-fn tick() void {
-    msg(void, v, "tick:", .{@as(Id, null)});
-}
-
-fn palette() void {
-    msg(void, v, "commandPalette:", .{@as(Id, null)});
+fn send(sel: [*:0]const u8) void {
+    msg(void, v, sel, .{@as(Id, null)});
 }
 
 fn insert(s: []const u8) void {
@@ -208,10 +206,8 @@ fn settle() void {
     for (0..30) |_| {
         sleep(0.008);
         const pool = objc.objc_autoreleasePoolPush();
-        tick();
-        msg(void, v, "displayIfNeeded", .{});
-        msg(void, objc.class("CATransaction"), "flush", .{});
-        objc.objc_autoreleasePoolPop(pool);
+        send("tick:");
+        finishFrame(pool, null, 0);
     }
 }
 
@@ -301,7 +297,7 @@ fn quickOpenSteps(big: []const u8) void {
     settle();
     const letters = [_][]const u8{ "m", "a", "i" };
     for (0..20) |_| {
-        step("quickopen_ms", false, quickOpen, .{});
+        step("quickopen_ms", false, send, .{"quickOpen:"});
         for (letters) |ch| step("quickopen_ms", false, insert, .{ch});
         step("quickopen_ms", false, command, .{"cancelOperation:"});
         settle();
@@ -310,25 +306,21 @@ fn quickOpenSteps(big: []const u8) void {
         // Wake up as the open step does, after the settling frames.
         settle();
         const t0 = threadCpu();
-        var f = finder.scan(view.gpa, big) catch return;
+        var f = finder.scan(view.gpa, big, false) catch return;
         put("quickopen_walk_ms", (threadCpu() - t0) * 1000);
         put("quickopen_files", @floatFromInt(f.paths.items.len));
         var picks: [10]usize = undefined;
         const t2 = threadCpu();
-        _ = finder.best(f.paths.items, "", &picks);
+        _ = finder.best(f.paths.items, "", &.{}, &picks, null);
         put("quickopen_score0_ms", (threadCpu() - t2) * 1000);
         for (1..letters.len + 1) |n| {
             const q = "mai"[0..n];
             const t1 = threadCpu();
-            _ = finder.best(f.paths.items, q, &picks);
+            _ = finder.best(f.paths.items, q, &.{}, &picks, null);
             put("quickopen_score_ms", (threadCpu() - t1) * 1000);
         }
         const t3 = threadCpu();
         f.deinit();
         put("quickopen_free_ms", (threadCpu() - t3) * 1000);
     }
-}
-
-fn quickOpen() void {
-    msg(void, v, "quickOpen:", .{@as(Id, null)});
 }

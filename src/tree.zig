@@ -70,8 +70,13 @@ pub const Tree = struct {
         var opened = false;
         var i: usize = 0;
         while (std.mem.indexOfScalarPos(u8, rel, i, '/')) |slash| : (i = slash + 1) {
-            if (!t.isOpen(rel[0..slash])) {
-                t.toggle(gpa, rel[0..slash]);
+            const s = rel[0..slash];
+            if (!t.isOpen(s)) {
+                const own = gpa.dupe(u8, s) catch continue;
+                t.open.append(gpa, own) catch {
+                    gpa.free(own);
+                    continue;
+                };
                 opened = true;
             }
         }
@@ -147,10 +152,7 @@ pub const Tree = struct {
             defer _ = c.closedir(dh);
             const fd = dirfd(dh);
             var st: c.Stat = undefined;
-            const stamp: ?files.Stamp = if (c.fstat(fd, &st) == 0) blk: {
-                const m = st.mtime();
-                break :blk .{ .sec = m.sec, .nsec = m.nsec, .size = st.size };
-            } else null;
+            const stamp: ?files.Stamp = if (c.fstat(fd, &st) == 0) files.stampOf(st) else null;
             try t.read.append(a, .{ .path = try a.dupeSentinel(u8, path.items, 0), .stamp = stamp });
             while (c.readdir(dh)) |ent| {
                 const name = ent.name[0..ent.namlen];
@@ -170,7 +172,7 @@ pub const Tree = struct {
             }
         }
         const len = path.items.len;
-        std.mem.sort(Entry, entries.items, {}, before);
+        std.sort.heap(Entry, entries.items, {}, before);
         for (entries.items) |e| {
             if (t.rows.items.len >= max_rows) {
                 t.truncated = true;

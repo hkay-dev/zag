@@ -93,7 +93,7 @@ fn bgRescanQuick(dir: []const u8, show_hidden: bool) void {
 
 fn bgRescanWork(ctx: ?*anyopaque) callconv(.c) void {
     const job: *QuickJob = @ptrCast(@alignCast(ctx orelse return));
-    job.files = finder.scanWithOptions(gpa, job.dir, job.show_hidden, &.{}) catch null;
+    job.files = finder.scan(gpa, job.dir, job.show_hidden) catch null;
     dispatch_async_f(&_dispatch_main_q, job, bgRescanDone);
 }
 
@@ -140,7 +140,7 @@ fn bgRescanDone(ctx: ?*anyopaque) callconv(.c) void {
 fn rescanQuick(dir: []const u8, _: ?*Doc) void {
     quick_gen +%= 1;
     if (quick) |*q| q.deinit();
-    quick = finder.scanWithOptions(gpa, dir, conf.show_hidden, &.{}) catch null;
+    quick = finder.scan(gpa, dir, conf.show_hidden) catch null;
     if (quick_root) |r| gpa.free(r);
     quick_root = if (quick != null) gpa.dupeSentinel(u8, dir, 0) catch null else null;
     quick_hidden = conf.show_hidden;
@@ -577,7 +577,7 @@ const Ink = struct {
             ct.col = col0;
         }
         while (i < to) {
-            const c = editor.cellsTab(s, i, col, k.tw);
+            const c = editor.cells(s, i, col, k.tw);
             const rel = col - col0;
             if (cut_out) |ct| if (rel <= ct.target) {
                 ct.byte = i;
@@ -1220,9 +1220,9 @@ fn rowSpan(l: []const u8, ls: usize, sg: Seg, m: [2]usize, ox: f64, skip: usize)
     if (m[0] > ls + l.len or m[1] <= ls) return null;
     const lo = std.math.clamp(@max(m[0], ls) - ls, sg.start, sg.end);
     const hi = std.math.clamp(@min(m[1], ls + l.len) - ls, sg.start, sg.end);
-    const col = editor.colOfTab(l, sg.start, sg.col, lo, sg.tw);
+    const col = editor.colOf(l, sg.start, sg.col, lo, sg.tw);
     const x0 = ox + (f(col - sg.col + sg.ind) - f(skip)) * cw;
-    return .{ .x0 = x0, .x1 = ox + (f(editor.colOfTab(l, lo, col, hi, sg.tw) - sg.col + sg.ind) - f(skip)) * cw, .lo = lo, .hi = hi, .col = col };
+    return .{ .x0 = x0, .x1 = ox + (f(editor.colOf(l, lo, col, hi, sg.tw) - sg.col + sg.ind) - f(skip)) * cw, .lo = lo, .hi = hi, .col = col };
 }
 
 /// Fills a row span, with a tail when the range runs on to the next line.
@@ -4729,23 +4729,10 @@ fn pickFiles(d: *Doc, fresh: bool) void {
     d.pick_t0 = CACurrentMediaTime();
     const q = d.prompt.items;
     const has_q = std.mem.trim(u8, q, " ").len > 0;
-    if (d.mode == .open) {
-        var boosts: [32]finder.Boost = undefined;
-        const b = quickBoosts(d, &boosts, q);
-        if (has_q) {
-            d.npicks = finder.bestCounted(names, q, b, &d.picks, &d.pmatches);
-        } else {
-            d.npicks = finder.bestWithBoost(names, q, &d.picks, b);
-            d.pmatches = names.len;
-        }
-    } else {
-        if (has_q) {
-            d.npicks = finder.bestCounted(names, q, &.{}, &d.picks, &d.pmatches);
-        } else {
-            d.npicks = finder.best(names, q, &d.picks);
-            d.pmatches = names.len;
-        }
-    }
+    var boosts: [32]finder.Boost = undefined;
+    const b: []const finder.Boost = if (d.mode == .open) quickBoosts(d, &boosts, q) else &.{};
+    d.pmatches = names.len;
+    d.npicks = finder.best(names, q, b, &d.picks, if (has_q) &d.pmatches else null);
     d.pick = 0;
     d.plist.snap(0);
 }
@@ -4922,7 +4909,7 @@ fn runCommand(_: Id, _: Sel, it: Id) callconv(.c) void {
 fn countFound(d: *Doc) void {
     const t = d.file.ed.text();
     const q = d.prompt.items;
-    d.found = editor.countMatchesWith(t, q, d.file.ed.sel()[0], find_opts);
+    d.found = editor.countMatches(t, q, d.file.ed.sel()[0], find_opts);
     d.found[0] += 1;
 }
 
@@ -5047,7 +5034,7 @@ fn promptChanged(d: *Doc) void {
         .find, .replace => if (fieldIndex(d) == 0) {
             d.stepped = false;
             const e = &d.file.ed;
-            if (!e.findWith(d.prompt.items, d.origin, false, find_opts)) e.select(d.origin, d.origin);
+            if (!e.find(d.prompt.items, d.origin, false, find_opts)) e.select(d.origin, d.origin);
             remember(d);
             countFound(d);
             center(d);
@@ -5177,7 +5164,7 @@ fn accept(d: *Doc) void {
             const e = &d.file.ed;
             const s = e.sel();
             const with = d.with.items;
-            const replaced = e.replaceOneWith(gpa, q, with, find_opts) catch false;
+            const replaced = e.replaceOne(gpa, q, with, find_opts) catch false;
             // Each replacement flashes where it went in.
             if (replaced) {
                 flashStart(d);
@@ -5226,7 +5213,7 @@ fn replaceAll(d: *Doc) void {
     remember(d);
     var spots: [max_flash][2]usize = undefined;
     const q = d.prompt.items;
-    const n = d.file.ed.replaceAllWith(gpa, q, d.with.items, &spots, find_opts) catch 0;
+    const n = d.file.ed.replaceAll(gpa, q, d.with.items, &spots, find_opts) catch 0;
     if (n > 0) {
         flashStart(d);
         for (spots[0..@min(n, spots.len)]) |sp| flashAdd(d, sp[0], sp[1]);
@@ -5242,7 +5229,7 @@ fn replaceAll(d: *Doc) void {
 /// and with it closed a note says where to. False when there's none.
 fn findStep(d: *Doc, q: []const u8, from: usize, back: bool) bool {
     const e = &d.file.ed;
-    if (!e.findWith(q, from, back, find_opts)) return false;
+    if (!e.find(q, from, back, find_opts)) return false;
     d.jumped = true;
     const p = e.sel()[0];
     if (if (back) p >= from else p < from) {
@@ -5311,7 +5298,7 @@ fn toggleFind(d: *Doc, which: u1) void {
     for (docs.items) |o| {
         if (o.mode != .find and o.mode != .replace) continue;
         const e = &o.file.ed;
-        if (o.prompt.items.len > 0 and !e.findWith(o.prompt.items, o.origin, false, find_opts)) e.select(o.origin, o.origin);
+        if (o.prompt.items.len > 0 and !e.find(o.prompt.items, o.origin, false, find_opts)) e.select(o.origin, o.origin);
         countFound(o);
         if (o == d) center(o);
         refresh(o);
@@ -5357,7 +5344,7 @@ fn fieldWord(t: []const u8, at: usize) [2]usize {
 /// The byte of field `i` nearest `x` in the pane, as the field last drew.
 fn fieldByte(d: *const Doc, i: u1, x: f64) usize {
     const t = if (i == 1) d.with.items else d.prompt.items;
-    return editor.byteAtCol(t, @max(0, f(d.pscroll[i]) + (x - d.pfx[i]) / cw));
+    return editor.byteAtCol(t, @max(0, f(d.pscroll[i]) + (x - d.pfx[i]) / cw), editor.default_tab_width);
 }
 
 /// A click on the prompt line: on a find pill it flips it; in a field it
@@ -5558,22 +5545,6 @@ fn rowsOf(d: *const Doc, l: []const u8, cols: usize) usize {
     return n;
 }
 
-/// `editor.rowEnd` with tab stops every `tw` columns: where the row of
-/// `line` from byte `start`, at column `col`, ends when `cols` cells fit.
-fn wrapEnd(line: []const u8, start: usize, col: usize, cols: usize, tw: usize) editor.RowEnd {
-    var i = start;
-    var c = col;
-    var brk: ?editor.RowEnd = null;
-    while (i < line.len) {
-        const x = editor.cellsTab(line, i, c, tw);
-        if (c + x.w > col + cols and i > start) return brk orelse .{ .end = i, .col = c };
-        c += x.w;
-        i += x.len;
-        if (line[i - 1] == ' ' or line[i - 1] == '\t') brk = .{ .end = i, .col = c };
-    }
-    return .{ .end = line.len, .col = c };
-}
-
 /// The leading indent of `l` in columns, or null when the line is blank.
 fn indentCols(l: []const u8, tw: usize) ?usize {
     var col: usize = 0;
@@ -5623,7 +5594,7 @@ fn segFrom(d: *const Doc, l: []const u8, s: Seg) Seg {
     if (!wrapping()) return .{ .end = l.len, .tw = tw };
     const cols = d.file.ed.buf.wraps_cols;
     const ind = if (s.k > 0) hangOf(l, cols, tw) else 0;
-    const r = wrapEnd(l, s.start, s.col, cols - ind, tw);
+    const r = editor.rowEnd(l, s.start, s.col, cols - ind, tw);
     return .{ .k = s.k, .start = s.start, .col = s.col, .end = r.end, .ecol = r.col, .tw = tw, .ind = ind };
 }
 
@@ -5719,7 +5690,7 @@ fn rowColOf(d: *const Doc, pos: usize) RowCol {
     const l = b.line(i);
     const p = @min(pos - b.lineStart(i), l.len);
     const s = segOf(d, l, p);
-    return .{ .row = rowOfLine(d, i) + s.k, .col = editor.colOfTab(l, s.start, s.col, p, s.tw) - s.col + s.ind };
+    return .{ .row = rowOfLine(d, i) + s.k, .col = editor.colOf(l, s.start, s.col, p, s.tw) - s.col + s.ind };
 }
 
 /// Up and down by screen rows, keeping the column.
@@ -5739,7 +5710,7 @@ fn byteAtRow(d: *const Doc, row: usize, x: f64) usize {
     const i = lineOfRow(d, row);
     const l = b.line(i);
     const s = segN(d, l, row - rowOfLine(d, i));
-    return b.lineStart(i) + std.math.clamp(editor.byteAtColTab(l, f(s.col) + @max(x - f(s.ind), 0), s.tw), s.start, caretEnd(l, s));
+    return b.lineStart(i) + std.math.clamp(editor.byteAtCol(l, f(s.col) + @max(x - f(s.ind), 0), s.tw), s.start, caretEnd(l, s));
 }
 
 /// ⌘← and ⌘→ while wrapped: the ends of the screen row. False on a line's
@@ -8163,7 +8134,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             if (fr[0] < ls or fr[0] > ls + l.len) continue;
             const p = fr[0] - ls;
             if (p < sg.start or (p >= sg.end and sg.end < l.len)) continue;
-            const x = ox + (f(editor.colOfTab(l, sg.start, sg.col, p, tw) - sg.col + sg.ind) - f(skip)) * cw;
+            const x = ox + (f(editor.colOf(l, sg.start, sg.col, p, tw) - sg.col + sg.ind) - f(skip)) * cw;
             pill(ctx, th.caret, @min(1, flash_a * 2), x - 1.25, y + 2, 2.5, lh - 4, 1.25);
         };
         if (br) |pair| for (pair) |p| {
@@ -8187,8 +8158,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
                 if (m_at >= sg.end) break;
                 const lo = @max(m_at, sg.start);
                 const hi = @min(m_at + fm.pills.len, sg.end);
-                const c0 = editor.colOfTab(l, at, col, lo, tw);
-                col = editor.colOfTab(l, lo, c0, hi, tw);
+                const c0 = editor.colOf(l, at, col, lo, tw);
+                col = editor.colOf(l, lo, c0, hi, tw);
                 at = hi;
                 if (c0 - sg.col > skip + cols) break;
                 if (col - sg.col + sg.ind + 1 >= skip and ls + m_at != s[0]) pill(ctx, th.match, match_alpha * m_a, ox + (f(c0 - sg.col + sg.ind) - f(skip)) * cw, y + 2, f(col - c0) * cw, lh - 4, 3);
@@ -8314,7 +8285,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         // A block or underline caret covers both cells of a wide character.
         const cl = b.line(b.lineOf(d.file.ed.cur));
         const cp = d.file.ed.cur - b.lineStart(b.lineOf(d.file.ed.cur));
-        d.caret_cells = if (cp < cl.len and cl[cp] != '\t') editor.cellsTab(cl, cp, 0, tw).w else 1;
+        d.caret_cells = if (cp < cl.len and cl[cp] != '\t') editor.cells(cl, cp, 0, tw).w else 1;
         // Every card shows its caret; only the one with the keys blinks solid.
         placeCaret(d, now, tx + f(here.col) * cw - 1, top_h + f(here.row) * lh + 2, true, spot, !d.closing, key);
         // A newly shown file's caret fades in with its text.
@@ -8768,8 +8739,8 @@ fn drawPrompt(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, ka: f64, 
     if (mode == .replace) {
         // Each field gets what it needs while both fit, else they share the room.
         const avail = room -| 7;
-        const need0 = editor.colOf(d.held.items, 0, 0, d.held.items.len) + 1;
-        const need1 = editor.colOf(d.held_with.items, 0, 0, d.held_with.items.len) + 1;
+        const need0 = editor.colOf(d.held.items, 0, 0, d.held.items.len, editor.default_tab_width) + 1;
+        const need1 = editor.colOf(d.held_with.items, 0, 0, d.held_with.items.len, editor.default_tab_width) + 1;
         cols[0] = @min(if (need0 + need1 <= avail or need0 <= avail / 2) need0 else if (need1 <= avail / 2) avail - need1 else avail / 2, avail);
         cols[1] = avail - cols[0];
         fx[1] = fx0 + f(cols[0] + 7) * cw;
@@ -8779,12 +8750,12 @@ fn drawPrompt(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, ka: f64, 
         for ([_]u1{ 0, 1 }) |i| {
             if (i == 1 and mode != .replace) break;
             const t = fieldAt(d, i).items;
-            const c = editor.colOf(t, 0, 0, d.pcur[i]);
+            const c = editor.colOf(t, 0, 0, d.pcur[i], editor.default_tab_width);
             const n = @max(cols[i], 1);
             var s = d.pscroll[i];
             if (c < s) s = c;
             if (c + 1 > s + n) s = c + 1 - n;
-            d.pscroll[i] = @min(s, (editor.colOf(t, 0, 0, t.len) + 1) -| n);
+            d.pscroll[i] = @min(s, (editor.colOf(t, 0, 0, t.len, editor.default_tab_width) + 1) -| n);
             d.pfx[i] = fx[i];
         }
     }
@@ -8796,8 +8767,8 @@ fn drawPrompt(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, ka: f64, 
         const r = fieldSel(d);
         const t = fieldAt(d, i).items;
         const s = d.pscroll[i];
-        const c0 = @max(editor.colOf(t, 0, 0, r[0]), s);
-        const c1 = @min(editor.colOf(t, 0, 0, r[1]), s + cols[i]);
+        const c0 = @max(editor.colOf(t, 0, 0, r[0], editor.default_tab_width), s);
+        const c1 = @min(editor.colOf(t, 0, 0, r[1], editor.default_tab_width), s + cols[i]);
         if (r[0] != r[1] and c1 > c0) {
             d.pband_x = fx[i] + f(c0 - s) * cw;
             d.pband_w = f(c1 - c0) * cw;
@@ -8824,7 +8795,7 @@ fn drawPrompt(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, ka: f64, 
     if (prompting) {
         const i = fieldIndex(d);
         const t = fieldAt(d, i).items;
-        const c = editor.colOf(t, 0, 0, d.pcur[i]);
+        const c = editor.colOf(t, 0, 0, d.pcur[i], editor.default_tab_width);
         placeCaret(d, now, fx[i] + f(c -| d.pscroll[i]) * cw, band_y + 8 + drop, false, .{ 1 + @as(usize, @intFromEnum(d.mode)) * 2 + i, c, d.pscroll[i] }, key, key);
     }
 }
@@ -11081,10 +11052,7 @@ fn parentsMenu(w: *Win) void {
         const at = objc.str(path);
         const it = menuItem(m, objc.utf8(msg(Id, fm, "displayNameAtPath:", .{at})), "sideParent:", "", 0);
         msg(void, it, "setTag:", .{n});
-        const img = msg(Id, msg(Id, ws, "iconForFile:", .{at}), "copy", .{});
-        msg(void, img, "setSize:", .{Point{ .x = 16, .y = 16 }});
-        msg(void, it, "setImage:", .{img});
-        msg(void, img, "release", .{});
+        setFileIcon(ws, it, at);
         if (path.len <= 1) break;
         path = std.fs.path.dirname(path) orelse break;
     }
@@ -11102,10 +11070,7 @@ fn parentsMenu(w: *Win) void {
         const it = menuItem(sub, objc.utf8(msg(Id, fm, "displayNameAtPath:", .{p})), "openRecentFolder:", "", 0);
         msg(void, it, "setRepresentedObject:", .{p});
         msg(void, it, "setToolTip:", .{p});
-        const img = msg(Id, msg(Id, ws, "iconForFile:", .{p}), "copy", .{});
-        msg(void, img, "setSize:", .{Point{ .x = 16, .y = 16 }});
-        msg(void, it, "setImage:", .{img});
-        msg(void, img, "release", .{});
+        setFileIcon(ws, it, p);
         shown += 1;
     }
     const recent = symbolItem(m, "Recent Folders", "", "clock");
@@ -11115,6 +11080,13 @@ fn parentsMenu(w: *Win) void {
     const hid = symbolItem(m, "Show Hidden Files", "toggleHidden:", "eye");
     msg(void, hid, "setState:", .{@as(isize, @intFromBool(conf.show_hidden))});
     _ = msg(bool, m, "popUpMenuPositioningItem:atLocation:inView:", .{ @as(Id, null), Point{ .x = 16, .y = listTop() }, w.view });
+}
+
+pub fn setFileIcon(ws: Id, item: Id, path: Id) void {
+    const img = msg(Id, msg(Id, ws, "iconForFile:", .{path}), "copy", .{});
+    msg(void, img, "setSize:", .{objc.Size{ .w = 16, .h = 16 }});
+    msg(void, item, "setImage:", .{img});
+    msg(void, img, "release", .{});
 }
 
 /// The folder name menu's Reveal in Finder.
@@ -11741,44 +11713,31 @@ fn comment(d: *Doc) void {
 fn formatJson(d: *Doc) void {
     if (d.mode != .edit) return;
     const e = &d.file.ed;
-    const t = e.text();
-    const r = if (e.hasSel()) e.sel() else [2]usize{ 0, t.len };
-    const ws = " \t\r\n";
-    const a = r[1] - std.mem.trimStart(u8, t[r[0]..r[1]], ws).len;
-    const z = r[0] + std.mem.trimEnd(u8, t[r[0]..r[1]], ws).len;
-    if (a >= z) return toast(d.win, if (e.hasSel()) "the selection has no JSON in it" else "no JSON to format");
-    const len0 = t.len;
-    if (e.formatJson(gpa) catch return) {
-        flashStart(d);
-        flashAdd(d, a, z + e.text().len - len0);
-        return reveal(d);
-    }
-    // Nothing changed, so the text and its offsets still hold.
-    const bad = jsonFault(t[a..z]);
-    const at = a + bad.at;
-    e.select(at, at);
-    center(d);
-    d.card_shake_t0 = CACurrentMediaTime();
-    const b = &e.buf;
-    const row = b.lineOf(at);
-    const col = codepoints(t[b.lineStart(row)..at]) + 1;
-    var buf: [96]u8 = undefined;
-    const c: u8 = if (at < z) t[at] else 0;
-    toast(d.win, if (bad.end)
-        std.fmt.bufPrint(&buf, "JSON ends too soon at line {d}, column {d}", .{ row + 1, col }) catch "not valid JSON"
-    else if (c > 0x20 and c < 0x7f)
-        std.fmt.bufPrint(&buf, "unexpected \"{c}\" in JSON at line {d}, column {d}", .{ c, row + 1, col }) catch "not valid JSON"
-    else
-        std.fmt.bufPrint(&buf, "JSON goes wrong at line {d}, column {d}", .{ row + 1, col }) catch "not valid JSON");
-}
-
-/// Where JSON text `s` first goes wrong, and whether it just ends too soon.
-fn jsonFault(s: []const u8) struct { at: usize, end: bool } {
-    var sc = std.json.Scanner.initCompleteInput(gpa, s);
-    defer sc.deinit();
-    while (true) {
-        const tok = sc.next() catch |err| return .{ .at = @min(sc.cursor, s.len), .end = err == error.UnexpectedEndOfInput };
-        if (tok == .end_of_document) return .{ .at = s.len, .end = true };
+    const had_sel = e.hasSel();
+    switch (e.formatJson(gpa) catch return) {
+        .empty => toast(d.win, if (had_sel) "the selection has no JSON in it" else "no JSON to format"),
+        .ok => |span| {
+            flashStart(d);
+            flashAdd(d, span[0], span[1]);
+            reveal(d);
+        },
+        .bad => |bad| {
+            const t = e.text();
+            e.select(bad.at, bad.at);
+            center(d);
+            d.card_shake_t0 = CACurrentMediaTime();
+            const b = &e.buf;
+            const row = b.lineOf(bad.at);
+            const col = codepoints(t[b.lineStart(row)..bad.at]) + 1;
+            var buf: [96]u8 = undefined;
+            const c: u8 = if (!bad.end and bad.at < t.len) t[bad.at] else 0;
+            toast(d.win, if (bad.end)
+                std.fmt.bufPrint(&buf, "JSON ends too soon at line {d}, column {d}", .{ row + 1, col }) catch "not valid JSON"
+            else if (c > 0x20 and c < 0x7f)
+                std.fmt.bufPrint(&buf, "unexpected \"{c}\" in JSON at line {d}, column {d}", .{ c, row + 1, col }) catch "not valid JSON"
+            else
+                std.fmt.bufPrint(&buf, "JSON goes wrong at line {d}, column {d}", .{ row + 1, col }) catch "not valid JSON");
+        },
     }
 }
 

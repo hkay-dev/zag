@@ -21,20 +21,9 @@ pub const Files = struct {
     }
 };
 
-/// Lists files under `root`, relative to it, leaving out dotfiles.
-pub fn scan(gpa: Allocator, root: []const u8) !Files {
-    return scanWithOptions(gpa, root, false, &.{});
-}
-
-const Options = struct {
-    include_hidden: bool,
-    extra_skips: []const []const u8,
-};
-
 /// Lists files under `root`, relative to it. `include_hidden` lists dotfiles
 /// and dot folders such as `.gitignore` and `.github/`, but never `.git`.
-/// `extra_skips` names more folders to leave out, on top of the built-in list.
-pub fn scanWithOptions(gpa: Allocator, root: []const u8, include_hidden: bool, extra_skips: []const []const u8) !Files {
+pub fn scan(gpa: Allocator, root: []const u8, include_hidden: bool) !Files {
     var f: Files = .{ .gpa = gpa, .arena = .init(gpa) };
     errdefer f.deinit();
     const root_z = try gpa.dupeSentinel(u8, root, 0);
@@ -43,8 +32,7 @@ pub fn scanWithOptions(gpa: Allocator, root: []const u8, include_hidden: bool, e
     if (root_fd < 0) return f;
     var rel: std.ArrayList(u8) = .empty;
     defer rel.deinit(gpa);
-    const opts: Options = .{ .include_hidden = include_hidden, .extra_skips = extra_skips };
-    try walk(&f, gpa, root_fd, &rel, isHome(root), &opts);
+    try walk(&f, gpa, root_fd, &rel, isHome(root), include_hidden);
     return f;
 }
 
@@ -55,7 +43,7 @@ fn isHome(root: []const u8) bool {
     return home.len > 1 and std.mem.eql(u8, std.mem.trimEnd(u8, root, "/"), std.mem.trimEnd(u8, home, "/"));
 }
 
-fn walk(f: *Files, gpa: Allocator, dir_fd: c.fd_t, rel: *std.ArrayList(u8), home: bool, opts: *const Options) !void {
+fn walk(f: *Files, gpa: Allocator, dir_fd: c.fd_t, rel: *std.ArrayList(u8), home: bool, include_hidden: bool) !void {
     const dir = c.fdopendir(dir_fd) orelse {
         _ = c.close(dir_fd);
         return;
@@ -66,16 +54,16 @@ fn walk(f: *Files, gpa: Allocator, dir_fd: c.fd_t, rel: *std.ArrayList(u8), home
     while (c.readdir(dir)) |ent| {
         if (f.paths.items.len >= max_files) return;
         const name = ent.name[0..ent.namlen];
-        if (name.len == 0 or isAlwaysSkipped(name) or (name[0] == '.' and !opts.include_hidden)) continue;
+        if (name.len == 0 or isAlwaysSkipped(name) or (name[0] == '.' and !include_hidden)) continue;
         const name_z: [*:0]const u8 = @ptrCast(&ent.name);
         const kind = if (ent.type == c.DT.UNKNOWN) typeOf(dir_fd, name_z, false) else ent.type;
         switch (kind) {
-            c.DT.DIR => if (!isSkipped(name, opts.extra_skips) and !(home and std.mem.eql(u8, name, "Library"))) {
+            c.DT.DIR => if (!isSkipped(name) and !(home and std.mem.eql(u8, name, "Library"))) {
                 rel.shrinkRetainingCapacity(len);
                 if (len > 0) try rel.append(gpa, '/');
                 try rel.appendSlice(gpa, name);
                 const sub_fd = c.openat(dir_fd, name_z, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true, .NOFOLLOW = true });
-                if (sub_fd >= 0) try walk(f, gpa, sub_fd, rel, false, opts);
+                if (sub_fd >= 0) try walk(f, gpa, sub_fd, rel, false, include_hidden);
             },
             c.DT.REG => try f.paths.append(gpa, try dupeRel(f.arena.allocator(), rel.items[0..len], name)),
             // A link to a folder isn't walked, so a link cycle can't fill the list.
@@ -111,9 +99,8 @@ fn isAlwaysSkipped(name: []const u8) bool {
     return std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..") or std.mem.eql(u8, name, ".git");
 }
 
-fn isSkipped(name: []const u8, extra: []const []const u8) bool {
+fn isSkipped(name: []const u8) bool {
     for (skip) |s| if (std.mem.eql(u8, s, name)) return true;
-    for (extra) |s| if (std.mem.eql(u8, s, name)) return true;
     return false;
 }
 
@@ -169,7 +156,7 @@ fn wordScore(path: []const u8, q: []const u8) ?i32 {
     return s;
 }
 
-/// An extra score for one path in `bestWithBoost`, such as an open tab or a
+/// An extra score for one path in `best`, such as an open tab or a
 /// recent file. `path` is compared with the scanned paths byte for byte.
 pub const Boost = struct {
     path: []const u8,
@@ -177,23 +164,11 @@ pub const Boost = struct {
     amount: i32,
 };
 
-/// Fills `out` (at most 32 long) with the indexes of the best matches, best first.
-pub fn best(paths: []const []const u8, q: []const u8, out: []usize) usize {
-    return bestWithBoost(paths, q, out, &.{});
-}
-
-/// Like `best`, but adds each matching `Boost` to a path's score, so open tabs
-/// and recent files come first when `q` is empty and rank higher when it matches.
-/// A boosted path still has to match `q`.
-pub fn bestWithBoost(paths: []const []const u8, q: []const u8, out: []usize, boosts: []const Boost) usize {
-    var dummy: usize = 0;
-    return bestCounted(paths, q, boosts, out, &dummy);
-}
-
-/// Like `bestWithBoost`, and sets `matched.*` to the total number of matching
-/// paths in `names` in the same pass.
-pub fn bestCounted(names: []const []const u8, q: []const u8, boosts: []const Boost, out: []usize, matched: *usize) usize {
-    matched.* = 0;
+/// Fills `out` (at most 32 long) with the indexes of the best matches in
+/// `paths`, best first, adding each matching `Boost` to a path's score (a
+/// boosted path still has to match `q`). When `matched` is non-null, sets
+/// `matched.*` to the total number of matching paths in the same pass.
+pub fn best(paths: []const []const u8, q: []const u8, boosts: []const Boost, out: []usize, matched: ?*usize) usize {
     var max_boost: i32 = 0;
     for (boosts, 0..) |b, bi| {
         if (b.amount <= 0) continue;
@@ -206,9 +181,10 @@ pub fn bestCounted(names: []const []const u8, q: []const u8, boosts: []const Boo
     var scores: [32]i32 = undefined;
     const cap = @min(out.len, scores.len);
     var n: usize = 0;
-    for (names, 0..) |p, i| {
+    var total: usize = 0;
+    for (paths, 0..) |p, i| {
         var s = score(p, q) orelse continue;
-        matched.* += 1;
+        total += 1;
         if (cap == 0) continue;
         if (n == cap and s +| max_boost <= scores[cap - 1]) continue;
         for (boosts) |b| {
@@ -226,6 +202,7 @@ pub fn bestCounted(names: []const []const u8, q: []const u8, boosts: []const Boo
         out[at] = i;
         scores[at] = s;
     }
+    if (matched) |m| m.* = total;
     return n;
 }
 
@@ -234,7 +211,7 @@ const t = std.testing;
 test "file name matches beat deep path matches" {
     const paths = [_][]const u8{ "src/editor/view_main.zig", "docs/main-notes.md", "src/main.zig", "README.md" };
     var out: [3]usize = undefined;
-    const n = best(&paths, "main", &out);
+    const n = best(&paths, "main", &.{}, &out, null);
     try t.expectEqual(@as(usize, 3), n);
     try t.expectEqualStrings("src/main.zig", paths[out[0]]);
     try t.expect(score("README.md", "main") == null);
@@ -255,22 +232,22 @@ test "camelCase humps and exact file names score higher" {
 test "boosts lift open files to the top" {
     const paths = [_][]const u8{ "a.zig", "b.zig", "c.zig" };
     var out: [3]usize = undefined;
-    const n = bestWithBoost(&paths, "", &out, &.{.{ .path = "c.zig", .amount = 1000 }});
+    const n = best(&paths, "", &.{.{ .path = "c.zig", .amount = 1000 }}, &out, null);
     try t.expectEqual(@as(usize, 3), n);
     try t.expectEqualStrings("c.zig", paths[out[0]]);
 }
 
-test "bestCounted counts all matches even beyond output capacity and skips below boost bound" {
+test "best counts all matches even beyond output capacity and skips below boost bound" {
     const paths = [_][]const u8{ "a.zig", "b.zig", "c.zig", "d.zig", "README.md" };
     var out: [2]usize = undefined;
     var matched: usize = 0;
-    const n = bestCounted(&paths, "zig", &.{.{ .path = "d.zig", .amount = 1000 }}, &out, &matched);
+    const n = best(&paths, "zig", &.{.{ .path = "d.zig", .amount = 1000 }}, &out, &matched);
     try t.expectEqual(@as(usize, 2), n);
     try t.expectEqual(@as(usize, 4), matched);
     try t.expectEqualStrings("d.zig", paths[out[0]]);
     try t.expectEqualStrings("a.zig", paths[out[1]]);
 
     var zero_out: [0]usize = undefined;
-    try t.expectEqual(@as(usize, 0), bestCounted(&paths, "zig", &.{}, &zero_out, &matched));
+    try t.expectEqual(@as(usize, 0), best(&paths, "zig", &.{}, &zero_out, &matched));
     try t.expectEqual(@as(usize, 4), matched);
 }

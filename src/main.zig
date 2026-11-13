@@ -118,10 +118,7 @@ fn fillRecent(_: Id, _: Sel, menu: Id) callconv(.c) void {
         const it = view.menuItem(menu, title, open_recent, "", 0);
         msg(void, it, "setRepresentedObject:", .{p});
         msg(void, it, "setToolTip:", .{p});
-        const img = msg(Id, msg(Id, ws, "iconForFile:", .{p}), "copy", .{});
-        msg(void, img, "setSize:", .{objc.Size{ .w = 16, .h = 16 }});
-        msg(void, it, "setImage:", .{img});
-        msg(void, img, "release", .{});
+        view.setFileIcon(ws, it, p);
     }
     if (n > 0) view.separator(menu);
     _ = view.menuItem(menu, "Clear Menu", if (n > 0) clear_recent else "noRecent:", "", 0);
@@ -175,8 +172,8 @@ pub fn main(init: std.process.Init.Minimal) void {
     d.method("validateMenuItem:", @ptrCast(&view.validate), "c@:@");
     d.method("menuNeedsUpdate:", @ptrCast(&fillRecent), "v@:@");
     d.method("contrastChanged:", @ptrCast(&view.contrastChanged), "v@:@");
-    const cls = d.finish();
-    const delegate = msg(Id, msg(Id, cls, "alloc", .{}), "init", .{});
+    _ = d.finish();
+    const delegate = objc.new("ZeApp");
     msg(void, nsapp, "setDelegate:", .{delegate});
     const notes = msg(Id, msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{}), "notificationCenter", .{});
     msg(void, notes, "addObserver:selector:name:object:", .{ delegate, objc.sel_registerName("contrastChanged:"), NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification, @as(Id, null) });
