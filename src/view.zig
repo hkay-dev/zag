@@ -184,21 +184,27 @@ fn heldRel(row: ?usize, gen: u32) ?[]u8 {
 fn rebuildRows() void {
     tree_stale = false;
     const r = root orelse return;
-    var kept: std.StringHashMapUnmanaged(usize) = .empty;
+    const Kept = struct { rel: []const u8, i: usize };
+    var kept: std.ArrayList(Kept) = .empty;
     defer kept.deinit(gpa);
     for (side_lines.items, 0..) |line, i| if (line.full != null) {
-        kept.put(gpa, tree.rows.items[i].rel, i) catch {
+        kept.append(gpa, .{ .rel = tree.rows.items[i].rel, .i = i }) catch {
             dropSideLines();
             return rebuildRows();
         };
     };
-    if (kept.count() == 0) {
+    if (kept.items.len == 0) {
         tree.rebuild(gpa, r);
         tree_gen +%= 1;
         dropSideLines();
         return;
     }
-    // The map borrows the old paths until every surviving line has moved.
+    std.sort.heap(Kept, kept.items, {}, struct {
+        fn lt(_: void, a: Kept, b: Kept) bool {
+            return std.mem.order(u8, a.rel, b.rel) == .lt;
+        }
+    }.lt);
+    // `kept` borrows the old paths until every surviving line has moved.
     var old_arena = tree.arena;
     defer old_arena.deinit();
     tree.arena = .init(gpa);
@@ -216,9 +222,20 @@ fn rebuildRows() void {
     side_lines.resize(gpa, tree.rows.items.len) catch return;
     @memset(side_lines.items, .{});
     for (tree.rows.items, side_lines.items) |row, *line| {
-        if (kept.get(row.rel)) |i| {
-            line.* = old_lines.items[i];
-            old_lines.items[i] = .{};
+        var lo: usize = 0;
+        var hi = kept.items.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            switch (std.mem.order(u8, row.rel, kept.items[mid].rel)) {
+                .lt => hi = mid,
+                .gt => lo = mid + 1,
+                .eq => {
+                    const i = kept.items[mid].i;
+                    line.* = old_lines.items[i];
+                    old_lines.items[i] = .{};
+                    break;
+                },
+            }
         }
     }
 }
@@ -1091,6 +1108,12 @@ fn hits(a: Rect, b: Rect) bool {
 const Mode = enum { edit, find, line, open, replace, command };
 const Drag = enum { char, word, line };
 
+fn copyTrunc(dst: []u8, src: []const u8) []const u8 {
+    const n = editor.charStart(src, @min(dst.len, src.len));
+    @memcpy(dst[0..n], src[0..n]);
+    return dst[0..n];
+}
+
 /// A file held by a card, on show or parked in another tab.
 const Page = struct {
     ed: Editor,
@@ -1144,9 +1167,7 @@ const Page = struct {
     fn rename(p: *Page) bool {
         if (!p.stale()) return false;
         var nb: [48]u8 = undefined;
-        const nm = if (nameRow(&p.ed) == null) "" else untitledName(&p.ed, &nb);
-        @memcpy(p.title[0..nm.len], nm);
-        p.title_len = nm.len;
+        p.title_len = copyTrunc(&p.title, if (nameRow(&p.ed) == null) "" else untitledName(&p.ed, &nb)).len;
         return true;
     }
 
@@ -1195,6 +1216,20 @@ fn newId() u32 {
     next_id += 1;
     return next_id;
 }
+
+const PromptEdit = struct {
+    pcur: [2]usize = .{ 0, 0 },
+    panc: [2]usize = .{ 0, 0 },
+    pscroll: [2]usize = .{ 0, 0 },
+    pdrag: bool = false,
+    pdrag_word: bool = false,
+    pdrag_from: [2]usize = .{ 0, 0 },
+    ptyping: bool = false,
+    hist_at: ?usize = null,
+    pband_w: f64 = 0,
+    pband_shown: bool = false,
+    phover: ?usize = null,
+};
 
 const Doc = struct {
     file: Page,
@@ -1394,33 +1429,14 @@ const Doc = struct {
     /// Find and replace: the replacement, and which field takes typing.
     with: std.ArrayList(u8) = .empty,
     which: u1 = 0,
-    /// Each prompt field's caret and anchor in bytes ([0] the search, line,
-    /// path or command, [1] the replacement), and how far it's scrolled
-    /// sideways, in columns.
-    pcur: [2]usize = .{ 0, 0 },
-    panc: [2]usize = .{ 0, 0 },
-    pscroll: [2]usize = .{ 0, 0 },
+    pe: PromptEdit = .{},
     /// Where each field's text starts in the pane, as last drawn, for clicks.
     pfx: [2]f64 = .{ 0, 0 },
-    /// The mouse went down in a field and is selecting, by words after a
-    /// double-click, from the word it went down on.
-    pdrag: bool = false,
-    pdrag_word: bool = false,
-    pdrag_from: [2]usize = .{ 0, 0 },
-    /// The fields' undo and redo steps, and whether the last edit was
-    /// typing, which the next letter joins.
     pundo: std.ArrayList(PromptStep) = .empty,
     predo: std.ArrayList(PromptStep) = .empty,
-    ptyping: bool = false,
-    /// Recent-query browsing with ↑ and ↓: how far back (an index into the
-    /// field's history), and what was typed before it began.
-    hist_at: ?usize = null,
     hist_draft: std.ArrayList(u8) = .empty,
-    /// The field's selection band as last drawn, for fading out: its left
-    /// edge and width, whether it was showing, and when it began to fade.
+    /// The field's selection band left edge and fade start time, as last drawn.
     pband_x: f64 = 0,
-    pband_w: f64 = 0,
-    pband_shown: bool = false,
     pband_t0: f64 = -1e9,
     /// The last find, for find next and previous.
     query: std.ArrayList(u8) = .empty,
@@ -1465,9 +1481,7 @@ const Doc = struct {
     /// past its ends; and where its first row's top drew in the pane.
     plist: Tween = .{ .dur = scroll_time },
     plist_top: f64 = 0,
-    /// The list row under the mouse, the row its highlight is on, and how
-    /// far that has faded in.
-    phover: ?usize = null,
+    /// The list row whose hover highlight is on, and how far it has faded in.
     phov_row: usize = 0,
     phov_t: Tween = .{ .dur = fade_time },
     /// The list shows menu commands (⌘K) rather than files.
@@ -1874,14 +1888,7 @@ pub fn openFile(path: []const u8) void {
 
 /// The first live card and tab holding `abs`.
 fn holder(abs: []const u8) ?TabRef {
-    for (docs.items) |d| {
-        if (d.closing) continue;
-        for (0..tabCount(d)) |j| {
-            const p = tabPage(d, j);
-            if (p.path != null and std.mem.eql(u8, p.path.?, abs)) return .{ .d = d, .j = j };
-        }
-    }
-    return null;
+    return copyOf(abs, null);
 }
 
 /// Brings `d`'s window forward with `d` as its focused card.
@@ -2182,10 +2189,12 @@ pub fn stepTab(d: *Doc, by: isize) void {
 }
 
 /// ⌘1 to ⌘8 show that tab, when there is one; ⌘9 the last.
-fn jumpTab(d: *Doc, i: usize) void {
+fn jumpTab(self: Id, _: Sel, sender: Id) callconv(.c) void {
+    const d = docOf(self) orelse return;
+    const i: usize = @intCast(msg(isize, sender, "tag", .{}));
     const n = tabCount(d);
-    if (i == 8) return switchTab(d, n - 1);
-    if (i < n) switchTab(d, i);
+    if (i == 8) switchTab(d, n - 1) else if (i < n) switchTab(d, i);
+    refresh(d);
 }
 
 /// ⌘T: an untitled file in a new tab right of the one on show, numbered
@@ -2687,14 +2696,18 @@ fn limitCursor(down: bool, low: bool) Id {
     return if (low) msg(Id, c, "resizeRightCursor", .{}) else msg(Id, c, "resizeLeftCursor", .{});
 }
 
-/// ⌘] and ⌘[: typing moves to the next or previous card, in layout order.
-fn stepCard(d: *Doc, by: isize) void {
+fn adjacentCard(d: *Doc, by: isize) ?*Doc {
     var list: [64]*Doc = undefined;
     const n = listPanes(d.win.cards, &list, 0);
-    if (n < 2) return;
-    const i = std.mem.indexOfScalar(*Doc, list[0..n], d) orelse return;
+    if (n < 2) return null;
+    const i = std.mem.indexOfScalar(*Doc, list[0..n], d) orelse return null;
     const ni: isize = @intCast(n);
-    focus(list[@intCast(@mod(@as(isize, @intCast(i)) + by, ni))]);
+    return list[@intCast(@mod(@as(isize, @intCast(i)) + by, ni))];
+}
+
+/// ⌘] and ⌘[: typing moves to the next or previous card, in layout order.
+fn stepCard(d: *Doc, by: isize) void {
+    if (adjacentCard(d, by)) |to| focus(to);
 }
 
 /// ⌥⌘ and an arrow: typing moves to the nearest card that way, the one
@@ -2785,15 +2798,7 @@ fn restoreShares(n: *Node, now: f64) bool {
 /// Move Tab to Next or Previous Card: the tab on show joins that card's
 /// tabs, after its active one.
 fn tabToCard(d: *Doc, by: isize) void {
-    var list: [64]*Doc = undefined;
-    const n = listPanes(d.win.cards, &list, 0);
-    if (n < 2) {
-        toast(d.win, "no other card");
-        return;
-    }
-    const i = std.mem.indexOfScalar(*Doc, list[0..n], d) orelse return;
-    const ni: isize = @intCast(n);
-    const to = list[@intCast(@mod(@as(isize, @intCast(i)) + by, ni))];
+    const to = adjacentCard(d, by) orelse return toast(d.win, "no other card");
     moveTab(d, d.at, .{ .card = to, .zone = .tabs, .k = to.at + 1 });
 }
 
@@ -3204,7 +3209,7 @@ fn save(d: *Doc, as: bool) bool {
 /// from `keep`, without asking: what it showed is gone from disk. A card's
 /// last tab folds the card away, or closes the window when it's the only card.
 fn dropCopies(keep: *Doc, abs: []const u8) void {
-    while (copyOf(keep, abs)) |h| {
+    while (copyOf(abs, keep)) |h| {
         const last = tabCount(h.d) == 1;
         var pg = takeTab(h.d, h.j) orelse return;
         pg.deinit();
@@ -3219,15 +3224,12 @@ fn dropCopies(keep: *Doc, abs: []const u8) void {
     }
 }
 
-/// The first live tab other than `keep`'s file on show that holds `abs`.
-fn copyOf(keep: *Doc, abs: []const u8) ?TabRef {
-    for (docs.items) |d| {
-        if (d.closing) continue;
-        for (0..tabCount(d)) |j| {
-            const p = tabPage(d, j);
-            if (p != &keep.file and p.path != null and std.mem.eql(u8, p.path.?, abs)) return .{ .d = d, .j = j };
-        }
-    }
+/// The first live tab holding `abs`, skipping `keep`'s active file when given.
+fn copyOf(abs: []const u8, keep: ?*Doc) ?TabRef {
+    for (docs.items) |d| if (!d.closing) for (0..tabCount(d)) |j| {
+        const p = tabPage(d, j);
+        if ((keep == null or p != &keep.?.file) and p.path != null and std.mem.eql(u8, p.path.?, abs)) return .{ .d = d, .j = j };
+    };
     return null;
 }
 
@@ -3237,29 +3239,22 @@ fn listed(rel: ?[]const u8) bool {
     return tree.isOpen(r) and tree.has(r);
 }
 
-pub fn openPanel() void {
+fn runOpenPanel(choose_files: bool, multiple: bool) void {
     const p = msg(Id, objc.class("NSOpenPanel"), "openPanel", .{});
     msg(void, p, "setCanChooseDirectories:", .{true});
-    msg(void, p, "setAllowsMultipleSelection:", .{true});
-    if (root) |r| msg(void, p, "setDirectoryURL:", .{msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(r)})});
+    msg(void, p, "setCanChooseFiles:", .{choose_files});
+    msg(void, p, "setAllowsMultipleSelection:", .{multiple});
+    if (root) |r| msg(void, p, "setDirectoryURL:", .{msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(if (choose_files) r else std.fs.path.dirname(r) orelse r)})});
     if (runModal(p) != 1) return;
     const urls = msg(Id, p, "URLs", .{});
     for (0..msg(usize, urls, "count", .{})) |i| {
         const path = objc.utf8(msg(Id, msg(Id, urls, "objectAtIndex:", .{i}), "path", .{}));
-        openFile(path);
+        if (choose_files) openFile(path) else return open(path, keyDoc());
     }
 }
 
-/// The sidebar header's Open Folder…: a folder for the sidebar.
-fn openFolderPanel() void {
-    const p = msg(Id, objc.class("NSOpenPanel"), "openPanel", .{});
-    msg(void, p, "setCanChooseDirectories:", .{true});
-    msg(void, p, "setCanChooseFiles:", .{false});
-    if (root) |r| msg(void, p, "setDirectoryURL:", .{msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(std.fs.path.dirname(r) orelse r)})});
-    if (runModal(p) != 1) return;
-    const urls = msg(Id, p, "URLs", .{});
-    if (msg(usize, urls, "count", .{}) == 0) return;
-    open(objc.utf8(msg(Id, msg(Id, urls, "objectAtIndex:", .{@as(usize, 0)}), "path", .{})), keyDoc());
+pub fn openPanel() void {
+    runOpenPanel(true, true);
 }
 
 /// File > Open Recent: the last files opened or saved, newest first.
@@ -3564,9 +3559,7 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
         if (!files.exists(z)) {
             if (!draft) {
                 gone_n += 1;
-                const nm = std.fs.path.basename(z);
-                gone_len = @min(nm.len, gone_name.len);
-                @memcpy(gone_name[0..gone_len], nm[0..gone_len]);
+                gone_len = copyTrunc(&gone_name, std.fs.path.basename(z)).len;
             }
             continue;
         }
@@ -3631,10 +3624,6 @@ fn movedDraft(p: []const u8, buf: []u8) ?[:0]const u8 {
     const old = "/Application Support/ze/Drafts/";
     const at = std.mem.indexOf(u8, p, old) orelse return null;
     return std.fmt.bufPrintSentinel(buf, "{s}/Application Support/zag/Drafts/{s}", .{ p[0..at], p[at + old.len ..] }, 0) catch null;
-}
-
-fn saveDraftsNow(_: Id, _: Sel, _: Id) callconv(.c) void {
-    saveDrafts();
 }
 
 /// Writes every untitled file that changed since its draft last did. One
@@ -3910,12 +3899,7 @@ fn showDiskCopy(d: *Doc, disk: []const u8) void {
     styleEditor(&ed);
     var pg: Page = .{ .ed = ed, .id = newId(), .lang = d.file.lang, .rise = true };
     const name = d.file.name();
-    const nm = std.fmt.bufPrint(&pg.title, "{s} (on disk)", .{name}) catch blk: {
-        const n = @min(name.len, pg.title.len);
-        @memcpy(pg.title[0..n], name[0..n]);
-        break :blk pg.title[0..n];
-    };
-    pg.title_len = nm.len;
+    pg.title_len = (std.fmt.bufPrint(&pg.title, "{s} (on disk)", .{name}) catch copyTrunc(&pg.title, name)).len;
     const to = (if (roomFor(d, false)) splitOff(d, false, false, false) else null) orelse d;
     putTab(to, pg, if (to == d) d.at + 1 else 0);
     focus(d);
@@ -4341,15 +4325,7 @@ fn startPrompt(d: *Doc, m: Mode) void {
     }
     d.mode = m;
     d.prompt.clearRetainingCapacity();
-    d.pband_shown = false;
-    d.pband_w = 0;
-    d.pscroll = .{ 0, 0 };
-    d.pcur = .{ 0, 0 };
-    d.panc = .{ 0, 0 };
-    d.hist_at = null;
-    d.ptyping = false;
-    d.pdrag = false;
-    d.phover = null;
+    d.pe = .{};
     dropSteps(&d.pundo);
     dropSteps(&d.predo);
     const was_palette = d.palette;
@@ -4375,7 +4351,7 @@ fn startPrompt(d: *Doc, m: Mode) void {
             }
             d.prompt.appendSlice(gpa, seed) catch {};
             // Both fields start selected, so typing replaces them.
-            d.pcur = .{ d.prompt.items.len, d.with.items.len };
+            d.pe.pcur = .{ d.prompt.items.len, d.with.items.len };
             d.origin = from;
             countFound(d);
         },
@@ -4591,23 +4567,9 @@ fn keysOf(a: std.mem.Allocator, it: Id) ![]const u8 {
 /// Return and Enter, the deletes, Escape, Space, the arrows and the page keys.
 fn keyGlyph(key: []const u8) ?[]const u8 {
     const glyphs = [_][2][]const u8{
-        .{ "\t", "⇥" },
-        .{ "\x19", "⇥" },
-        .{ "\r", "↩" },
-        .{ "\x03", "⌤" },
-        .{ "\x08", "⌫" },
-        .{ "\x7f", "⌫" },
-        .{ "\u{F728}", "⌦" },
-        .{ "\x1b", "⎋" },
-        .{ " ", "␣" },
-        .{ "\u{F700}", "↑" },
-        .{ "\u{F701}", "↓" },
-        .{ "\u{F702}", "←" },
-        .{ "\u{F703}", "→" },
-        .{ "\u{F729}", "↖" },
-        .{ "\u{F72B}", "↘" },
-        .{ "\u{F72C}", "⇞" },
-        .{ "\u{F72D}", "⇟" },
+        .{ "\t", "⇥" }, .{ "\x19", "⇥" }, .{ "\r", "↩" }, .{ "\x03", "⌤" }, .{ "\x08", "⌫" }, .{ "\x7f", "⌫" },
+        .{ "\u{F728}", "⌦" }, .{ "\x1b", "⎋" }, .{ " ", "␣" }, .{ "\u{F700}", "↑" }, .{ "\u{F701}", "↓" }, .{ "\u{F702}", "←" },
+        .{ "\u{F703}", "→" }, .{ "\u{F729}", "↖" }, .{ "\u{F72B}", "↘" }, .{ "\u{F72C}", "⇞" }, .{ "\u{F72D}", "⇟" },
     };
     for (glyphs) |g| if (std.mem.eql(u8, key, g[0])) return g[1];
     return null;
@@ -4656,15 +4618,15 @@ fn fieldAt(d: *Doc, i: u1) *std.ArrayList(u8) {
 /// The typing field's selection, low end first.
 fn fieldSel(d: *const Doc) [2]usize {
     const i = fieldIndex(d);
-    return .{ @min(d.panc[i], d.pcur[i]), @max(d.panc[i], d.pcur[i]) };
+    return .{ @min(d.pe.panc[i], d.pe.pcur[i]), @max(d.pe.panc[i], d.pe.pcur[i]) };
 }
 
 /// Moves the typing field's caret to `pos`; `extend` keeps the anchor.
 fn fieldTo(d: *Doc, pos: usize, extend: bool) void {
     const i = fieldIndex(d);
-    d.pcur[i] = @min(pos, fieldAt(d, i).items.len);
-    if (!extend) d.panc[i] = d.pcur[i];
-    d.ptyping = false;
+    d.pe.pcur[i] = @min(pos, fieldAt(d, i).items.len);
+    if (!extend) d.pe.panc[i] = d.pe.pcur[i];
+    d.pe.ptyping = false;
 }
 
 fn dropSteps(list: *std.ArrayList(PromptStep)) void {
@@ -4675,7 +4637,7 @@ fn dropSteps(list: *std.ArrayList(PromptStep)) void {
 /// The typing field as it is now, as an undo or redo step.
 fn stepNow(d: *Doc) ?PromptStep {
     const i = fieldIndex(d);
-    return .{ .which = i, .text = gpa.dupe(u8, fieldAt(d, i).items) catch return null, .anc = d.panc[i], .cur = d.pcur[i] };
+    return .{ .which = i, .text = gpa.dupe(u8, fieldAt(d, i).items) catch return null, .anc = d.pe.panc[i], .cur = d.pe.pcur[i] };
 }
 
 fn pushStep(list: *std.ArrayList(PromptStep), s: PromptStep) void {
@@ -4689,26 +4651,26 @@ fn fieldPut(d: *Doc, s: []const u8, typing: bool) void {
     const i = fieldIndex(d);
     const into = fieldAt(d, i);
     const r = fieldSel(d);
-    if (!(typing and d.ptyping and r[0] == r[1])) {
+    if (!(typing and d.pe.ptyping and r[0] == r[1])) {
         if (stepNow(d)) |st| pushStep(&d.pundo, st);
         dropSteps(&d.predo);
     }
     into.replaceRange(gpa, r[0], r[1] - r[0], s) catch return;
-    d.pcur[i] = r[0] + s.len;
-    d.panc[i] = d.pcur[i];
-    d.ptyping = typing;
-    d.hist_at = null;
+    d.pe.pcur[i] = r[0] + s.len;
+    d.pe.panc[i] = d.pe.pcur[i];
+    d.pe.ptyping = typing;
+    d.pe.hist_at = null;
     promptChanged(d);
 }
 
 /// Sets the typing field to `s` with the caret at its end, as one undo step.
 fn fieldSet(d: *Doc, s: []const u8) void {
     const i = fieldIndex(d);
-    d.panc[i] = 0;
-    d.pcur[i] = fieldAt(d, i).items.len;
-    const keep = d.hist_at;
+    d.pe.panc[i] = 0;
+    d.pe.pcur[i] = fieldAt(d, i).items.len;
+    const keep = d.pe.hist_at;
     fieldPut(d, s, false);
-    d.hist_at = keep;
+    d.pe.hist_at = keep;
 }
 
 /// ⌘Z (and ⇧⌘Z, `redo`) while a prompt is open steps its fields' typing
@@ -4723,10 +4685,10 @@ fn promptUndo(d: *Doc, redo: bool) void {
     const into = fieldAt(d, st.which);
     into.clearRetainingCapacity();
     into.appendSlice(gpa, st.text) catch {};
-    d.panc[st.which] = @min(st.anc, into.items.len);
-    d.pcur[st.which] = @min(st.cur, into.items.len);
-    d.ptyping = false;
-    d.hist_at = null;
+    d.pe.panc[st.which] = @min(st.anc, into.items.len);
+    d.pe.pcur[st.which] = @min(st.cur, into.items.len);
+    d.pe.ptyping = false;
+    d.pe.hist_at = null;
     promptChanged(d);
 }
 
@@ -4793,7 +4755,7 @@ fn noteQuery(h: usize, s: []const u8) void {
 
 /// Keeps what the prompt's fields hold in their histories, as it runs or closes.
 fn noteQueries(d: *Doc) void {
-    d.hist_at = null;
+    d.pe.hist_at = null;
     switch (d.mode) {
         .find => noteQuery(0, d.prompt.items),
         .replace => {
@@ -4812,14 +4774,14 @@ fn stepQuery(d: *Doc, older: bool) void {
     const n = h.items.len;
     if (n == 0) return;
     var at: usize = undefined;
-    if (d.hist_at) |i| {
+    if (d.pe.hist_at) |i| {
         if (older) {
             if (i == 0) return;
             at = i - 1;
         } else if (i + 1 < n) {
             at = i + 1;
         } else {
-            d.hist_at = null;
+            d.pe.hist_at = null;
             return fieldSet(d, d.hist_draft.items);
         }
     } else {
@@ -4833,7 +4795,7 @@ fn stepQuery(d: *Doc, older: bool) void {
             at -= 1;
         }
     }
-    d.hist_at = at;
+    d.pe.hist_at = at;
     fieldSet(d, h.items[at]);
 }
 
@@ -4989,6 +4951,11 @@ fn cancelPrompt(d: *Doc) void {
 
 const OpenHow = enum { here, tab, split };
 
+fn placeBeside(d: *Doc, path: [:0]const u8) void {
+    const zone: Zone = if (roomFor(d, false)) .right else if (roomFor(d, true)) .bottom else .tabs;
+    placeFile(d.win, path, .{ .card = d, .zone = zone, .k = d.at + 1 });
+}
+
 /// Opens quick open's pick: Return the usual way, ⌘Return in a new tab
 /// of this card, ⌥Return in a new card split off this one.
 fn openPick(d: *Doc, how: OpenHow) void {
@@ -5001,7 +4968,7 @@ fn openPick(d: *Doc, how: OpenHow) void {
     switch (how) {
         .here => open(path, d),
         .tab => placeFile(d.win, path, .{ .card = d, .zone = .tabs, .k = d.at + 1 }),
-        .split => placeFile(d.win, path, .{ .card = d, .zone = if (roomFor(d, false)) .right else if (roomFor(d, true)) .bottom else .tabs, .k = d.at + 1 }),
+        .split => placeBeside(d, path),
     }
 }
 
@@ -5060,7 +5027,7 @@ fn fieldWord(t: []const u8, at: usize) [2]usize {
 /// The byte of field `i` nearest `x` in the pane, as the field last drew.
 fn fieldByte(d: *const Doc, i: u1, x: f64) usize {
     const t = if (i == 1) d.with.items else d.prompt.items;
-    return editor.byteAtCol(t, @max(0, f(d.pscroll[i]) + (x - d.pfx[i]) / cw), editor.default_tab_width);
+    return editor.byteAtCol(t, @max(0, f(d.pe.pscroll[i]) + (x - d.pfx[i]) / cw), editor.default_tab_width);
 }
 
 /// A click on the prompt line: on a find pill it flips it; in a field it
@@ -5074,25 +5041,25 @@ fn promptDown(d: *Doc, p: Point, ev: Id) void {
     const i = fieldIndex(d);
     const t = fieldAt(d, i).items;
     const at = fieldByte(d, i, p.x);
-    d.pdrag = true;
-    d.pdrag_word = false;
-    d.hist_at = null;
+    d.pe.pdrag = true;
+    d.pe.pdrag_word = false;
+    d.pe.hist_at = null;
     switch (msg(isize, ev, "clickCount", .{})) {
         0, 1 => fieldTo(d, at, msg(usize, ev, "modifierFlags", .{}) & objc.shift_key != 0),
         2 => {
             const w = fieldWord(t, at);
-            d.pdrag_word = true;
-            d.pdrag_from = w;
-            d.panc[i] = w[0];
-            d.pcur[i] = w[1];
+            d.pe.pdrag_word = true;
+            d.pe.pdrag_from = w;
+            d.pe.panc[i] = w[0];
+            d.pe.pcur[i] = w[1];
         },
         else => {
-            d.panc[i] = 0;
-            d.pcur[i] = t.len;
-            d.pdrag = false;
+            d.pe.panc[i] = 0;
+            d.pe.pcur[i] = t.len;
+            d.pe.pdrag = false;
         },
     }
-    d.ptyping = false;
+    d.pe.ptyping = false;
     refresh(d);
 }
 
@@ -5100,22 +5067,22 @@ fn promptDown(d: *Doc, p: Point, ev: Id) void {
 /// after a double-click; past the field's ends it scrolls on.
 fn promptDrag(d: *Doc, p: Point) void {
     if (d.mode == .edit) {
-        d.pdrag = false;
+        d.pe.pdrag = false;
         return;
     }
     const i = fieldIndex(d);
     const t = fieldAt(d, i).items;
     const at = fieldByte(d, i, p.x);
-    if (d.pdrag_word) {
+    if (d.pe.pdrag_word) {
         const w = fieldWord(t, at);
-        if (w[0] < d.pdrag_from[0]) {
-            d.panc[i] = d.pdrag_from[1];
-            d.pcur[i] = w[0];
+        if (w[0] < d.pe.pdrag_from[0]) {
+            d.pe.panc[i] = d.pe.pdrag_from[1];
+            d.pe.pcur[i] = w[0];
         } else {
-            d.panc[i] = d.pdrag_from[0];
-            d.pcur[i] = @max(w[1], d.pdrag_from[1]);
+            d.pe.panc[i] = d.pe.pdrag_from[0];
+            d.pe.pcur[i] = @max(w[1], d.pe.pdrag_from[1]);
         }
-    } else d.pcur[i] = at;
+    } else d.pe.pcur[i] = at;
     refresh(d);
 }
 
@@ -5127,13 +5094,7 @@ fn oneOf(name: []const u8, comptime list: []const []const u8) bool {
 /// Key commands while the prompt is open: the field's caret, selection and
 /// deletes, ↑ and ↓ through the list's picks or the field's history, Tab
 /// between replace's fields, Return, ⌥Return and Escape.
-fn promptCommand(d: *Doc, full: []const u8) void {
-    var name = full;
-    var extend = false;
-    if (std.mem.indexOf(u8, name, "AndModifySelection")) |at| {
-        extend = true;
-        name = name[0..at];
-    }
+fn promptCommand(d: *Doc, name: []const u8, extend: bool) void {
     if (is(name, "insertNewline") or is(name, "insertLineBreak")) return accept(d);
     if (is(name, "insertNewlineIgnoringFieldEditor")) return switch (d.mode) {
         .replace => replaceAll(d),
@@ -5143,8 +5104,8 @@ fn promptCommand(d: *Doc, full: []const u8) void {
     if (is(name, "cancelOperation")) return cancelPrompt(d);
     if (d.mode == .replace and (is(name, "insertTab") or is(name, "insertBacktab"))) {
         d.which ^= 1;
-        d.ptyping = false;
-        d.hist_at = null;
+        d.pe.ptyping = false;
+        d.pe.hist_at = null;
         return;
     }
     if (listing(d) != null) {
@@ -5153,7 +5114,7 @@ fn promptCommand(d: *Doc, full: []const u8) void {
     } else if (is(name, "moveUp") or is(name, "moveDown")) return stepQuery(d, is(name, "moveUp"));
     const i = fieldIndex(d);
     const t = fieldAt(d, i).items;
-    const cur = d.pcur[i];
+    const cur = d.pe.pcur[i];
     const r = fieldSel(d);
     // An arrow without ⇧ collapses a selection to its side.
     if (oneOf(name, &.{ "moveLeft", "moveBackward" })) return fieldTo(d, if (r[0] != r[1] and !extend) r[0] else editor.prevCluster(t, cur), extend);
@@ -5164,25 +5125,23 @@ fn promptCommand(d: *Doc, full: []const u8) void {
     if (oneOf(name, &.{ "moveToEndOfLine", "moveToRightEndOfLine", "moveToEndOfParagraph", "moveParagraphForward", "moveToEndOfDocument", "scrollToEndOfDocument" })) return fieldTo(d, t.len, extend);
     // A delete takes the selection when there is one, else what its key reaches.
     if (!std.mem.startsWith(u8, name, "delete")) return;
-    var span = r;
-    if (r[0] == r[1]) {
-        if (oneOf(name, &.{ "deleteBackward", "deleteBackwardByDecomposingPreviousCharacter" })) {
-            span[0] = editor.prevCluster(t, cur);
-        } else if (is(name, "deleteWordBackward")) {
-            span[0] = editor.wordLeft(t, cur);
-        } else if (oneOf(name, &.{ "deleteToBeginningOfLine", "deleteToBeginningOfParagraph" })) {
-            span[0] = 0;
-        } else if (is(name, "deleteForward")) {
-            span[1] = editor.nextCluster(t, cur);
-        } else if (is(name, "deleteWordForward")) {
-            span[1] = wordEnd(t, cur);
-        } else if (oneOf(name, &.{ "deleteToEndOfLine", "deleteToEndOfParagraph" })) {
-            span[1] = t.len;
-        } else return;
-    }
+    const span: [2]usize = if (r[0] != r[1]) r else if (oneOf(name, &.{ "deleteBackward", "deleteBackwardByDecomposingPreviousCharacter" }))
+        .{ editor.prevCluster(t, cur), cur }
+    else if (is(name, "deleteWordBackward"))
+        .{ editor.wordLeft(t, cur), cur }
+    else if (oneOf(name, &.{ "deleteToBeginningOfLine", "deleteToBeginningOfParagraph" }))
+        .{ 0, cur }
+    else if (is(name, "deleteForward"))
+        .{ cur, editor.nextCluster(t, cur) }
+    else if (is(name, "deleteWordForward"))
+        .{ cur, wordEnd(t, cur) }
+    else if (oneOf(name, &.{ "deleteToEndOfLine", "deleteToEndOfParagraph" }))
+        .{ cur, t.len }
+    else
+        return;
     if (span[0] == span[1]) return;
-    d.panc[i] = span[0];
-    d.pcur[i] = span[1];
+    d.pe.panc[i] = span[0];
+    d.pe.pcur[i] = span[1];
     fieldPut(d, "", false);
 }
 
@@ -7965,7 +7924,7 @@ fn drawPanel(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, card
     if (closing and ph <= 0.5) {
         d.pick_live = false;
         d.pick_s.snap(d.pick_s.to);
-        d.phover = null;
+        d.pe.phover = null;
     }
     if (ph > 0.5 and (d.palette or quick != null)) {
         const px = card.x + 6;
@@ -7993,8 +7952,8 @@ fn drawPanel(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, card
             d.pick_live = true;
         }
         // The row under the mouse lights faintly, fading in and out.
-        if (d.phover) |h| d.phov_row = h;
-        d.phov_t.aim(if (d.phover != null and !closing) 1 else 0, now);
+        if (d.pe.phover) |h| d.phov_row = h;
+        d.phov_t.aim(if (d.pe.phover != null and !closing) 1 else 0, now);
         const hov_a = d.phov_t.at(now);
         if (hov_a > 0.01 and d.phov_row < d.npicks and d.phov_row != d.pick) pill(ctx, th.fg, (if (contrast) @as(f64, 0.1) else 0.05) * hov_a, px + 6, top + f(d.phov_row) * prow - scroll, pw - 12, prow, 6);
         // The first rows fade in a step apart; rows that changed under the
@@ -8089,8 +8048,7 @@ fn drawPrompt(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, ka: f64, 
             .open, .command => listTally(d, &buf),
             .edit => "",
         };
-        d.held_n = @min(tally.len, d.held_tally.len);
-        @memcpy(d.held_tally[0..d.held_n], tally[0..d.held_n]);
+        d.held_n = copyTrunc(&d.held_tally, tally).len;
         d.held_mode = d.mode;
         d.held_id = d.file.id;
         d.held_which = fieldIndex(d);
@@ -8101,7 +8059,7 @@ fn drawPrompt(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, ka: f64, 
     }
     const slide = d.pbar.at(now);
     if (!prompting and slide <= 0.002) {
-        d.pband_shown = false;
+        d.pe.pband_shown = false;
         return;
     }
     const drop = (1 - slide) * barH();
@@ -8184,59 +8142,53 @@ fn drawPrompt(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, ka: f64, 
         cols[1] = avail - cols[0];
         fx[1] = fx0 + f(cols[0] + 7) * cw;
     }
-    // A field scrolls sideways to keep its caret in view.
+    // A field scrolls sideways to keep its caret in view; its selection fades
+    // out over `fade_time` once typing or a click ends it, where it last was.
+    const active_i = fieldIndex(d);
+    var caret_col: usize = 0;
+    var sel_on = false;
     if (prompting) {
         for ([_]u1{ 0, 1 }) |i| {
             if (i == 1 and mode != .replace) break;
             const t = fieldAt(d, i).items;
-            const c = editor.colOf(t, 0, 0, d.pcur[i], editor.default_tab_width);
+            const c = editor.colOf(t, 0, 0, d.pe.pcur[i], editor.default_tab_width);
+            if (i == active_i) caret_col = c;
             const n = @max(cols[i], 1);
-            var s = d.pscroll[i];
+            var s = d.pe.pscroll[i];
             if (c < s) s = c;
             if (c + 1 > s + n) s = c + 1 - n;
-            d.pscroll[i] = @min(s, (editor.colOf(t, 0, 0, t.len, editor.default_tab_width) + 1) -| n);
+            d.pe.pscroll[i] = @min(s, (editor.colOf(t, 0, 0, t.len, editor.default_tab_width) + 1) -| n);
             d.pfx[i] = fx[i];
         }
-    }
-    // The field's selection, a prefill's included, fades out over
-    // `fade_time` once typing or a click ends it, where it last was.
-    var sel_on = false;
-    if (prompting) {
-        const i = fieldIndex(d);
         const r = fieldSel(d);
-        const t = fieldAt(d, i).items;
-        const s = d.pscroll[i];
+        const t = fieldAt(d, active_i).items;
+        const s = d.pe.pscroll[active_i];
         const c0 = @max(editor.colOf(t, 0, 0, r[0], editor.default_tab_width), s);
-        const c1 = @min(editor.colOf(t, 0, 0, r[1], editor.default_tab_width), s + cols[i]);
+        const c1 = @min(editor.colOf(t, 0, 0, r[1], editor.default_tab_width), s + cols[active_i]);
         if (r[0] != r[1] and c1 > c0) {
-            d.pband_x = fx[i] + f(c0 - s) * cw;
-            d.pband_w = f(c1 - c0) * cw;
+            d.pband_x = fx[active_i] + f(c0 - s) * cw;
+            d.pe.pband_w = f(c1 - c0) * cw;
             sel_on = true;
         }
     }
     if (sel_on) {
-        d.pband_shown = true;
-    } else if (d.pband_shown) {
-        d.pband_shown = false;
+        d.pe.pband_shown = true;
+    } else if (d.pe.pband_shown) {
+        d.pe.pband_shown = false;
         d.pband_t0 = now;
     }
-    const band_a = if (d.pband_shown) 1 else 1 - std.math.clamp((now - d.pband_t0) / fade_time, 0, 1);
-    if (band_a > 0 and d.pband_w > 0) {
+    const band_a = if (d.pe.pband_shown) 1 else 1 - std.math.clamp((now - d.pband_t0) / fade_time, 0, 1);
+    if (band_a > 0 and d.pe.pband_w > 0) {
         k.flush();
-        fillA(ctx, th.sel, band_a, d.pband_x + shake, band_y + 6, d.pband_w, lh);
+        fillA(ctx, th.sel, band_a, d.pband_x + shake, band_y + 6, d.pe.pband_w, lh);
     }
-    _ = k.text(d.held.items, null, th, ink, fx[0] + shake, ty, d.pscroll[0], cols[0]);
+    _ = k.text(d.held.items, null, th, ink, fx[0] + shake, ty, d.pe.pscroll[0], cols[0]);
     if (mode == .replace) {
         _ = k.text("with", null, th, if (which == 1) th.caret else th.muted, fx0 + f(cols[0] + 2) * cw + shake, ty, 0, 8);
-        _ = k.text(d.held_with.items, null, th, ink, fx[1] + shake, ty, d.pscroll[1], cols[1]);
+        _ = k.text(d.held_with.items, null, th, ink, fx[1] + shake, ty, d.pe.pscroll[1], cols[1]);
     }
     k.flush();
-    if (prompting) {
-        const i = fieldIndex(d);
-        const t = fieldAt(d, i).items;
-        const c = editor.colOf(t, 0, 0, d.pcur[i], editor.default_tab_width);
-        placeCaret(d, now, fx[i] + f(c -| d.pscroll[i]) * cw, band_y + 8 + drop, false, .{ 1 + @as(usize, @intFromEnum(d.mode)) * 2 + i, c, d.pscroll[i] }, key, key);
-    }
+    if (prompting) placeCaret(d, now, fx[active_i] + f(caret_col -| d.pe.pscroll[active_i]) * cw, band_y + 8 + drop, false, .{ 1 + @as(usize, @intFromEnum(d.mode)) * 2 + active_i, caret_col, d.pe.pscroll[active_i] }, key, key);
 }
 
 /// Quick open's and the palette's tally: "3 of 120 matches" while typing
@@ -8433,12 +8385,8 @@ fn runHint(d: *Doc, i: usize) void {
         .quick => startPrompt(d, .open),
         .command => startPrompt(d, .command),
         .open => openPanel(),
-        .recent => |j| {
-            const list = recentFiles();
-            if (j < msg(usize, list, "count", .{})) open(objc.utf8(msg(Id, list, "objectAtIndex:", .{@as(usize, j)})), d);
-        },
-        .folder => |j| {
-            const list = recentFolders();
+        .recent, .folder => |j| {
+            const list = switch (d.hints[i].act) { .recent => recentFiles(), else => recentFolders() };
             if (j < msg(usize, list, "count", .{})) open(objc.utf8(msg(Id, list, "objectAtIndex:", .{@as(usize, j)})), d);
         },
     }
@@ -9529,18 +9477,14 @@ const moves = [_]struct { []const u8, editor.Motion }{
 
 fn doCommand(self: Id, _: Sel, sel: Sel) callconv(.c) void {
     const d = docOf(self) orelse return;
-    var name: []const u8 = std.mem.span(objc.sel_getName(sel));
-    if (name.len > 0 and name[name.len - 1] == ':') name.len -= 1;
+    var base_name: []const u8 = std.mem.span(objc.sel_getName(sel));
+    if (base_name.len > 0 and base_name[base_name.len - 1] == ':') base_name.len -= 1;
+    const suffix = "AndModifySelection";
+    const extend = std.mem.endsWith(u8, base_name, suffix);
+    if (extend) base_name = base_name[0 .. base_name.len - suffix.len];
     if (d.mode != .edit) {
-        promptCommand(d, name);
-        return refresh(d);
-    }
-    var extend = false;
-    if (std.mem.indexOf(u8, name, "AndModifySelection")) |i| {
-        extend = true;
-        name = name[0..i];
-    }
-    if (edit(d, name, extend) catch true) reveal(d);
+        promptCommand(d, base_name, extend);
+    } else if (edit(d, base_name, extend) catch true) reveal(d);
     refresh(d);
 }
 
@@ -9562,16 +9506,10 @@ fn edit(d: *Doc, name: []const u8, extend: bool) !bool {
     };
     if (is(name, "deleteBackward") or is(name, "deleteBackwardByDecomposingPreviousCharacter")) {
         if (!(conf.pairs and try e.deletePair(gpa))) try e.deleteBack(gpa, .char);
-    } else if (is(name, "deleteWordBackward")) {
-        try e.deleteBack(gpa, .word);
-    } else if (is(name, "deleteToBeginningOfLine") or is(name, "deleteToBeginningOfParagraph")) {
-        try e.deleteBack(gpa, .line);
-    } else if (is(name, "deleteForward")) {
-        try e.deleteForward(gpa, .char);
-    } else if (is(name, "deleteWordForward")) {
-        try e.deleteForward(gpa, .word);
-    } else if (is(name, "deleteToEndOfLine") or is(name, "deleteToEndOfParagraph")) {
-        try e.deleteForward(gpa, .line);
+    } else if (is(name, "deleteWordBackward") or is(name, "deleteToBeginningOfLine") or is(name, "deleteToBeginningOfParagraph")) {
+        try e.deleteBack(gpa, if (is(name, "deleteWordBackward")) .word else .line);
+    } else if (is(name, "deleteForward") or is(name, "deleteWordForward") or is(name, "deleteToEndOfLine") or is(name, "deleteToEndOfParagraph")) {
+        try e.deleteForward(gpa, if (is(name, "deleteForward")) .char else if (is(name, "deleteWordForward")) .word else .line);
     } else if (is(name, "insertNewline") or is(name, "insertLineBreak") or is(name, "insertNewlineIgnoringFieldEditor")) {
         try e.newline(gpa);
     } else if (is(name, "insertTab")) {
@@ -9825,10 +9763,7 @@ fn nameDraft(d: *Doc, j: usize) void {
     if (!ax.alive(d)) return;
     const k = tabIndex(d, id) orelse return;
     const pg = tabPage(d, k);
-    var n = @min(nm.len, pg.title.len);
-    while (n < nm.len and n > 0 and nm[n] & 0xC0 == 0x80) n -= 1;
-    @memcpy(pg.title[0..n], nm[0..n]);
-    pg.title_len = n;
+    pg.title_len = copyTrunc(&pg.title, nm).len;
     pg.hand = true;
     if (slotOf(d, id)) |i| d.slots.items[i].drop();
     if (k == d.at) named(d);
@@ -9967,8 +9902,8 @@ fn hoverAt(w: *Win, p: Point) void {
             const r: usize = @intFromFloat(@max((lp.y - d.plist_top + d.plist.to) / prow, 0));
             if (r < d.npicks) row = r;
         }
-        if (row != d.phover) {
-            d.phover = row;
+        if (row != d.pe.phover) {
+            d.pe.phover = row;
             msg(void, w.view, "setNeedsDisplay:", .{true});
         }
         // The scroll bars show while the pointer nears the card's right
@@ -10092,7 +10027,7 @@ fn mouseUp(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
     letGo(w);
     w.sel_at = null;
-    w.focus.pdrag = false;
+    w.focus.pe.pdrag = false;
     if (w.focus.bar_drag != .none) {
         w.focus.bar_drag = .none;
         w.focus.bar_t0 = CACurrentMediaTime();
@@ -10138,7 +10073,7 @@ fn mouseDragged(self: Id, _: Sel, ev: Id) callconv(.c) void {
     }
     if (w.grab) |n| return dragGap(w, n, local(self, ev));
     if (w.focus.bar_drag != .none) return barTo(w.focus, inPane(w.focus, local(self, ev)), false);
-    if (w.focus.pdrag) return promptDrag(w.focus, inPane(w.focus, local(self, ev)));
+    if (w.focus.pe.pdrag) return promptDrag(w.focus, inPane(w.focus, local(self, ev)));
     if (w.side_down) return;
     dragText(w, local(self, ev));
 }
@@ -10527,11 +10462,6 @@ fn revealRoot(_: Id, _: Sel, _: Id) callconv(.c) void {
     if (root) |r| revealPath(r);
 }
 
-/// The folder name menu's Open Folder….
-fn openFolder(_: Id, _: Sel, _: Id) callconv(.c) void {
-    openFolderPanel();
-}
-
 /// A folder from the folder name menu's Recent Folders.
 fn openRecentFolder(_: Id, _: Sel, item: Id) callconv(.c) void {
     const p = objc.utf8(msg(Id, item, "representedObject", .{}));
@@ -10546,8 +10476,7 @@ fn openRecentFolder(_: Id, _: Sel, item: Id) callconv(.c) void {
 fn sideParent(_: Id, _: Sel, item: Id) callconv(.c) void {
     var path: []const u8 = root orelse return;
     for (0..@as(usize, @intCast(msg(isize, item, "tag", .{})))) |_| path = std.fs.path.dirname(path) orelse break;
-    if (!setMenuPath(path)) return;
-    revealInFinder(null, null, null);
+    revealPath(path);
 }
 
 fn setMenuPath(p: []const u8) bool {
@@ -10752,20 +10681,13 @@ fn splitTab(d: *Doc, j: usize, zone: Zone) void {
 /// Cancel stops there.
 fn closeAround(d: *Doc, at: usize, right: bool, left: bool) void {
     const id = tabPage(d, at).id;
-    while (right) {
+    for ([_]bool{ right, left }, 0..) |do, side| if (do) while (true) {
         const j = tabIndex(d, id) orelse return;
-        if (j + 1 >= tabCount(d)) break;
+        const kill = if (side == 0) (if (j + 1 < tabCount(d)) j + 1 else break) else if (j > 0) 0 else break;
         const n = tabCount(d);
-        closeTab(d, j + 1);
+        closeTab(d, kill);
         if (tabCount(d) == n) return;
-    }
-    while (left) {
-        const j = tabIndex(d, id) orelse return;
-        if (j == 0) break;
-        const n = tabCount(d);
-        closeTab(d, 0);
-        if (tabCount(d) == n) return;
-    }
+    };
     showTab(d, tabIndex(d, id) orelse return);
 }
 
@@ -10779,23 +10701,16 @@ fn duplicateTab(d: *Doc, j: usize) void {
     putTab(d, pg, j + 1);
 }
 
-fn openFromMenu(zone: Zone) void {
-    const w = menu_win orelse return;
-    const c = w.focus;
-    placeFile(w, menuFile(), .{ .card = c, .zone = zone, .k = c.at + 1 });
-}
-
 fn openInNewTab(_: Id, _: Sel, _: Id) callconv(.c) void {
-    openFromMenu(.tabs);
+    const w = menu_win orelse return;
+    placeFile(w, menuFile(), .{ .card = w.focus, .zone = .tabs, .k = w.focus.at + 1 });
 }
 
 /// Splits the focused card right, or down when it's too narrow, or opens a
 /// tab when it's too small for either.
 fn openInNewSplit(_: Id, _: Sel, _: Id) callconv(.c) void {
     const w = menu_win orelse return;
-    const c = w.focus;
-    const zone: Zone = if (roomFor(c, false)) .right else if (roomFor(c, true)) .bottom else .tabs;
-    openFromMenu(zone);
+    placeBeside(w.focus, menuFile());
 }
 
 fn openInNewWindow(_: Id, _: Sel, _: Id) callconv(.c) void {
@@ -10843,35 +10758,23 @@ fn failed(what: []const u8, path: []const u8) void {
     alert(what, std.fmt.bufPrint(&ib, "{s}.\n\n{s}", .{ osError(), path }) catch path);
 }
 
-/// The side menu's New File…: asks for a name, makes the file empty, and
-/// opens it in the focused card.
-fn sideNewFile(_: Id, _: Sel, _: Id) callconv(.c) void {
-    const w = menu_win orelse return;
+fn sideCreate(folder: bool) void {
+    const w = menu_win;
+    if (!folder and w == null) return;
     var db: [std.fs.max_path_bytes]u8 = undefined;
     const dir = db[0..menuFolder().len];
     @memcpy(dir, menuFolder());
     var ib: [300]u8 = undefined;
-    const name = askName("New File", std.fmt.bufPrint(&ib, "A new, empty file in {s}.", .{std.fs.path.basename(dir)}) catch "", "untitled.txt", "Create") orelse return;
+    const info = std.fmt.bufPrint(&ib, "{s} in {s}.", .{ if (folder) "A new folder" else "A new, empty file", std.fs.path.basename(dir) }) catch "";
+    const name = askName(if (folder) "New Folder" else "New File", info, if (folder) "untitled folder" else "untitled.txt", "Create") orelse return;
     var pb: [std.fs.max_path_bytes]u8 = undefined;
     const p = joinPath(&pb, dir, name) orelse return;
-    if (files.exists(p)) return alert("A file with that name is already there.", p);
-    files.write(p, "") catch return failed("Couldn't make the file.", p);
+    if (files.exists(p)) return alert(if (folder) "Something with that name is already there." else "A file with that name is already there.", p);
+    if (folder) {
+        if (std.c.mkdir(p, 0o755) != 0) return failed("Couldn't make the folder.", p);
+    } else files.write(p, "") catch return failed("Couldn't make the file.", p);
     sideChanged(p);
-    if (ax.winAlive(w)) open(p, w.focus);
-}
-
-/// The side menu's New Folder….
-fn sideNewFolder(_: Id, _: Sel, _: Id) callconv(.c) void {
-    var db: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = db[0..menuFolder().len];
-    @memcpy(dir, menuFolder());
-    var ib: [300]u8 = undefined;
-    const name = askName("New Folder", std.fmt.bufPrint(&ib, "A new folder in {s}.", .{std.fs.path.basename(dir)}) catch "", "untitled folder", "Create") orelse return;
-    var pb: [std.fs.max_path_bytes]u8 = undefined;
-    const p = joinPath(&pb, dir, name) orelse return;
-    if (files.exists(p)) return alert("Something with that name is already there.", p);
-    if (std.c.mkdir(p, 0o755) != 0) return failed("Couldn't make the folder.", p);
-    sideChanged(p);
+    if (!folder and ax.winAlive(w.?)) open(p, w.?.focus);
 }
 
 /// The side menu's Rename…: open tabs of the file, or of files in the
@@ -11040,14 +10943,13 @@ fn putClipboard(text: []const u8) void {
 }
 
 fn cut(d: *Doc) void {
+    copy(d);
     if (d.mode != .edit) {
         const r = fieldSel(d);
-        if (r[0] == r[1]) return;
-        putClipboard(field(d).items[r[0]..r[1]]);
-        return fieldPut(d, "", false);
+        if (r[0] != r[1]) fieldPut(d, "", false);
+        return;
     }
     if (!d.file.ed.hasSel()) return;
-    copy(d);
     d.file.ed.deleteSelection(gpa) catch {};
     // A bar flashes where the cut text was.
     flashStart(d);
@@ -11096,10 +10998,8 @@ fn paste(d: *Doc) void {
 
 fn selectAll(d: *Doc) void {
     if (d.mode == .edit) return d.file.ed.selectAll();
-    const i = fieldIndex(d);
-    d.panc[i] = 0;
-    d.pcur[i] = field(d).items.len;
-    d.ptyping = false;
+    d.pe.panc[fieldIndex(d)] = 0;
+    fieldTo(d, std.math.maxInt(usize), true);
 }
 
 fn stepHistory(d: *Doc, forward: bool) void {
@@ -11117,13 +11017,10 @@ fn closeActive(d: *Doc) void {
 }
 
 pub fn previewText(id: u32) ?[]const u8 {
-    for (docs.items) |d| {
-        if (d.closing) continue;
-        for (0..tabCount(d)) |j| {
-            const p = tabPage(d, j);
-            if (p.id == id) return p.ed.text();
-        }
-    }
+    for (docs.items) |d| if (!d.closing) for (0..tabCount(d)) |j| {
+        const p = tabPage(d, j);
+        if (p.id == id) return p.ed.text();
+    };
     return null;
 }
 
@@ -11276,8 +11173,7 @@ fn mergeWindows(d: *Doc) void {
         // Only blank cards are left, so closing asks nothing.
         msg(void, w.window, "close", .{});
     }
-    focus(d);
-    showWin(d.win.window);
+    front(d);
 }
 
 /// Window > Move Tab to New Window: the tab on show leaves for a window of
@@ -11444,15 +11340,7 @@ const menu_bar = .{
         .{ .title = "Show Next Tab", .sel = "nextTab:", .key = "}", .mods = objc.cmd_key, .hidden = true },
         .{ .title = "Show Previous Tab", .sel = "previousTab:", .key = "{", .mods = objc.cmd_key, .hidden = true },
         .{ .menu = "Go to Tab", .items = .{
-            .{ .title = "Tab 1", .sel = "showTab1:", .key = "1", .mods = objc.cmd_key, .to = .view, .run = jumpTab, .args = .{0} },
-            .{ .title = "Tab 2", .sel = "showTab2:", .key = "2", .mods = objc.cmd_key, .to = .view, .run = jumpTab, .args = .{1} },
-            .{ .title = "Tab 3", .sel = "showTab3:", .key = "3", .mods = objc.cmd_key, .to = .view, .run = jumpTab, .args = .{2} },
-            .{ .title = "Tab 4", .sel = "showTab4:", .key = "4", .mods = objc.cmd_key, .to = .view, .run = jumpTab, .args = .{3} },
-            .{ .title = "Tab 5", .sel = "showTab5:", .key = "5", .mods = objc.cmd_key, .to = .view, .run = jumpTab, .args = .{4} },
-            .{ .title = "Tab 6", .sel = "showTab6:", .key = "6", .mods = objc.cmd_key, .to = .view, .run = jumpTab, .args = .{5} },
-            .{ .title = "Tab 7", .sel = "showTab7:", .key = "7", .mods = objc.cmd_key, .to = .view, .run = jumpTab, .args = .{6} },
-            .{ .title = "Tab 8", .sel = "showTab8:", .key = "8", .mods = objc.cmd_key, .to = .view, .run = jumpTab, .args = .{7} },
-            .{ .title = "Last Tab", .sel = "showLastTab:", .key = "9", .mods = objc.cmd_key, .to = .view, .run = jumpTab, .args = .{8} },
+            .{ .tabs = true, .sel = "jumpTab:" },
         } },
         .{ .title = "Typewriter Scrolling", .sel = "toggleTypewriter:", .to = .app, .run = toggleTypewriter, .check = .typewriter, .grey = true },
         .{ .menu = "Focus", .items = .{
@@ -11537,6 +11425,11 @@ fn fillMenu(menu: Id, comptime entries: anytype, delegate: Id) void {
             inline for (e.titles, 0..) |title, i| _ = pick(menu, title, e.sel, i, pluck(isize, e, "indent", 0));
         } else if (@hasField(T, "langs")) {
             for (syntax.languages, 0..) |l, i| _ = pick(menu, l.name, e.sel, i, 0);
+        } else if (@hasField(T, "tabs")) {
+            inline for (0..9) |i| {
+                const it = menuItem(menu, if (i == 8) "Last Tab" else std.fmt.comptimePrint("Tab {d}", .{i + 1}), e.sel, std.fmt.comptimePrint("{d}", .{i + 1}), objc.cmd_key);
+                msg(void, it, "setTag:", .{@as(isize, i)});
+            }
         } else {
             const it = menuItem(menu, e.title, e.sel, pluck([]const u8, e, "key", ""), pluck(usize, e, "mods", 0));
             if (pluck(Target, e, "to", .system) == .fonts) {
@@ -11603,7 +11496,7 @@ fn ruleFor(comptime entries: anytype, name: []const u8) ?Rule {
         const T = @TypeOf(e);
         if (@hasField(T, "items")) {
             if (ruleFor(e.items, name)) |r| return r;
-        } else if (@hasField(T, "sel")) {
+        } else if (comptime (@hasField(T, "check") or @hasField(T, "grey"))) {
             if (std.mem.eql(u8, e.sel, name)) return .{ .check = pluck(?Check, e, "check", null), .grey = pluck(bool, e, "grey", false) };
         }
     }
@@ -11722,7 +11615,7 @@ pub fn setup() void {
     c.method("tick:", @ptrCast(&tick), "v@:@");
     c.method("holdRedraw:", @ptrCast(&holdRedraw), "v@:@");
     c.method("dragScroll:", @ptrCast(&dragScroll), "v@:@");
-    c.method("saveDrafts:", @ptrCast(&saveDraftsNow), "v@:@");
+    c.method("saveDrafts:", appAction(saveDrafts, .{}), "v@:@");
     c.method("changeFont:", @ptrCast(&changeFont), "v@:@");
     c.method("menuForEvent:", @ptrCast(&menuForEvent), "@@:@");
     c.method("openInNewWindow:", @ptrCast(&openInNewWindow), "v@:@");
@@ -11739,6 +11632,7 @@ pub fn setup() void {
     c.method("otherMouseDown:", @ptrCast(&otherMouseDown), "v@:@");
     c.method("endDissolve:", @ptrCast(&endDissolve), "v@:@");
     c.method("pickTab:", @ptrCast(&pickTab), "v@:@");
+    c.method("jumpTab:", @ptrCast(&jumpTab), "v@:@");
     c.method("pickLanguage:", @ptrCast(&pickLanguage), "v@:@");
     // The View menu's Language picks check the key card's language.
     c.method("validateMenuItem:", @ptrCast(&validate), "c@:@");
@@ -11748,10 +11642,10 @@ pub fn setup() void {
     c.method("copyPath:", @ptrCast(&copyPath), "v@:@");
     c.method("copyRelativePath:", @ptrCast(&copyRelativePath), "v@:@");
     c.method("revealRoot:", @ptrCast(&revealRoot), "v@:@");
-    c.method("openFolder:", @ptrCast(&openFolder), "v@:@");
+    c.method("openFolder:", appAction(runOpenPanel, .{ false, false }), "v@:@");
     c.method("openRecentFolder:", @ptrCast(&openRecentFolder), "v@:@");
-    c.method("sideNewFile:", @ptrCast(&sideNewFile), "v@:@");
-    c.method("sideNewFolder:", @ptrCast(&sideNewFolder), "v@:@");
+    c.method("sideNewFile:", appAction(sideCreate, .{false}), "v@:@");
+    c.method("sideNewFolder:", appAction(sideCreate, .{true}), "v@:@");
     c.method("sideRename:", @ptrCast(&sideRename), "v@:@");
     c.method("sideDuplicate:", @ptrCast(&sideDuplicate), "v@:@");
     c.method("sideTrash:", @ptrCast(&sideTrash), "v@:@");
