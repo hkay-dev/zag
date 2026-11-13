@@ -70,10 +70,29 @@ an animation acts at once: a closing folder keeps sliding and the click maps thr
   ease-out. The next key clears it.
 - Shake (no matches, refused split): `6 * sin(2 * pi * 3t) * (1 - t)` over 0.3 s. A card shake
   leaves the caret still (zig-editor#bdw5).
-- Prompt band (zig-editor#tdry): 0.14 s in, 0.12 s out, the words 30 ms behind. Closing keeps
-  drawing the last label and text held on the doc. Text layout uses the final height.
-- Tab switch: the text fades from 0.35 to 1 over 0.12 s with no rise, and the caret layer fades in
-  with it. Only a file freshly read from disk keeps the fade and rise.
+- Prompt band (zig-editor#tdry): 0.14 s in, 0.12 s out, the words 30 ms behind and rising 6 pt.
+  Closing draws the last label and text held on the doc. Text layout uses the final height.
+- Prompt edge: `edgeAt` eases the text's bottom edge with the band, 0.14 s up and 0.12 s down,
+  so the quick open list and the sideways scroll bar ride the band's top edge. Layout still reads
+  `bottom`, where the band ends up.
+- Tab switch: a switch the user asks for (a click, ⌃Tab, ⌘1) lays a snapshot of the old text
+  over the card and cross-dissolves it out over 0.12 s ease-in-out (`dissolveFrom`), with the
+  new tab at full strength under it. Other swaps, such as a closed tab's neighbor taking its
+  place, fade the text from 0.35 to 1 over 0.12 s with no rise, and the caret layer fades in with
+  it. Only a file freshly read from disk fades and rises.
+- Status strip: when what it says changes in kind (another tab, a selection, a language, indent
+  or line ending), the old line crossfades to the new over 0.12 s. The strip fades out under the
+  prompt band as it rises.
+- Notes (`toast`): fade and rise 6 pt in over 0.12 s, hold 2.0 s, fade out over 0.3 s. The hold
+  is a one-shot timer, not display link frames.
+- Find wrapped cue: "wrapped" crossfades over the tally for 1.2 s, in over 0.12 s and out over
+  the last 0.25 s.
+- Snapped split guide: 0.45 s. A tab ⌘T finds blank, and a card's ring after a tab drops into it,
+  pulse over 0.5 s.
+- Markdown preview (`preview.zig`): a re-render crossfades the new text in over 0.12 s ease-out
+  (a `CATransition` on the preview window's content layer); a theme change uses the editor's
+  `themeFade` instead. `preview.toggle` saves the window's frame under `ZagPreview`; ze saved it
+  under `ZePreview`, so the first opening after the rename places the window beside the editor.
 - Empty-window shortcut hint: fades in over 0.3 s after a 0.4 s delay, out over 0.12 s when the
   card stops being blank or a prompt opens.
 - Scroll bar: 0.08 s in, 0.25 s out. The 1 s hold is a one-shot timer (`holdRedraw:`), not display
