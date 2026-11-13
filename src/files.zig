@@ -37,13 +37,15 @@ pub fn read(gpa: Allocator, path: [:0]const u8) ![]u8 {
     return buf;
 }
 
-/// Writes a temp file beside `path`, syncs it, then renames it over `path`,
-/// so a crash mid-save leaves the old file whole. Keeps the file's mode,
+/// Writes a hidden temp file (`.name.ze-XXXXXX`) beside `path`, syncs it,
+/// then renames it over `path`, so a crash mid-save leaves the old file whole
+/// and the sidebar lists no leftover. Keeps the file's mode,
 /// extended attributes (Finder tags among them) and ACL; a new file gets
 /// 0666 less the umask, as `open` would give it.
 pub fn write(path: [:0]const u8, data: []const u8) !void {
-    var tmp_buf: [c.PATH_MAX + 16]u8 = undefined;
-    const tmp = try std.fmt.bufPrintSentinel(&tmp_buf, "{s}.ze-XXXXXX", .{path}, 0);
+    var tmp_buf: [c.PATH_MAX + 32]u8 = undefined;
+    const dir = std.fs.path.dirname(path) orelse ".";
+    const tmp = try std.fmt.bufPrintSentinel(&tmp_buf, "{s}/.{s}.ze-XXXXXX", .{ dir, std.fs.path.basename(path) }, 0);
     const fd = mkstemp(tmp.ptr);
     if (fd < 0) return error.WriteFailed;
     errdefer _ = c.unlink(tmp.ptr);
@@ -142,7 +144,10 @@ fn entries(dir: [:0]const u8) usize {
     const d = c.opendir(dir).?;
     defer _ = c.closedir(d);
     var n: usize = 0;
-    while (c.readdir(d)) |e| n += @intFromBool(e.name[0] != '.');
+    while (c.readdir(d)) |e| {
+        const name = std.mem.sliceTo(&e.name, 0);
+        n += @intFromBool(!std.mem.eql(u8, name, ".") and !std.mem.eql(u8, name, ".."));
+    }
     return n;
 }
 
