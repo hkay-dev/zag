@@ -233,10 +233,12 @@ fn rightEdge(d: *const Doc) f64 {
 }
 
 /// From the card's left edge to the text. Zen pads it so an 80-column page
-/// sits in the middle of the card.
+/// sits in the middle of the card, measured at the width the card springs
+/// to, the same width `wrapCols` wraps at.
 fn padL(d: *const Doc) f64 {
     const z = zen(d.win);
-    return pad_x + (@max(pad_x, (d.size.x - f(conf.zen_columns) * cw) / 2 - gap) - pad_x) * z + d.gw;
+    const room = if (d.fin.x > 0) d.fin.x else d.size.x;
+    return pad_x + (@max(pad_x, (room - f(conf.zen_columns) * cw) / 2 - gap) - pad_x) * z + d.gw;
 }
 
 /// The line numbers' width in columns: the line count's digits, at least
@@ -435,6 +437,11 @@ const Ink = struct {
     focus: ?Focus = null,
     offset: usize = 0,
     selected: [2]usize = .{ 0, 0 },
+    /// Columns per tab stop, the editor's `tabWidth` for its text.
+    tw: usize = editor.default_tab_width,
+    /// Which spaces and tabs draw as faint dots and arrows, in `invis_ink`.
+    invis: settings.Invisibles = .none,
+    invis_ink: Rgb = .{ 0, 0, 0 },
 
     fn put(k: *Ink, g: Fallback, color: Rgb, x: f64, y: f64) void {
         if (k.n == k.glyphs.len or g.font != k.font or !std.mem.eql(f64, &color, &k.color)) {
@@ -464,15 +471,19 @@ const Ink = struct {
     /// Like `text`, for the bytes `from..to` of `s`, which start at display
     /// column `col0` (a wrapped row). `kinds` covers all of `s`.
     fn run(k: *Ink, s: []const u8, from: usize, to: usize, col0: usize, kinds: ?[]const syntax.Kind, th: *const Theme, color: Rgb, x: f64, y: f64, skip: usize, max: usize) usize {
+        // Trailing marks start after the last character that isn't a space or tab.
+        const trail = if (k.invis == .trailing) std.mem.trimEnd(u8, s, " \t\r").len else 0;
         var col = col0;
         var i = from;
         while (i < to) {
-            const c = editor.cells(s, i, col);
+            const c = editor.cellsTab(s, i, col, k.tw);
             const rel = col - col0;
             if (rel >= skip + max) break;
-            if (rel >= skip and s[i] >= 0x20 and s[i] != 0x7f) {
+            const blank = s[i] == ' ' or s[i] == '\t';
+            const mark = blank and k.invis != .none and (k.invis == .all or i >= trail);
+            if (rel >= skip and (mark or (!blank and s[i] >= 0x20 and s[i] != 0x7f))) {
                 const kind: syntax.Kind = if (kinds) |ks| ks[i] else .text;
-                var paint = if (kinds != null) th.kinds[@intFromEnum(kind)] else color;
+                var paint = if (mark) k.invis_ink else if (kinds != null) th.kinds[@intFromEnum(kind)] else color;
                 if (k.focus) |fo| {
                     const at = k.offset + i;
                     if (at < k.selected[0] or at >= k.selected[1]) {
@@ -480,7 +491,18 @@ const Ink = struct {
                         paint = mixRgb(th.bg, paint, a);
                     }
                 }
-                k.put(glyph(c.cp, kind == .keyword), paint, x + f(rel - skip) * cw, y);
+                const gx = x + f(rel - skip) * cw;
+                if (mark) {
+                    // A space is a centered dot; a tab an arrow at its stop's start.
+                    k.put(glyph(@as(u21, if (s[i] == '\t') 0x2192 else 0x00B7), false), paint, gx, y);
+                } else if (c.len > editor.decode(s, i).len) {
+                    // A cluster of several code points (a decomposed accent, a
+                    // joined emoji) draws as one line so Core Text shapes it.
+                    k.flush();
+                    const line = uiLine(s[i .. i + c.len], if (kind == .keyword) bold else font, 1e9);
+                    defer if (line) |l| objc.CFRelease(l);
+                    paintLine(k.ctx, line, paint, 1, gx, y);
+                } else k.put(glyph(c.cp, kind == .keyword), paint, gx, y);
             }
             col += c.w;
             i += c.len;
@@ -523,6 +545,31 @@ var dev_px: f64 = 0.5;
 /// One device pixel in points: separators and outlines are this thick.
 fn hair() f64 {
     return dev_px;
+}
+
+/// `v` rounded to the nearest device pixel.
+fn snapPx(v: f64) f64 {
+    return @round(v / dev_px) * dev_px;
+}
+
+/// Like `roundPath` with each corner's own radius: top left, top right,
+/// bottom right, bottom left.
+fn cornerPath(ctx: Id, x: f64, y: f64, w: f64, h: f64, radii: [4]f64) void {
+    var r: [4]f64 = undefined;
+    for (radii, &r) |a, *b| b.* = @max(0, @min(a, w / 2, h / 2));
+    const k = 0.4477152502; // a quarter circle's bezier handle, from the corner
+    const x1 = x + w;
+    const y1 = y + h;
+    objc.CGContextMoveToPoint(ctx, x + r[0], y);
+    objc.CGContextAddLineToPoint(ctx, x1 - r[1], y);
+    objc.CGContextAddCurveToPoint(ctx, x1 - r[1] * k, y, x1, y + r[1] * k, x1, y + r[1]);
+    objc.CGContextAddLineToPoint(ctx, x1, y1 - r[2]);
+    objc.CGContextAddCurveToPoint(ctx, x1, y1 - r[2] * k, x1 - r[2] * k, y1, x1 - r[2], y1);
+    objc.CGContextAddLineToPoint(ctx, x + r[3], y1);
+    objc.CGContextAddCurveToPoint(ctx, x + r[3] * k, y1, x, y1 - r[3] * k, x, y1 - r[3]);
+    objc.CGContextAddLineToPoint(ctx, x, y + r[0]);
+    objc.CGContextAddCurveToPoint(ctx, x, y + r[0] * k, x + r[0] * k, y, x + r[0], y);
+    objc.CGContextClosePath(ctx);
 }
 
 /// Adds a rounded rectangle to the context's path, with no path object made.
@@ -859,14 +906,16 @@ const glide_rows = 3;
 /// mouse drag, or the same spot somewhere new (the text moved under it)
 /// snaps. A redraw with the caret where it's going leaves its glide alone.
 /// In the text the caret lives in page coordinates, so it rides along with
-/// a gliding scroll.
-fn placeCaret(d: *Doc, now: f64, x: f64, y: f64, in_text: bool, spot: [3]usize, show: bool) void {
+/// a gliding scroll. An inactive caret (a card without the keys) shows as
+/// a dim hollow box that doesn't blink.
+fn placeCaret(d: *Doc, now: f64, x: f64, y: f64, in_text: bool, spot: [3]usize, show: bool, active: bool) void {
     const moved = !std.mem.eql(usize, &spot, &d.spot);
     if (in_text != d.c_text) {
         const sign: f64 = if (in_text) 1 else -1;
         d.cx.snap(d.cx.at(now) + sign * d.vx);
         d.cy.snap(d.cy.at(now) + sign * d.vy);
         d.c_text = in_text;
+        d.caret_at = null;
     }
     if (moved and d.shown and show and !d.snap) {
         const glide = glideTime(x - d.cx.to, y - d.cy.to);
@@ -876,7 +925,10 @@ fn placeCaret(d: *Doc, now: f64, x: f64, y: f64, in_text: bool, spot: [3]usize, 
         d.cx.snap(x);
         d.cy.snap(y);
     }
-    if (show and (moved or !d.shown)) blink(d.caret);
+    if (show and active and (moved or !d.shown or !d.caret_on)) blink(d.caret);
+    if (!active and d.caret_on and blink_key != null) msg(void, d.caret, "removeAnimationForKey:", .{blink_key});
+    if (active != d.caret_on) d.caret_at = null;
+    d.caret_on = active;
     d.spot = spot;
     d.shown = show;
     d.snap = false;
@@ -889,7 +941,9 @@ fn glideTime(dx: f64, dy: f64) f64 {
     return std.math.clamp(caret_time + 0.025 * @log2(1 + @sqrt(dx * dx + dy * dy) / lh), caret_time, caret_max);
 }
 
-/// Puts the caret layer where its glide is at `now`, hidden outside the text.
+/// Puts the caret layer where its glide is at `now`. Crossing the text's
+/// edges it fades out over half a row (a column sideways) rather than
+/// cutting; its frame lands on whole device pixels.
 fn moveCaret(d: *Doc, now: f64) void {
     var x = d.cx.at(now);
     var y = d.cy.at(now);
@@ -897,22 +951,52 @@ fn moveCaret(d: *Doc, now: f64) void {
         x -= d.vx;
         y -= d.vy;
     }
-    const visible = d.shown and (!d.c_text or (x >= gap + padL(d) - 2 and x < rightEdge(d) and y >= top_h - 2 and y + lh - 4 <= bottom(d)));
-    // In the text the caret takes the settings' shape; in a prompt it's always a bar.
-    const shape: Rect = if (!d.c_text) .{ .w = 2, .h = lh - 4 } else switch (conf.caret_style) {
+    var a: f64 = 1;
+    if (d.c_text) {
+        const ramp = lh / 2;
+        a = std.math.clamp((x - (gap + padL(d) - 2) + cw) / cw, 0, 1) *
+            std.math.clamp((rightEdge(d) - x) / cw, 0, 1) *
+            std.math.clamp((y - (top_h - 2) + ramp) / ramp, 0, 1) *
+            std.math.clamp((bottom(d) - (y + lh - 4) + ramp) / ramp, 0, 1);
+        a = @round(a * 16) / 16;
+    }
+    const visible = d.shown and a > 0;
+    const active = d.caret_on or !d.c_text;
+    // In the text the caret takes the settings' shape, as wide as the
+    // character under it; in a prompt it's always a bar. An inactive one is
+    // a hollow box around the character.
+    const wide = cw * f(d.caret_cells);
+    const shape: Rect = if (!d.c_text) .{ .w = 2, .h = lh - 4 } else if (!active) .{ .x = 1, .w = wide, .h = lh - 4 } else switch (conf.caret_style) {
         .bar => .{ .w = conf.caret_width, .h = lh - 4 },
-        .block => .{ .x = 1, .w = cw, .h = lh - 4 },
-        .underline => .{ .x = 1, .y = lh - 6, .w = cw, .h = 2 },
+        .block => .{ .x = 1, .w = wide, .h = lh - 4 },
+        .underline => .{ .x = 1, .y = lh - 6, .w = wide, .h = 2 },
     };
-    const frame = Rect{ .x = d.org.x + x + shape.x, .y = d.org.y + y + shape.y, .w = shape.w, .h = shape.h };
-    if (d.caret_at) |was| if (std.meta.eql(was, frame) and d.caret_off == !visible) return;
+    const x0 = snapPx(d.org.x + x + shape.x);
+    const y0 = snapPx(d.org.y + y + shape.y);
+    const frame = Rect{ .x = x0, .y = y0, .w = snapPx(shape.w), .h = snapPx(shape.h) };
+    if (d.caret_at) |was| if (std.meta.eql(was, frame) and d.caret_off == !visible and d.caret_a == a) return;
+    const restyle = d.caret_at == null or d.caret_a != a;
     d.caret_at = frame;
     d.caret_off = !visible;
+    d.caret_a = a;
     const t = objc.class("CATransaction");
     msg(void, t, "begin", .{});
     msg(void, t, "setDisableActions:", .{true});
     msg(void, d.caret, "setFrame:", .{frame});
     msg(void, d.caret, "setHidden:", .{!visible});
+    if (restyle) {
+        const ink = nscolor(d.caret_ink);
+        if (active) {
+            // A block caret is see-through, so the letter under it shows.
+            const solid: f64 = if (d.c_text and conf.caret_style == .block) 0.45 else 1;
+            msg(void, d.caret, "setBackgroundColor:", .{msg(Id, msg(Id, ink, "colorWithAlphaComponent:", .{solid * a}), "CGColor", .{})});
+            msg(void, d.caret, "setBorderWidth:", .{@as(f64, 0)});
+        } else {
+            msg(void, d.caret, "setBackgroundColor:", .{@as(Id, null)});
+            msg(void, d.caret, "setBorderWidth:", .{@max(@as(f64, 1), 2 * hair())});
+            msg(void, d.caret, "setBorderColor:", .{msg(Id, msg(Id, ink, "colorWithAlphaComponent:", .{0.5 * a}), "CGColor", .{})});
+        }
+    }
     msg(void, t, "commit", .{});
 }
 
@@ -982,12 +1066,22 @@ fn flashStart(d: *Doc) void {
     d.flash_t0 = CACurrentMediaTime();
 }
 
-/// Adds the bytes `lo..hi` of the text to the flash, up to `max_flash` spans.
+/// Adds the bytes `lo..hi` of the text to the flash, up to `max_flash`
+/// spans. An empty span (a deletion, an undone insertion) flashes as a
+/// bar where the text was.
 fn flashAdd(d: *Doc, lo: usize, hi: usize) void {
-    if (lo >= hi or d.flash_n == max_flash) return;
+    if (lo > hi or d.flash_n == max_flash) return;
     if (d.flash_n == 0) msg(void, d.win.view, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("holdRedraw:"), @as(Id, null), @max(d.flash_t0 + flash_hold - CACurrentMediaTime(), 0) });
     d.flash[d.flash_n] = .{ lo, hi };
     d.flash_n += 1;
+}
+
+/// Holds a flash that hasn't begun fading while the page still glides to
+/// it, so it plays once its text is in view.
+fn flashWait(d: *Doc, now: f64) void {
+    if (d.flash_n == 0 or !d.ys.moving(now) or now >= d.flash_t0 + flash_hold) return;
+    d.flash_t0 = now;
+    msg(void, d.win.view, "performSelector:withObject:afterDelay:", .{ objc.sel_registerName("holdRedraw:"), @as(Id, null), @as(f64, flash_hold + 0.01) });
 }
 
 /// The flash's opacity at `now`: held, then easing out.
@@ -1017,17 +1111,25 @@ fn rowSpan(l: []const u8, ls: usize, sg: Seg, m: [2]usize, ox: f64, skip: usize)
     if (m[0] > ls + l.len or m[1] <= ls) return null;
     const lo = std.math.clamp(@max(m[0], ls) - ls, sg.start, sg.end);
     const hi = std.math.clamp(@min(m[1], ls + l.len) - ls, sg.start, sg.end);
-    const col = editor.colOf(l, sg.start, sg.col, lo);
-    const x0 = ox + (f(col - sg.col) - f(skip)) * cw;
-    return .{ .x0 = x0, .x1 = ox + (f(editor.colOf(l, lo, col, hi) - sg.col) - f(skip)) * cw, .lo = lo, .hi = hi, .col = col };
+    const col = editor.colOfTab(l, sg.start, sg.col, lo, sg.tw);
+    const x0 = ox + (f(col - sg.col + sg.ind) - f(skip)) * cw;
+    return .{ .x0 = x0, .x1 = ox + (f(editor.colOfTab(l, lo, col, hi, sg.tw) - sg.col + sg.ind) - f(skip)) * cw, .lo = lo, .hi = hi, .col = col };
 }
 
 /// Fills a row span, with a tail when the range runs on to the next line.
+/// The range's first row rounds its top corners and its last row its
+/// bottom ones, so a selection over several rows reads as one shape.
 fn fillSpan(ctx: Id, col: Rgb, a: f64, rg: [2]usize, ls: usize, l: []const u8, sg: Seg, ox: f64, skip: usize, y: f64) void {
     const sp = rowSpan(l, ls, sg, rg, ox, skip) orelse return;
     const tail: f64 = if (rg[1] > ls + l.len and sg.end == l.len) 0.6 * cw else 0;
     const w = sp.x1 - sp.x0 + tail;
-    if (w > 0) fillA(ctx, col, a, sp.x0, y, w, lh);
+    if (w <= 0) return;
+    const r = @min(4.0, lh / 5);
+    const top: f64 = if (rg[0] >= ls + sg.start) r else 0;
+    const end: f64 = if (tail == 0 and rg[1] <= ls + sg.end) r else 0;
+    objc.CGContextSetRGBFillColor(ctx, col[0], col[1], col[2], a);
+    cornerPath(ctx, sp.x0, y, w, lh, .{ top, top, end, end });
+    objc.CGContextFillPath(ctx);
 }
 
 /// Draws the find indicator over row `sg` of line `l` (which starts at byte
@@ -1178,6 +1280,8 @@ const Page = struct {
     num_len: usize = 0,
     /// Named by hand from its tab, so its text doesn't rename it.
     hand: bool = false,
+    /// The `syntax.languages` entry picked by hand from View > Language.
+    lang_i: ?u8 = null,
 
     fn name(p: *const Page) []const u8 {
         return if (p.path) |path| std.fs.path.basename(path) else if (p.title_len > 0) p.title[0..p.title_len] else if (p.num_len > 0) p.num_name[0..p.num_len] else "Untitled";
@@ -1399,6 +1503,23 @@ const Doc = struct {
     bar_t0: f64 = 0,
     bar_vy: f64 = 0,
     bar_armed: f64 = -1,
+    /// The horizontal bar: the sideways scroll it last saw, and the
+    /// longest line's length in bytes, worked out again after edits.
+    bar_vx: f64 = 0,
+    wide: usize = 0,
+    wide_chg: u64 = std.math.maxInt(u64),
+    /// The pointer is near the card's right or bottom edge, which shows the bars.
+    bar_hover: bool = false,
+    /// A bar's knob held by the mouse, and where on the knob it was grabbed.
+    bar_drag: enum { none, v, h } = .none,
+    bar_off: f64 = 0,
+    /// Where the bars last drew, in pane coordinates: knob and track for each.
+    vknob: Rect = .{},
+    vtrack: Rect = .{},
+    hknob: Rect = .{},
+    htrack: Rect = .{},
+    /// How far the text scrolls sideways at most, as the horizontal bar last drew.
+    hmax: f64 = 0,
     cx: Tween = .{ .dur = caret_time },
     cy: Tween = .{ .dur = caret_time },
     /// The caret tween is in page coordinates (else window coordinates).
@@ -1465,6 +1586,15 @@ const Doc = struct {
     /// the layer was changed some other way, so the next move lands.
     caret_at: ?Rect = null,
     caret_off: bool = true,
+    /// The caret has the keys (else it draws hollow), its edge fade as last
+    /// set, its color, and how many cells the character under it takes.
+    caret_on: bool = true,
+    caret_a: f64 = 1,
+    caret_ink: Rgb = .{ 0, 0, 0 },
+    caret_cells: usize = 1,
+    /// The bracket pair beside the caret, for the caret and change count it was found at.
+    br: ?[2]usize = null,
+    br_at: [2]u64 = @splat(std.math.maxInt(u64)),
     /// What the caret last stood for: mode, then row and column or prompt width.
     spot: [3]usize = .{ std.math.maxInt(usize), 0, 0 },
     shown: bool = false,
@@ -1893,7 +2023,19 @@ fn loadPage(abs: [:0]const u8) ?Page {
         ed.select(c, c);
         sy = pl.sy;
     }
-    return .{ .ed = ed, .path = z, .lang = syntax.forPath(abs), .stamp = files.stamp(abs), .sy = sy, .id = newId(), .rise = true, .new_file = missing, .locked = !missing and !files.writable(abs) };
+    return .{ .ed = ed, .path = z, .lang = syntax.detect(abs, firstLine(bytes)), .stamp = files.stamp(abs), .sy = sy, .id = newId(), .rise = true, .new_file = missing, .locked = !missing and !files.writable(abs) };
+}
+
+/// The text's first line, which `syntax.detect` reads for a `#!` or `<?php`.
+fn firstLine(t: []const u8) []const u8 {
+    return t[0 .. std.mem.indexOfScalar(u8, t, '\n') orelse t.len];
+}
+
+/// The page's language for `path`: the one picked by hand, else what its
+/// name or first line says.
+fn langOf(p: *const Page, path: []const u8) *const syntax.Lang {
+    if (p.lang_i) |i| return syntax.languages[i].lang;
+    return syntax.detect(path, firstLine(p.ed.text()));
 }
 
 fn blankPage() ?Page {
@@ -3078,7 +3220,7 @@ fn save(d: *Doc, as: bool) bool {
         if (d.file.path) |old| gpa.free(old);
         d.file.path = abs;
         dropCopies(d, abs);
-        d.file.lang = syntax.forPath(abs);
+        d.file.lang = langOf(&d.file, abs);
         clearSyntax(d);
         named(d);
     } else if (d.file.stamp == null) {
@@ -3736,6 +3878,12 @@ fn checkOutside(d: *Doc) void {
         return refresh(d);
     }
     d.file.ed.reload(gpa, bytes) catch return;
+    // A new first line (a `#!` added outside) can change the language.
+    const lang = langOf(&d.file, p);
+    if (lang != d.file.lang) {
+        d.file.lang = lang;
+        clearSyntax(d);
+    }
     d.file.stamp = now;
     d.file.new_file = false;
     d.note = "reloaded";
@@ -3853,13 +4001,16 @@ fn desaturate(c: *Rgb) void {
     c.* = @splat(c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722);
 }
 
-/// Sets the colors that draw from the settings' themes: grey in zen, warmer
-/// in Late-Night with its warmth on, and with Increase Contrast on, muted
+/// Sets the colors that draw from the settings' themes: grey in zen (the
+/// caret keeps half its color, so it still reads as the caret), warmer in
+/// Late-Night with its warmth on, and with Increase Contrast on, muted
 /// text lifted to the text color at 0.8.
 fn buildThemes() void {
     themes = .{ conf.light, conf.dark };
     if (conf.zen) for (&themes) |*th| {
+        const tint = th.caret;
         for (settings.all(th)) |*c| desaturate(c);
+        th.caret = mixRgb(th.caret, tint, 0.5);
     };
     if (conf.late_night and conf.late_night_warmth) for (&themes) |*th| {
         for (settings.all(th)) |*c| c.* = .{ @min(1, c[0] * 1.04), c[1] * 0.94, c[2] * 0.78 };
@@ -4008,12 +4159,14 @@ fn applySettings(old_conf: settings.Settings) void {
         d.stat_at[0] = std.math.maxInt(u64);
         if (caret_changed) {
             d.caret_at = null;
-            if (d.shown) blink(d.caret);
+            if (d.shown and d.caret_on) blink(d.caret);
         }
         if (text_moves) {
             for (0..tabCount(d)) |j| {
                 const pg = tabPage(d, j);
                 pg.sy = pg.sy / old_lh * lh;
+                // Tab width and hanging indent change where rows wrap.
+                pg.ed.buf.wraps_cols = 0;
             }
             d.ys.snap(d.file.sy);
             d.band_on = false;
@@ -4563,7 +4716,9 @@ fn is(name: []const u8, comptime want: []const u8) bool {
 
 /// One screen row of a line: bytes `start..end`, with display columns
 /// `col..ecol`. Without wrap every line is one row.
-const Seg = struct { k: usize = 0, start: usize = 0, col: usize = 0, end: usize = 0, ecol: usize = 0 };
+/// `tw` is the tab width the row was laid out with, and `ind` how many
+/// columns a wrapped row's hanging indent moves it right.
+const Seg = struct { k: usize = 0, start: usize = 0, col: usize = 0, end: usize = 0, ecol: usize = 0, tw: usize = editor.default_tab_width, ind: usize = 0 };
 
 /// Rows wrap at the card's width once it's done springing, so a card that
 /// grows or shrinks doesn't rewrap every frame.
@@ -4593,7 +4748,7 @@ fn layout(d: *Doc) void {
     var from = @min(b.wraps_from, b.lines());
     b.wraps_from = std.math.maxInt(usize);
     for (b.wraps.items[from..], from..) |*w, i| {
-        if (w.* == 0) w.* = @intCast(editor.rowCount(b.line(i), cols));
+        if (w.* == 0) w.* = @intCast(rowsOf(d, b.line(i), cols));
     }
     const old = d.vfirst.items.len;
     d.vfirst.resize(gpa, b.lines() + 1) catch return;
@@ -4619,11 +4774,82 @@ fn lineOfRow(d: *const Doc, r: usize) usize {
     return buffer.lastAtMost(d.vfirst.items[0 .. d.vfirst.items.len - 1], r);
 }
 
+/// How many screen rows `l` takes at `cols` cells a row.
+fn rowsOf(d: *const Doc, l: []const u8, cols: usize) usize {
+    if (l.len <= cols and std.mem.indexOfScalar(u8, l, '\t') == null) return 1;
+    var n: usize = 1;
+    var s = segFrom(d, l, .{});
+    while (s.end < l.len) : (n += 1) s = nextSeg(d, l, s);
+    return n;
+}
+
+/// `editor.rowEnd` with tab stops every `tw` columns: where the row of
+/// `line` from byte `start`, at column `col`, ends when `cols` cells fit.
+fn wrapEnd(line: []const u8, start: usize, col: usize, cols: usize, tw: usize) editor.RowEnd {
+    var i = start;
+    var c = col;
+    var brk: ?editor.RowEnd = null;
+    while (i < line.len) {
+        const x = editor.cellsTab(line, i, c, tw);
+        if (c + x.w > col + cols and i > start) return brk orelse .{ .end = i, .col = c };
+        c += x.w;
+        i += x.len;
+        if (line[i - 1] == ' ' or line[i - 1] == '\t') brk = .{ .end = i, .col = c };
+    }
+    return .{ .end = line.len, .col = c };
+}
+
+/// The leading indent of `l` in columns, or null when the line is blank.
+fn indentCols(l: []const u8, tw: usize) ?usize {
+    var col: usize = 0;
+    for (l) |ch| switch (ch) {
+        ' ' => col += 1,
+        '\t' => col += tw - col % tw,
+        '\r' => {},
+        else => return col,
+    };
+    return null;
+}
+
+/// With Hanging Indent on, how far a wrapped row of `l` moves right: the
+/// line's leading indent in columns, at most half a row.
+fn hangOf(l: []const u8, cols: usize, tw: usize) usize {
+    if (!conf.hanging_indent) return 0;
+    return @min(indentCols(l, tw) orelse 0, cols / 2);
+}
+
+/// How far line `i`'s indent guides reach, in columns: its indent, or for
+/// a blank line the smaller indent of the nearest lines with text around
+/// it (looking 64 lines each way), so guides run through blank lines.
+fn guideCols(d: *const Doc, i: usize, tw: usize) usize {
+    const b = &d.file.ed.buf;
+    if (indentCols(b.line(i), tw)) |c| return c;
+    var up: usize = 0;
+    var j = i;
+    while (j > 0 and i - j < 64) {
+        j -= 1;
+        if (indentCols(b.line(j), tw)) |c| {
+            up = c;
+            break;
+        }
+    }
+    var down: usize = 0;
+    j = i + 1;
+    while (j < b.lines() and j - i < 64) : (j += 1) if (indentCols(b.line(j), tw)) |c| {
+        down = c;
+        break;
+    };
+    return @min(up, down);
+}
+
 /// Fills in where a row that starts at `s.start` ends.
 fn segFrom(d: *const Doc, l: []const u8, s: Seg) Seg {
-    if (!wrapping()) return .{ .end = l.len };
-    const r = editor.rowEnd(l, s.start, s.col, d.file.ed.buf.wraps_cols);
-    return .{ .k = s.k, .start = s.start, .col = s.col, .end = r.end, .ecol = r.col };
+    const tw = d.file.ed.tabWidth();
+    if (!wrapping()) return .{ .end = l.len, .tw = tw };
+    const cols = d.file.ed.buf.wraps_cols;
+    const ind = if (s.k > 0) hangOf(l, cols, tw) else 0;
+    const r = wrapEnd(l, s.start, s.col, cols - ind, tw);
+    return .{ .k = s.k, .start = s.start, .col = s.col, .end = r.end, .ecol = r.col, .tw = tw, .ind = ind };
 }
 
 fn nextSeg(d: *const Doc, l: []const u8, s: Seg) Seg {
@@ -4644,9 +4870,10 @@ fn segN(d: *const Doc, l: []const u8, k: usize) Seg {
     return s;
 }
 
-/// The last place the caret can sit in a row: before the wrap, or the line end.
+/// The last place the caret can sit in a row: before the wrap's last
+/// character (a whole cluster), or the line end.
 fn caretEnd(l: []const u8, s: Seg) usize {
-    return if (s.end < l.len) editor.prevChar(l, s.end) else l.len;
+    return if (s.end < l.len) editor.prevCluster(l, s.end) else l.len;
 }
 
 const RowCol = struct { row: usize, col: usize };
@@ -4663,7 +4890,7 @@ fn rowColOf(d: *const Doc, pos: usize) RowCol {
     const l = b.line(i);
     const p = @min(pos - b.lineStart(i), l.len);
     const s = segOf(d, l, p);
-    return .{ .row = rowOfLine(d, i) + s.k, .col = editor.colOf(l, s.start, s.col, p) - s.col };
+    return .{ .row = rowOfLine(d, i) + s.k, .col = editor.colOfTab(l, s.start, s.col, p, s.tw) - s.col + s.ind };
 }
 
 /// Up and down by screen rows, keeping the column.
@@ -4683,7 +4910,7 @@ fn byteAtRow(d: *const Doc, row: usize, x: f64) usize {
     const i = lineOfRow(d, row);
     const l = b.line(i);
     const s = segN(d, l, row - rowOfLine(d, i));
-    return b.lineStart(i) + std.math.clamp(editor.byteAtCol(l, f(s.col) + x), s.start, caretEnd(l, s));
+    return b.lineStart(i) + std.math.clamp(editor.byteAtColTab(l, f(s.col) + @max(x - f(s.ind), 0), s.tw), s.start, caretEnd(l, s));
 }
 
 /// ⌘← and ⌘→ while wrapped: the ends of the screen row. False on a line's
@@ -4721,7 +4948,9 @@ fn clampScroll(d: *Doc) void {
 }
 
 /// Centers the caret's row in typewriter mode; otherwise scrolls just
-/// enough to show it.
+/// enough to show it with `scroll_off` rows of context above and below,
+/// fewer when the card is too short for them.
+const scroll_off = 2;
 fn reveal(d: *Doc) void {
     const c = caretRow(d);
     const y = f(c.row) * lh;
@@ -4729,8 +4958,9 @@ fn reveal(d: *Doc) void {
     if (conf.typewriter) {
         d.file.sy = y - (th - lh) / 2;
     } else {
-        if (y < d.file.sy) d.file.sy = y;
-        if (y + lh > d.file.sy + th) d.file.sy = y + lh - th;
+        const m = @min(scroll_off * lh, @max(0, @floor((th - lh) / 2 / lh)) * lh);
+        if (y - m < d.file.sy) d.file.sy = y - m;
+        if (y + lh + m > d.file.sy + th) d.file.sy = y + lh + m - th;
     }
     if (!wrapping()) {
         const x = f(c.col) * cw;
@@ -6647,18 +6877,18 @@ fn findMarks(d: *Doc, s: [2]usize, finding: bool, now: f64) FindMarks {
 /// the header. `win_key` says whether its window is key, and `many`
 /// whether the window has other cards, which lights the focused one's ring.
 fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many: bool, now: f64, resizing: bool) void {
-    if (d.dark != dark) {
+    if (d.dark != dark or !std.mem.eql(f64, &d.caret_ink, &th.caret)) {
         d.dark = dark;
-        // A block caret is see-through, so the letter under it shows.
-        const ink = nscolor(th.caret);
-        msg(void, d.caret, "setBackgroundColor:", .{msg(Id, if (conf.caret_style == .block) msg(Id, ink, "colorWithAlphaComponent:", .{@as(f64, 0.45)}) else ink, "CGColor", .{})});
+        // `moveCaret` colors the layer from this.
+        d.caret_ink = th.caret;
+        d.caret_at = null;
         preview.update(d, th);
     }
     const card = cardRect(d);
     const zt = zen(d.win);
     const zen_k = 1 - zt;
     const focused = d.win.focus == d;
-    // The caret only shows in the key window's focused card.
+    // Only the key window's focused card has the keys; other cards' carets draw hollow.
     const key = win_key and focused and !d.closing;
     d.lit.aim(if (focused and many and win_key) 1 else 0, now);
     if (d.lit.dur != tab_time and !d.lit.moving(now)) {
@@ -6678,12 +6908,17 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // live resizing snap it (the trackpad snaps in scrollWheel), and the caret
     // and band move with the page so they don't bounce back to the edge.
     if (d.file.sy != d.ys.to) {
-        if (resizing or (!conf.typewriter and !d.ys.moving(now) and @abs(d.file.sy - d.ys.to) <= glide_rows * lh)) {
+        const dist = @abs(d.file.sy - d.ys.to);
+        if (resizing or (!conf.typewriter and !d.ys.moving(now) and dist <= glide_rows * lh)) {
             const by = d.file.sy - d.ys.at(now);
             d.ys.snap(d.file.sy);
             d.band.shift(by);
             if (d.c_text) d.cy.shift(by);
-        } else d.ys.aim(d.file.sy, now);
+        } else if (conf.typewriter and !d.ys.moving(now) and dist > glide_rows * lh) {
+            // Typing after a scroll away eases back to the middle, longer
+            // for a longer way.
+            d.ys.aimOver(d.file.sy, std.math.clamp(scroll_time + 0.08 * @log2(dist / lh), scroll_time, 0.45), now);
+        } else d.ys.aimOver(d.file.sy, scroll_time, now);
     }
     if (d.file.sx != d.xs.to) {
         if (resizing or (!d.xs.moving(now) and @abs(d.file.sx - d.xs.to) <= 16 * cw)) {
@@ -6759,14 +6994,20 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         if (d.file.rise) objc.CGContextTranslateCTM(ctx, 0, (1 - base_a) * load_rise);
     }
 
-    // The caret line's band slides after the caret, and stays on its line
-    // under a selection, which draws over it in its own color.
+    // The caret line's band slides after the caret. It fades away under a
+    // selection, recedes with Focus's dimming, and in Zen spans only the
+    // centered page.
     const band_on = d.mode == .edit;
     if (band_on and d.band_on) d.band.aimOver(f(here.row) * lh, if (conf.typewriter) scroll_time else caret_time, now) else d.band.snap(f(here.row) * lh);
     d.band_on = band_on;
-    d.band_a.aim(if (band_on) 1 else 0, now);
-    const band_alpha = d.band_a.at(now);
-    if (band_alpha > 0 and conf.highlight_current_line) fillA(ctx, th.line, band_alpha, gap, top_h + d.band.at(now) - d.vy, card.w, lh);
+    d.band_a.aim(if (band_on and s[0] == s[1]) 1 else 0, now);
+    const band_alpha = d.band_a.at(now) * (1 - d.focus_a.at(now) * conf.focus_dim * 0.5);
+    if (band_alpha > 0 and conf.highlight_current_line) {
+        const right = card.x + card.w;
+        const bx0 = gap + (@max(gap, tx - cw) - gap) * zt;
+        const bx1 = right + (@min(right, tx + f(conf.zen_columns + 1) * cw) - right) * zt;
+        fillA(ctx, th.line, band_alpha, bx0, top_h + d.band.at(now) - d.vy, bx1 - bx0, lh);
+    }
     objc.CGContextSaveGState(ctx);
     objc.CGContextClipToRect(ctx, .{ .x = clip_l, .y = card.y, .w = ox + f(cols) * cw - clip_l, .h = card.h });
 
@@ -6791,17 +7032,55 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     const out_a = d.sel_out.at(now);
 
     const fm = findMarks(d, s, finding, now);
+    flashWait(d, now);
     const flash_a = flashAlpha(d, now);
+    // A selection in a card without the keys, or a window in the
+    // background, draws dimmer.
+    const sel_k = 0.45 + 0.55 * ka;
+    // The bracket beside the caret and its partner, looked for again only
+    // when the caret or the text moves; marked while the caret has the keys.
+    const br_at: [2]u64 = .{ d.file.ed.cur, d.file.ed.buf.changes };
+    if (!std.mem.eql(u64, &br_at, &d.br_at)) {
+        d.br_at = br_at;
+        d.br = d.file.ed.matchingBracket();
+    }
+    const br: ?[2]usize = if (d.mode == .edit and !has_sel and key) d.br else null;
+    const tw = d.file.ed.tabWidth();
 
-    // Backgrounds: selection, find matches.
+    // Backgrounds: indent guides, selection, flash, bracket marks, find matches.
     for (vis[0..nvis], first..) |v, row| {
         const y = top_h + f(row) * lh - d.vy;
         const ls = b.lineStart(v.line);
         const l = b.line(v.line);
         const sg = v.seg;
-        if (has_sel) fillSpan(ctx, th.sel, sel_a, s, ls, l, sg, ox, skip, y);
-        if (out_a > 0) fillSpan(ctx, th.sel, out_a, d.sel_last, ls, l, sg, ox, skip, y);
-        if (flash_a > 0) for (d.flash[0..d.flash_n]) |fr| fillSpan(ctx, th.caret, flash_a, fr, ls, l, sg, ox, skip, y);
+        if (conf.indent_guides) {
+            // A wrapped row carries its line's guides only as far as its hanging indent.
+            const upto = if (sg.k == 0) guideCols(d, v.line, tw) else sg.ind;
+            var c: usize = 0;
+            while (c < upto) : (c += tw) if (c >= skip) {
+                fillA(ctx, th.muted, if (contrast) 0.4 else 0.22, snapPx(ox + (f(c) - f(skip)) * cw + 1), y, 2 * hair(), lh);
+            };
+        }
+        if (has_sel) fillSpan(ctx, th.sel, sel_a * sel_k, s, ls, l, sg, ox, skip, y);
+        if (out_a > 0) fillSpan(ctx, th.sel, out_a * sel_k, d.sel_last, ls, l, sg, ox, skip, y);
+        if (flash_a > 0) for (d.flash[0..d.flash_n]) |fr| {
+            if (fr[0] != fr[1]) {
+                fillSpan(ctx, th.caret, flash_a, fr, ls, l, sg, ox, skip, y);
+                continue;
+            }
+            // An empty span flashes as a bar where text went, on its row only.
+            if (fr[0] < ls or fr[0] > ls + l.len) continue;
+            const p = fr[0] - ls;
+            if (p < sg.start or (p >= sg.end and sg.end < l.len)) continue;
+            const x = ox + (f(editor.colOfTab(l, sg.start, sg.col, p, tw) - sg.col + sg.ind) - f(skip)) * cw;
+            pill(ctx, th.caret, @min(1, flash_a * 2), x - 1.25, y + 2, 2.5, lh - 4, 1.25);
+        };
+        if (br) |pair| for (pair) |p| {
+            const sp = rowSpan(l, ls, sg, .{ p, p + 1 }, ox, skip) orelse continue;
+            if (sp.lo >= sp.hi) continue;
+            pill(ctx, th.muted, if (contrast) 0.3 else 0.18, sp.x0 - 1, y + 2, sp.x1 - sp.x0 + 2, lh - 4, 3);
+            fillA(ctx, th.caret, 0.7, sp.x0 + 1, snapPx(y + lh - 4), sp.x1 - sp.x0 - 2, 2 * hair());
+        };
         if (fm.pills.len > 0) {
             // Opening find on prefilled text fades the matches in, the nearest first.
             const dist = if (row > here.row) row - here.row else here.row - row;
@@ -6814,11 +7093,11 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             while (j < sg.end and j + fm.pills.len <= l.len) : (j += 1) if (editor.matchAt(l, j, fm.pills, fm.sensitive)) {
                 const lo = @max(j, sg.start);
                 const hi = @min(j + fm.pills.len, sg.end);
-                const c0 = editor.colOf(l, at, col, lo);
-                col = editor.colOf(l, lo, c0, hi);
+                const c0 = editor.colOfTab(l, at, col, lo, tw);
+                col = editor.colOfTab(l, lo, c0, hi, tw);
                 at = hi;
                 if (c0 - sg.col > skip + cols) break;
-                if (col - sg.col + 1 >= skip and ls + j != s[0]) pill(ctx, th.match, match_alpha * m_a, ox + (f(c0 - sg.col) - f(skip)) * cw, y + 2, f(col - c0) * cw, lh - 4, 3);
+                if (col - sg.col + sg.ind + 1 >= skip and ls + j != s[0]) pill(ctx, th.match, match_alpha * m_a, ox + (f(c0 - sg.col + sg.ind) - f(skip)) * cw, y + 2, f(col - c0) * cw, lh - 4, 3);
                 j += fm.pills.len - 1;
             };
         }
@@ -6830,6 +7109,9 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     const focus_amt = d.focus_a.at(now);
     if (d.focus_on or focus_amt > 0) k.focus = .{ .new = d.focus_new, .old = d.focus_old, .t = std.math.clamp((now - d.focus_t0) / focus_time, 0, 1), .amt = focus_amt };
     k.selected = s;
+    k.tw = tw;
+    k.invis = conf.show_invisibles;
+    k.invis_ink = mixRgb(th.bg, th.muted, if (contrast) 0.8 else 0.55);
     std.mem.swap(Kinds, &d.lex[0], &d.lex[1]);
     d.lex[0].clear();
     var walk: usize = 0;
@@ -6884,11 +7166,13 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             k.offset = ls;
             const row_y = top_h + f(row) * lh - d.vy;
             // Later passes redraw only the last columns, at the x pass 0 gives them.
+            // A wrapped row's hanging indent moves it right.
+            const ind = v.seg.ind;
             const back = @min(cols, 2);
             const used = if (pass > 0)
-                k.run(l, v.seg.start, v.seg.end, v.seg.col, ks, th, th.fg, ox + f(cols - back) * cw, row_y + baseline, skip + cols - back, back + 1)
+                k.run(l, v.seg.start, v.seg.end, v.seg.col, ks, th, th.fg, ox + f(cols - back) * cw, row_y + baseline, (skip + cols - back) -| ind, back + 1)
             else
-                k.run(l, v.seg.start, v.seg.end, v.seg.col, ks, th, th.fg, ox, row_y + baseline, skip, cols + 1);
+                k.run(l, v.seg.start, v.seg.end, v.seg.col, ks, th, th.fg, ox + f(ind) * cw, row_y + baseline, skip, (cols + 1) -| ind) + ind;
             if (pass == 0) {
                 v.reach = if (used > cols) 2 else if (used == cols) 1 else 0;
                 any_reach = any_reach or used >= cols;
@@ -6901,6 +7185,17 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         objc.CGContextRestoreGState(ctx);
     }
     objc.CGContextRestoreGState(ctx);
+    // The gutter and prompt draw with this ink too, without marks.
+    k.invis = .none;
+
+    // Text scrolled sideways fades out into a faint rule where it meets
+    // the line numbers (or the card's edge).
+    if (d.vx > 0.5) {
+        const sa = std.math.clamp(d.vx / cw, 0, 1);
+        const h = bottom(d) - top_h;
+        for (0..4) |i| fillA(ctx, th.bg, sa * (0.8 - 0.2 * f(i)), clip_l + f(i) * cw / 4, top_h, cw / 4, h);
+        fillA(ctx, th.muted, sa * @as(f64, if (contrast) 0.5 else 0.3), snapPx(clip_l), top_h, hair(), h);
+    }
 
     drawGutter(d, &k, th, vis[0..nvis], first, here.row, tx);
     objc.CGContextRestoreGState(ctx);
@@ -6911,7 +7206,12 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
         const spot: [3]usize = .{ 0, here.row, here.col };
         // A shift-move that extends a selection snaps, like the selection's edge.
         if (has_sel and !std.mem.eql(usize, &spot, &d.spot)) d.snap = true;
-        placeCaret(d, now, tx + f(here.col) * cw - 1, top_h + f(here.row) * lh + 2, true, spot, key);
+        // A block or underline caret covers both cells of a wide character.
+        const cl = b.line(b.lineOf(d.file.ed.cur));
+        const cp = d.file.ed.cur - b.lineStart(b.lineOf(d.file.ed.cur));
+        d.caret_cells = if (cp < cl.len and cl[cp] != '\t') editor.cellsTab(cl, cp, 0, tw).w else 1;
+        // Every card shows its caret; only the one with the keys blinks solid.
+        placeCaret(d, now, tx + f(here.col) * cw - 1, top_h + f(here.row) * lh + 2, true, spot, !d.closing, key);
         // A newly shown file's caret fades in with its text.
         if (d.caret_fade and key) {
             d.caret_fade = false;
@@ -6950,18 +7250,30 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     }
 }
 
-// Line numbers stay beside the text and dim with Focus. Wrapped rows carry none.
+// Line numbers stay beside the text and dim with Focus. The caret's line
+// keeps its brighter number while a prompt is open. Wrapped rows carry a
+// faint ↳ instead of a number.
 fn drawGutter(d: *Doc, k: *Ink, th: *const Theme, vis: []const VRow, first: usize, here_row: usize, tx: f64) void {
     const b = &d.file.ed.buf;
     const fo = k.focus;
     k.focus = null;
     const ga = std.math.clamp(d.gw / (3.5 * cw), 0, 1);
     if (ga > 0) {
-        const at_line = if (d.mode == .edit) lineOfRow(d, here_row) else std.math.maxInt(usize);
+        const at_line = lineOfRow(d, here_row);
         const plain = mixRgb(th.bg, th.muted, ga);
-        const here_ink = mixRgb(th.bg, mixRgb(th.bg, th.fg, 0.85), ga);
+        // Focus mutes the caret line's number along with the band.
+        const lift = if (fo) |fc| 1 - fc.amt * conf.focus_dim * 0.5 else 1;
+        const here_ink = mixRgb(plain, mixRgb(th.bg, mixRgb(th.bg, th.fg, 0.85), ga), lift);
+        const wrap_ink = mixRgb(th.bg, th.muted, ga * 0.5);
+        // The numbers' right edge sits where the gutter is headed while it
+        // grows, so they don't swim as it eases; shrinking, it rides along.
+        const right = tx - d.gw + @max(d.gw, gutCols(d) * cw * (1 - zen(d.win))) - 1.5 * cw;
         for (vis, first..) |v, row| {
-            if (v.seg.start != 0) continue;
+            const y = top_h + f(row) * lh - d.vy + baseline;
+            if (v.seg.start != 0) {
+                _ = k.text("↳", null, th, wrap_ink, right - cw, y, 0, 1);
+                continue;
+            }
             var nb: [20]u8 = undefined;
             var at = nb.len;
             var n = v.line + 1;
@@ -6978,34 +7290,83 @@ fn drawGutter(d: *Doc, k: *Ink, th: *const Theme, vis: []const VRow, first: usiz
                 const le = ls + b.line(v.line).len;
                 ink = mixRgb(th.bg, ink, fc.dim(fc.new[0] <= le and fc.new[1] > ls, fc.old[0] <= le and fc.old[1] > ls));
             }
-            _ = k.text(num, null, th, ink, tx - 1.5 * cw - f(num.len) * cw, top_h + f(row) * lh - d.vy + baseline, 0, num.len);
+            _ = k.text(num, null, th, ink, right - f(num.len) * cw, y, 0, num.len);
         }
         k.flush();
     }
 }
 
-// The bar's hold costs no frames; drawPane arms a one-shot timer for its end.
+// The bars' hold costs no frames; drawPane arms a one-shot timer for its end.
+// They show while the page moves, while the pointer is near them, and while
+// a knob is held, and remember where they drew for `barDown`.
 fn drawBar(d: *Doc, ctx: Id, th: *const Theme, card: Rect, now: f64) void {
     const bar_room = textH(d);
     const range = scrollRange(d);
     const bar_span = range[1] - range[0];
-    if (bar_span > 0) {
-        if (d.vy != d.bar_vy) {
-            d.bar_vy = d.vy;
-            d.bar_t0 = now;
-            d.bar.aimOver(1, bar_in, now);
+    // How far the text scrolls sideways: the longest line in bytes (leading
+    // tabs at full width), measured again after edits.
+    const textw = card.x + card.w - pad_x - (gap + padL(d));
+    if (wrapping()) {
+        d.wide_chg = std.math.maxInt(u64);
+        d.hmax = 0;
+    } else {
+        const b = &d.file.ed.buf;
+        if (d.wide_chg != b.changes) {
+            d.wide_chg = b.changes;
+            const tw = d.file.ed.tabWidth();
+            var wide: usize = 0;
+            for (0..b.lines()) |i| {
+                const l = b.line(i);
+                var tabs: usize = 0;
+                while (tabs < l.len and l[tabs] == '\t') tabs += 1;
+                wide = @max(wide, l.len + tabs * (tw - 1));
+            }
+            d.wide = wide;
         }
-        if (now >= d.bar_t0 + bar_hold) {
-            d.bar.aimOver(0, bar_time, now);
-        }
-        const alpha = d.bar.at(now);
-        if (alpha > 0.01) {
-            const track = bar_room - 4;
-            const knob = @min(@max(@round(track * bar_room / (bar_span + bar_room)), 24), track);
-            const at_y = @round((track - knob) * std.math.clamp((d.vy - range[0]) / bar_span, 0, 1));
-            pill(ctx, th.fg, bar_alpha * alpha, card.x + card.w - bar_w - 3, top_h + 2 + at_y, bar_w, knob, bar_w * 0.5);
-        }
-    } else if (d.bar.to != 0) d.bar.snap(0);
+        d.hmax = @max(@max(0, f(d.wide + 2) * cw - textw), d.file.sx);
+    }
+    if (bar_span <= 0 and d.hmax <= 0) {
+        if (d.bar.to != 0) d.bar.snap(0);
+        d.vtrack = .{};
+        d.htrack = .{};
+        return;
+    }
+    if (d.vy != d.bar_vy or d.vx != d.bar_vx) {
+        d.bar_vy = d.vy;
+        d.bar_vx = d.vx;
+        d.bar_t0 = now;
+        d.bar.aimOver(1, bar_in, now);
+    }
+    // Held by the pointer, they stay; letting go restarts the hold (`hoverAt`, `mouseUp`).
+    const held = d.bar_hover or d.bar_drag != .none;
+    if (held) d.bar.aimOver(1, bar_in, now);
+    if (!held and now >= d.bar_t0 + bar_hold) {
+        d.bar.aimOver(0, bar_time, now);
+    }
+    const alpha = d.bar.at(now);
+    const v_on = bar_span > 0;
+    if (v_on) {
+        const track = bar_room - 4;
+        const knob = @min(@max(@round(track * bar_room / (bar_span + bar_room)), 24), track);
+        const at_y = @round((track - knob) * std.math.clamp((d.vy - range[0]) / bar_span, 0, 1));
+        const x = card.x + card.w - bar_w - 3;
+        d.vtrack = .{ .x = x, .y = top_h + 2, .w = bar_w, .h = track };
+        d.vknob = .{ .x = x, .y = top_h + 2 + at_y, .w = bar_w, .h = knob };
+        const press: f64 = if (d.bar_drag == .v) 1.4 else 1;
+        if (alpha > 0.01) pill(ctx, th.fg, bar_alpha * alpha * press, x, d.vknob.y, bar_w, knob, bar_w * 0.5);
+    } else d.vtrack = .{};
+    if (d.hmax > 0) {
+        const x0 = gap + padL(d);
+        const x1 = card.x + card.w - pad_x - @as(f64, if (v_on) bar_w else 0);
+        const track = @max(x1 - x0, 0);
+        const knob = @min(@max(@round(track * textw / (textw + d.hmax)), 24), track);
+        const at_x = @round((track - knob) * std.math.clamp(d.vx / d.hmax, 0, 1));
+        const y = bottom(d) - bar_w - 3;
+        d.htrack = .{ .x = x0, .y = y, .w = track, .h = bar_w };
+        d.hknob = .{ .x = x0 + at_x, .y = y, .w = knob, .h = bar_w };
+        const press: f64 = if (d.bar_drag == .h) 1.4 else 1;
+        if (alpha > 0.01) pill(ctx, th.fg, bar_alpha * alpha * press, d.hknob.x, y, knob, bar_w, bar_w * 0.5);
+    } else d.htrack = .{};
 }
 
 fn drawPanel(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, card: Rect, now: f64) void {
@@ -7171,7 +7532,7 @@ fn drawPrompt(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, ka: f64, 
         k.flush();
         if (prompting) {
             const width = if (d.which == 1 and d.mode == .replace) d.with.items.len else d.prompt.items.len;
-            placeCaret(d, now, cx, band_y + 8 + drop, false, .{ 1 + @as(usize, @intFromEnum(d.mode)) * 2 + d.which, width, 0 }, key);
+            placeCaret(d, now, cx, band_y + 8 + drop, false, .{ 1 + @as(usize, @intFromEnum(d.mode)) * 2 + d.which, width, 0 }, key, key);
         }
         const tally = d.held_tally[0..d.held_n];
         _ = k.text(tally, null, th, th.muted, card.x + card.w - pad_x - f(tally.len) * cw, ty, 0, 64);
@@ -8345,7 +8706,6 @@ fn drawRect(self: Id, _: Sel, dirty: Rect) callconv(.c) void {
 fn keyDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const d = docOf(self) orelse return;
     d.note = "";
-    d.flash_n = 0;
     const flags = msg(usize, ev, "modifierFlags", .{});
     const code = msg(u16, ev, "keyCode", .{});
     // ⎋ mid-drag drops nothing: the tab or file goes home.
@@ -8360,8 +8720,10 @@ fn keyDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     if (flags & objc.cmd_key != 0) {
         if (std.mem.indexOfScalar(u16, &.{ 51, 117, 115, 119, 123, 124, 125, 126 }, code) == null) return;
     }
-    // Like NSTextView: the pointer hides while typing and returns when the mouse moves.
-    if (code < 123 or code > 126) {
+    // Like NSTextView: the pointer hides while typing and returns when the
+    // mouse moves. A key with no characters (a modifier alone) leaves it.
+    const typed = objc.utf8(msg(Id, ev, "charactersIgnoringModifiers", .{})).len > 0;
+    if (typed and (code < 123 or code > 126)) {
         msg(void, objc.class("NSCursor"), "setHiddenUntilMouseMoves:", .{true});
         // Typing fades Zen's peeking lights out at once.
         peekTo(d.win, false, false);
@@ -8377,7 +8739,24 @@ fn insertText(self: Id, _: Sel, s: Id) callconv(.c) void {
     if (d.mode != .edit) {
         promptType(d, bytes);
     } else {
-        (if (conf.pairs) d.file.ed.typePaired(gpa, bytes) else d.file.ed.insert(gpa, bytes)) catch {};
+        const e = &d.file.ed;
+        const len0 = e.text().len;
+        const cur0 = e.cur;
+        const lone = bytes.len == 1 and !e.hasSel();
+        (if (conf.pairs) e.typePaired(gpa, bytes) else e.insert(gpa, bytes)) catch {};
+        // A closer that typing added, or one it stepped over (with its
+        // opener), flashes so the pair shows.
+        if (conf.pairs and lone) {
+            const t = e.text();
+            if (t.len == len0 + 2 and e.cur < t.len) {
+                flashStart(d);
+                flashAdd(d, e.cur, e.cur + 1);
+            } else if (t.len == len0 and e.cur == cur0 + 1) {
+                flashStart(d);
+                flashAdd(d, cur0, e.cur);
+                if (editor.matchingBracketAt(t, cur0)) |m| flashAdd(d, m, m + 1);
+            }
+        }
         reveal(d);
     }
     refresh(d);
@@ -8596,22 +8975,80 @@ fn cardDown(d: *Doc, p: Point, ev: Id) void {
         }
     }
     if (p.y >= by) return;
+    if (barDown(d, p)) return;
     d.win.side_down = false;
     d.mode = .edit;
+    const e = &d.file.ed;
     const pos = posAt(d, p);
-    switch (msg(isize, ev, "clickCount", .{})) {
-        2 => d.drag = .word,
-        3 => d.drag = .line,
-        else => {
-            d.drag = .char;
-            d.file.ed.moveTo(pos, msg(usize, ev, "modifierFlags", .{}) & objc.shift_key != 0);
-        },
-    }
-    if (d.drag != .char) {
+    const shift = msg(usize, ev, "modifierFlags", .{}) & objc.shift_key != 0;
+    // A click in the line numbers takes the whole line, and dragging there takes more lines.
+    const in_gutter = d.gw >= cw and p.x < gap + padL(d) - 0.5 * cw;
+    d.drag = switch (msg(isize, ev, "clickCount", .{})) {
+        2 => .word,
+        3 => .line,
+        1 => if (in_gutter) .line else .char,
+        else => .char,
+    };
+    if (d.drag == .char) {
+        e.moveTo(pos, shift);
+    } else if (shift) {
+        // Shift with a double or triple click (or a gutter click) extends
+        // from the anchor by whole words or lines.
+        const a = e.anchor;
+        const u = unitAt(d, pos);
+        d.drag_from = .{ a, a };
+        if (u[0] < a) e.select(a, u[0]) else e.select(a, u[1]);
+    } else {
         d.drag_from = unitAt(d, pos);
-        d.file.ed.select(d.drag_from[0], d.drag_from[1]);
+        e.select(d.drag_from[0], d.drag_from[1]);
     }
     refresh(d);
+}
+
+/// A click on a scroll bar while it shows: its knob follows the mouse from
+/// where it was grabbed, and a click in its track glides the page there.
+fn barDown(d: *Doc, p: Point) bool {
+    if (d.bar.at(CACurrentMediaTime()) < 0.05 and !d.bar_hover) return false;
+    const slop = 4.0;
+    const v = d.vtrack;
+    const h = d.htrack;
+    if (v.h > 0 and p.x >= v.x - slop and p.x < v.x + v.w + slop and p.y >= v.y and p.y < v.y + v.h) {
+        d.bar_drag = .v;
+        const on = p.y >= d.vknob.y and p.y < d.vknob.y + d.vknob.h;
+        d.bar_off = if (on) p.y - d.vknob.y else d.vknob.h / 2;
+        barTo(d, p, !on);
+        return true;
+    }
+    if (h.w > 0 and p.y >= h.y - slop and p.y < h.y + h.h + slop and p.x >= h.x and p.x < h.x + h.w) {
+        d.bar_drag = .h;
+        const on = p.x >= d.hknob.x and p.x < d.hknob.x + d.hknob.w;
+        d.bar_off = if (on) p.x - d.hknob.x else d.hknob.w / 2;
+        barTo(d, p, !on);
+        return true;
+    }
+    return false;
+}
+
+/// Scrolls so the held knob sits under `p`, gliding there for a click in
+/// the track and following at once for a drag.
+fn barTo(d: *Doc, p: Point, glide: bool) void {
+    const now = CACurrentMediaTime();
+    if (d.bar_drag == .v) {
+        const range = scrollRange(d);
+        const room = d.vtrack.h - d.vknob.h;
+        const fr = if (room > 0) std.math.clamp((p.y - d.bar_off - d.vtrack.y) / room, 0, 1) else 0;
+        d.file.sy = range[0] + fr * (range[1] - range[0]);
+        clampScroll(d);
+        if (glide) d.ys.aimOver(d.file.sy, scroll_time, now) else d.ys.snap(d.file.sy);
+    } else if (d.bar_drag == .h) {
+        const room = d.htrack.w - d.hknob.w;
+        const fr = if (room > 0) std.math.clamp((p.x - d.bar_off - d.htrack.x) / room, 0, 1) else 0;
+        d.file.sx = fr * d.hmax;
+        clampScroll(d);
+        if (glide) d.xs.aimOver(d.file.sx, scroll_time, now) else d.xs.snap(d.file.sx);
+    }
+    d.bar_t0 = now;
+    msg(void, d.win.view, "setNeedsDisplay:", .{true});
 }
 
 /// Double-click on an untitled tab: asks for a name the tab keeps, which
@@ -8758,6 +9195,17 @@ fn hoverAt(w: *Win, p: Point) void {
             d.hint_hot = hint;
             msg(void, w.view, "setNeedsDisplay:", .{true});
         }
+        // The scroll bars show while the pointer nears the card's right
+        // edge, or its bottom edge for the sideways bar, and fade a hold
+        // after it leaves.
+        const card = cardRect(d);
+        const near = d == over and w.tdrag == null and lp.y >= top_h and lp.y < bottom(d) and
+            (lp.x >= card.x + card.w - 18 or (d.htrack.w > 0 and lp.y >= bottom(d) - 18));
+        if (near != d.bar_hover) {
+            d.bar_hover = near;
+            d.bar_t0 = CACurrentMediaTime();
+            msg(void, w.view, "setNeedsDisplay:", .{true});
+        }
     };
     sideHover(w, p);
 }
@@ -8827,6 +9275,29 @@ fn peekTo(w: *Win, in: bool, hold: bool) void {
     if (t > 0) objc.later(w.view, "holdRedraw:", w.window, t);
 }
 
+/// View > Peek Window Controls: Zen's hidden traffic lights and title show
+/// for a moment, then fade, with no trip to the corner.
+const peek_hold = 2.0;
+fn peekLights(d: *Doc) void {
+    const w = d.win;
+    w.peek_in = false;
+    w.peek_out = CACurrentMediaTime() + peek_hold;
+    objc.later(w.view, "holdRedraw:", w.window, peek_hold);
+    msg(void, w.view, "setNeedsDisplay:", .{true});
+}
+
+/// View > Language: shows the card's file in the picked language (an
+/// index into `syntax.languages`, in the item's tag) until its tab closes.
+fn pickLanguage(self: Id, _: Sel, item: Id) callconv(.c) void {
+    const d = docOf(self) orelse return;
+    const i: usize = @intCast(@max(msg(isize, item, "tag", .{}), 0));
+    if (i >= syntax.languages.len) return;
+    d.file.lang_i = @intCast(i);
+    d.file.lang = syntax.languages[i].lang;
+    clearSyntax(d);
+    refresh(d);
+}
+
 /// The mouse lets go of a button it pressed: the button's fill fades.
 fn letGo(w: *Win) void {
     const now = CACurrentMediaTime();
@@ -8845,6 +9316,11 @@ fn mouseUp(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
     letGo(w);
     w.sel_at = null;
+    if (w.focus.bar_drag != .none) {
+        w.focus.bar_drag = .none;
+        w.focus.bar_t0 = CACurrentMediaTime();
+        return msg(void, w.view, "setNeedsDisplay:", .{true});
+    }
     if (w.tdrag) |t| {
         w.tdrag = null;
         startFly(w, t);
@@ -8884,6 +9360,7 @@ fn mouseDragged(self: Id, _: Sel, ev: Id) callconv(.c) void {
         return dragTab(w, p);
     }
     if (w.grab) |n| return dragGap(w, n, local(self, ev));
+    if (w.focus.bar_drag != .none) return barTo(w.focus, inPane(w.focus, local(self, ev)), false);
     if (w.side_down) return;
     dragText(w, local(self, ev));
 }
@@ -8912,21 +9389,36 @@ fn dragOutMask(_: Id, _: Sel, _: Id, _: isize) callconv(.c) usize {
     return 1;
 }
 
-/// How often a selection drag held above or below the text scrolls a line.
+/// How often a selection drag held outside the text scrolls.
 const drag_step = 1.0 / 60.0;
 
-/// Extends the focused card's selection to `at` in the view, scrolling a
-/// line when it's above or below the text, and comes back after
-/// `drag_step` to scroll again while the mouse holds still out there.
+/// How far a selection drag held `dist` points past the text's edge
+/// scrolls each step, in `unit`s: slowly near the edge, faster farther out.
+fn dragSpeed(dist: f64, unit: f64) f64 {
+    return unit * std.math.clamp(dist / 24, 0.2, 4);
+}
+
+/// Extends the focused card's selection to `at` in the view, scrolling
+/// when it's above, below or (unwrapped) beside the text, the faster the
+/// farther out, and comes back after `drag_step` to scroll again while the
+/// mouse holds still out there.
 fn dragText(w: *Win, at: Point) void {
     const d = w.focus;
     d.snap = true;
     const p = inPane(d, at);
     const sy = d.file.sy;
-    if (p.y < top_h) d.file.sy -= lh;
-    if (p.y > bottom(d)) d.file.sy += lh;
+    const sx = d.file.sx;
+    if (p.y < top_h) d.file.sy -= dragSpeed(top_h - p.y, lh);
+    if (p.y > bottom(d)) d.file.sy += dragSpeed(p.y - bottom(d), lh);
+    if (!wrapping()) {
+        const left = gap + padL(d);
+        const right = rightEdge(d) - pad_x;
+        if (p.x < left and d.file.sx > 0) d.file.sx -= dragSpeed(left - p.x, cw);
+        if (p.x > right and d.file.sx < d.hmax) d.file.sx = @min(d.hmax, d.file.sx + dragSpeed(p.x - right, cw));
+    }
     clampScroll(d);
     d.ys.snap(d.file.sy);
+    d.xs.snap(d.file.sx);
     const pos = posAt(d, p);
     if (d.drag == .char) {
         d.file.ed.moveTo(pos, true);
@@ -8936,7 +9428,7 @@ fn dragText(w: *Win, at: Point) void {
     }
     refresh(d);
     w.sel_at = at;
-    if (d.file.sy != sy) objc.later(w.view, "dragScroll:", w.window, drag_step);
+    if (d.file.sy != sy or d.file.sx != sx) objc.later(w.view, "dragScroll:", w.window, drag_step);
 }
 
 /// The selection drag's timer: scrolls on while the button is still down.
@@ -8983,8 +9475,15 @@ fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
     d.file.sx -= dx;
     d.file.sy -= dy;
     clampScroll(d);
-    d.ys.snap(d.file.sy);
-    d.xs.snap(d.file.sx);
+    // A trackpad follows the fingers; a mouse wheel's clicks glide.
+    if (precise) {
+        d.ys.snap(d.file.sy);
+        d.xs.snap(d.file.sx);
+    } else {
+        const now = CACurrentMediaTime();
+        d.ys.aimOver(d.file.sy, scroll_time, now);
+        d.xs.aimOver(d.file.sx, scroll_time, now);
+    }
     refresh(d);
 }
 
@@ -9458,7 +9957,7 @@ fn duplicateTab(d: *Doc, j: usize) void {
     const src = tabPage(d, j);
     var ed = Editor.init(gpa, src.ed.text()) catch return;
     styleEditor(&ed);
-    var pg: Page = .{ .ed = ed, .id = newId(), .lang = src.lang };
+    var pg: Page = .{ .ed = ed, .id = newId(), .lang = src.lang, .lang_i = src.lang_i };
     _ = pg.rename();
     putTab(d, pg, j + 1);
 }
@@ -9585,7 +10084,7 @@ fn movedPath(old: []const u8, new: []const u8) void {
         preview.rename(pg.id, np);
         gpa.free(p);
         pg.path = np;
-        pg.lang = syntax.forPath(np);
+        pg.lang = langOf(pg, np);
         pg.stamp = files.stamp(np);
         if (j == d.at) {
             clearSyntax(d);
@@ -9717,9 +10216,12 @@ fn putClipboard(text: []const u8) void {
 }
 
 fn cut(d: *Doc) void {
-    if (d.mode != .edit) return;
+    if (d.mode != .edit or !d.file.ed.hasSel()) return;
     copy(d);
     d.file.ed.deleteSelection(gpa) catch {};
+    // A bar flashes where the cut text was.
+    flashStart(d);
+    flashAdd(d, d.file.ed.cur, d.file.ed.cur);
     reveal(d);
 }
 
@@ -9740,10 +10242,9 @@ fn paste(d: *Doc) void {
     if (d.mode != .edit) return promptPaste(d, s);
     const at = d.file.ed.sel()[0];
     d.file.ed.paste(gpa, s) catch {};
-    if (std.mem.indexOfScalar(u8, s, '\n') != null or s.len > 40) {
-        flashStart(d);
-        flashAdd(d, at, d.file.ed.cur);
-    }
+    // Every paste flashes what it put in, a short one too.
+    flashStart(d);
+    flashAdd(d, at, d.file.ed.cur);
     reveal(d);
 }
 
@@ -9953,7 +10454,7 @@ fn rgbOf(b: [3]u8) Rgb {
 const Target = enum { app, view, system, fonts };
 
 /// The setting a command's checkmark shows. Picks compare their tag.
-const Check = enum { wrap, pairs, sidebar, line_numbers, typewriter, zen, late_night, focus, scheme, look, show_hidden };
+const Check = enum { wrap, pairs, sidebar, line_numbers, typewriter, zen, late_night, focus, scheme, look, show_hidden, language };
 
 /// `e`'s field `name` as a `T`, or `default` when the entry has none.
 fn pluck(comptime T: type, comptime e: anytype, comptime name: []const u8, comptime default: T) T {
@@ -10038,6 +10539,7 @@ const menu_bar = .{
         .{ .title = "Focus Sidebar", .sel = "focusSidebar:", .key = "e", .mods = objc.cmd_key | objc.shift_key, .to = .view, .run = focusSidebar },
         .{ .title = "Show Hidden Files", .sel = "toggleHidden:", .to = .app, .run = flip, .args = .{.@"show-hidden"}, .check = .show_hidden },
         .{ .title = "Zen Mode", .sel = "toggleZen:", .key = "z", .mods = objc.ctrl_key | objc.cmd_key, .to = .app, .run = toggleZen, .check = .zen, .grey = true },
+        .{ .title = "Peek Window Controls", .sel = "peekLights:", .key = "p", .mods = objc.ctrl_key | objc.cmd_key, .to = .view, .run = peekLights },
         // Late-Night's own checkmark reads its flag; the items it sets show the effective values.
         .{ .title = "Late-Night Focus", .sel = "toggleLateNight:", .key = "n", .mods = objc.ctrl_key | objc.cmd_key, .to = .app, .run = flip, .args = .{.@"late-night"}, .check = .late_night },
         .{ .title = "Show Next Tab", .sel = "nextTab:", .key = "\t", .mods = objc.ctrl_key, .to = .view, .run = stepTab, .args = .{1} },
@@ -10060,6 +10562,10 @@ const menu_bar = .{
         .{ .title = "Typewriter Scrolling", .sel = "toggleTypewriter:", .to = .app, .run = toggleTypewriter, .check = .typewriter, .grey = true },
         .{ .menu = "Focus", .items = .{
             .{ .titles = .{ "Off", "Line", "Sentence", "Paragraph" }, .sel = "pickFocus:", .to = .app, .run = pickFocus, .check = .focus, .grey = true },
+        } },
+        // The view handles picks itself (`pickLanguage`): each item's tag indexes `syntax.languages`.
+        .{ .menu = "Language", .items = .{
+            .{ .langs = true, .sel = "pickLanguage:", .check = .language },
         } },
         .{ .sep = true },
         .{ .title = "Split Right", .sel = "splitRight:", .key = "d", .mods = objc.cmd_key, .to = .view, .run = split, .args = .{false} },
@@ -10134,6 +10640,8 @@ fn fillMenu(menu: Id, comptime entries: anytype, delegate: Id) void {
             }
         } else if (@hasField(T, "titles")) {
             inline for (e.titles, 0..) |title, i| _ = pick(menu, title, e.sel, i, pluck(isize, e, "indent", 0));
+        } else if (@hasField(T, "langs")) {
+            for (syntax.languages, 0..) |l, i| _ = pick(menu, l.name, e.sel, i, 0);
         } else {
             const it = menuItem(menu, e.title, e.sel, pluck([]const u8, e, "key", ""), pluck(usize, e, "mods", 0));
             if (pluck(Target, e, "to", .system) == .fonts) {
@@ -10225,7 +10733,18 @@ fn checked(c: Check, tag: usize) bool {
         .scheme => tag == conf.light_scheme or tag == conf.dark_scheme,
         .look => tag == @intFromEnum(conf.look),
         .show_hidden => conf.show_hidden,
+        .language => langPicked(tag),
     };
+}
+
+/// Whether the key card's file shows in language `tag` of `syntax.languages`:
+/// the one picked by hand, or the family's first name for a detected one.
+fn langPicked(tag: usize) bool {
+    const d = keyDoc() orelse return false;
+    if (tag >= syntax.languages.len) return false;
+    if (d.file.lang_i) |i| return tag == i;
+    const l = syntax.languages[tag];
+    return l.lang == d.file.lang and std.mem.eql(u8, l.name, syntax.nameOf(d.file.lang));
 }
 
 /// Whether a menu item shows a checkmark now, whether or not its menu was opened.
@@ -10242,12 +10761,17 @@ fn greyed(it: Id) bool {
 }
 
 /// What the menu's validation says: sets the checkmark and greys what
-/// Late-Night has set.
+/// Late-Night has set, with a tooltip that says why and how to get it back.
 pub fn validate(_: Id, _: Sel, it: Id) callconv(.c) bool {
     const r = ruleOf(it) orelse return true;
     if (r.check) |c| msg(void, it, "setState:", .{@as(isize, @intFromBool(checked(c, @intCast(msg(isize, it, "tag", .{})))))});
-    return !(r.grey and conf.late_night);
+    const off = r.grey and conf.late_night;
+    if (r.grey) msg(void, it, "setToolTip:", .{if (off) objc.str(late_night_why) else @as(Id, null)});
+    return !off;
 }
+
+/// The tooltip on the items Late-Night Focus greys.
+const late_night_why = "Late-Night Focus sets this. Turn off Late-Night Focus (" ++ menuKeys("toggleLateNight:") ++ ") to change it.";
 
 /// Registers the view class and loads the font. Call once at launch.
 pub fn setup() void {
@@ -10314,6 +10838,9 @@ pub fn setup() void {
     c.method("otherMouseDown:", @ptrCast(&otherMouseDown), "v@:@");
     c.method("endDissolve:", @ptrCast(&endDissolve), "v@:@");
     c.method("pickTab:", @ptrCast(&pickTab), "v@:@");
+    c.method("pickLanguage:", @ptrCast(&pickLanguage), "v@:@");
+    // The View menu's Language picks check the key card's language.
+    c.method("validateMenuItem:", @ptrCast(&validate), "c@:@");
     c.method("menuDidClose:", @ptrCast(&menuDidClose), "v@:@");
     c.method("revealInFinder:", @ptrCast(&revealInFinder), "v@:@");
     c.method("sideParent:", @ptrCast(&sideParent), "v@:@");
