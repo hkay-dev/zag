@@ -42,7 +42,7 @@ fn rgb(v: u24) [3]u8 {
     return .{ @intCast(v >> 16), @intCast((v >> 8) & 0xff), @intCast(v & 0xff) };
 }
 
-fn wide(c: [3]u8) Rgb {
+pub fn wide(c: [3]u8) Rgb {
     return .{ @as(f64, @floatFromInt(c[0])) / 255, @as(f64, @floatFromInt(c[1])) / 255, @as(f64, @floatFromInt(c[2])) / 255 };
 }
 
@@ -53,179 +53,6 @@ fn widen(b: Bytes) Theme {
     for (all(&th), from) |*o, c| o.* = wide(c);
     return th;
 }
-
-/// Warm paper in light mode.
-const paper_c: Bytes = .{
-    .bg = rgb(0xF5F2EA),
-    .fg = rgb(0x2E2C28),
-    .muted = rgb(0x736E64),
-    .kinds = .{ rgb(0x2E2C28), rgb(0x9C3D26), rgb(0x4F7A3A), rgb(0x736E64), rgb(0xA8642A), rgb(0x2F6587), rgb(0x7D4E86) },
-    .sel = rgb(0xF1C7AC),
-    .line = rgb(0xEFEADF),
-    .caret = rgb(0xE8590C),
-    .match = rgb(0xF2D98A),
-    .panel = rgb(0xECE7DB),
-    .rule = rgb(0xD6CDB9),
-    .header = rgb(0xE3DBCA),
-};
-
-/// Ink in dark mode.
-const ink_c: Bytes = .{
-    .bg = rgb(0x17171B),
-    .fg = rgb(0xD9D4C7),
-    .muted = rgb(0x8A857B),
-    .kinds = .{ rgb(0xD9D4C7), rgb(0xF08A6C), rgb(0xA7C080), rgb(0x838078), rgb(0xE8B86B), rgb(0x8DB8D8), rgb(0xCFA3D8) },
-    .sel = rgb(0x5E3B26),
-    .line = rgb(0x1E1E24),
-    .caret = rgb(0xFF8A3D),
-    .match = rgb(0x5A4A24),
-    .panel = rgb(0x202027),
-    .rule = rgb(0x2A2A31),
-    .header = rgb(0x212128),
-};
-
-/// Ayu Light, from the ayu theme family, with its syntax colors darkened to
-/// read at 4.5:1 on the page.
-const ayu_light: Bytes = .{
-    .bg = rgb(0xF8F9FA),
-    .fg = rgb(0x5C6166),
-    .muted = rgb(0x6D7379),
-    .kinds = .{ rgb(0x5C6166), rgb(0xAA602A), rgb(0x5E7D00), rgb(0x717376), rgb(0x8664A8), rgb(0x956B2D), rgb(0x2B78AF) },
-    .sel = rgb(0xC2D6F2),
-    .line = rgb(0xEDEFF0),
-    .caret = rgb(0xFFAA33),
-    .match = rgb(0xF5E1A8),
-    .panel = rgb(0xF0F1F2),
-    .rule = rgb(0xD6DADF),
-    .header = rgb(0xE4E7EB),
-};
-
-/// Ayu Dark.
-const ayu_dark: Bytes = .{
-    .bg = rgb(0x0B0E14),
-    .fg = rgb(0xBFBDB6),
-    .muted = rgb(0x7C7F85),
-    .kinds = .{ rgb(0xBFBDB6), rgb(0xFF8F40), rgb(0xAAD94C), rgb(0x767B82), rgb(0xD2A6FF), rgb(0xFFB454), rgb(0x59C2FF) },
-    .sel = rgb(0x1F4470),
-    .line = rgb(0x131721),
-    .caret = rgb(0xE6B450),
-    .match = rgb(0x4A3B1A),
-    .panel = rgb(0x0F131A),
-    .rule = rgb(0x1B1F29),
-    .header = rgb(0x151A23),
-};
-
-/// One Light, Atom's light theme, with its syntax colors darkened to read at
-/// 4.5:1 on the page.
-const one_light: Bytes = .{
-    .bg = rgb(0xFAFAFA),
-    .fg = rgb(0x383A42),
-    .muted = rgb(0x727277),
-    .kinds = .{ rgb(0x383A42), rgb(0xA626A4), rgb(0x408140), rgb(0x727379), rgb(0x986801), rgb(0x3A6EDD), rgb(0x9B6A01) },
-    .sel = rgb(0xD8DEFB),
-    .line = rgb(0xF0F0F1),
-    .caret = rgb(0x526FFF),
-    .match = rgb(0xF2E2A6),
-    .panel = rgb(0xEFEFF0),
-    .rule = rgb(0xD5D5D8),
-    .header = rgb(0xE6E6E9),
-};
-
-/// One Dark, Atom's dark theme.
-const one_dark: Bytes = .{
-    .bg = rgb(0x282C34),
-    .fg = rgb(0xABB2BF),
-    .muted = rgb(0x8B93A4),
-    .kinds = .{ rgb(0xABB2BF), rgb(0xC678DD), rgb(0x98C379), rgb(0x8D939D), rgb(0xD19A66), rgb(0x61AFEF), rgb(0xE5C07B) },
-    .sel = rgb(0x354871),
-    .line = rgb(0x2C313C),
-    .caret = rgb(0x528BFF),
-    .match = rgb(0x314365),
-    .panel = rgb(0x21252B),
-    .rule = rgb(0x181A1F),
-    .header = rgb(0x31363F),
-};
-
-/// Black for OLED screens: pure black with off-white text a step softer than
-/// Ink's, since black raises the contrast, and Ink's hues pulled a tenth
-/// toward black to sit with it.
-const black_c: Bytes = .{
-    .bg = rgb(0x000000),
-    .fg = rgb(0xCBC6BA),
-    .muted = rgb(0x7B776F),
-    .kinds = .{ rgb(0xCBC6BA), rgb(0xD87C61), rgb(0x96AD73), rgb(0x78746D), rgb(0xD1A660), rgb(0x7FA6C2), rgb(0xBA93C2) },
-    .sel = rgb(0x3A2416),
-    .line = rgb(0x0A0A0B),
-    .caret = rgb(0xE67A33),
-    .match = rgb(0x3A3018),
-    .panel = rgb(0x101012),
-    .rule = rgb(0x1C1C20),
-    .header = rgb(0x111113),
-};
-
-/// Solarized Light, Ethan Schoonover's palette, with its grey and green,
-/// cyan and yellow accents darkened to read on base3.
-const solarized_light: Bytes = .{
-    .bg = rgb(0xFDF6E3),
-    .fg = rgb(0x586E75),
-    .muted = rgb(0x5F747C),
-    .kinds = .{ rgb(0x586E75), rgb(0x798B00), rgb(0x26928A), rgb(0x697373), rgb(0xD33682), rgb(0x2589CF), rgb(0xA57D00) },
-    .sel = rgb(0xDCD4BC),
-    .line = rgb(0xF3ECD7),
-    .caret = rgb(0xCB4B16),
-    .match = rgb(0xF0DD9A),
-    .panel = rgb(0xEEE8D5),
-    .rule = rgb(0xDDD6C1),
-    .header = rgb(0xE8E1CC),
-};
-
-/// Solarized Dark, with its greys lightened to read on base03.
-const solarized_dark: Bytes = .{
-    .bg = rgb(0x002B36),
-    .fg = rgb(0x93A1A1),
-    .muted = rgb(0x7D9096),
-    .kinds = .{ rgb(0x93A1A1), rgb(0x859900), rgb(0x2AA198), rgb(0x7F9095), rgb(0xD33682), rgb(0x268BD2), rgb(0xB58900) },
-    .sel = rgb(0x174C5A),
-    .line = rgb(0x073642),
-    .caret = rgb(0xCB4B16),
-    .match = rgb(0x3E4A1C),
-    .panel = rgb(0x00252E),
-    .rule = rgb(0x0D3D4A),
-    .header = rgb(0x05313D),
-};
-
-/// Gruvbox Light, morhetz's retro palette, with its greys darkened.
-const gruvbox_light: Bytes = .{
-    .bg = rgb(0xFBF1C7),
-    .fg = rgb(0x3C3836),
-    .muted = rgb(0x786B60),
-    .kinds = .{ rgb(0x3C3836), rgb(0x9D0006), rgb(0x79740E), rgb(0x786C60), rgb(0x8F3F71), rgb(0x427B58), rgb(0xB57614) },
-    .sel = rgb(0xE6D3A3),
-    .line = rgb(0xF2E5BC),
-    .caret = rgb(0xAF3A03),
-    .match = rgb(0xF5D58A),
-    .panel = rgb(0xF2E5BC),
-    .rule = rgb(0xD5C4A1),
-    .header = rgb(0xEBDBB2),
-};
-
-/// Gruvbox Dark, with its comment grey lightened a step.
-const gruvbox_dark: Bytes = .{
-    .bg = rgb(0x282828),
-    .fg = rgb(0xEBDBB2),
-    .muted = rgb(0xA89984),
-    .kinds = .{ rgb(0xEBDBB2), rgb(0xFB4934), rgb(0xB8BB26), rgb(0x9A8C7E), rgb(0xD3869B), rgb(0x83A598), rgb(0xFABD2F) },
-    .sel = rgb(0x504945),
-    .line = rgb(0x32302F),
-    .caret = rgb(0xFE8019),
-    .match = rgb(0x5B4A1E),
-    .panel = rgb(0x1D2021),
-    .rule = rgb(0x3C3836),
-    .header = rgb(0x32302F),
-};
-
-pub const paper = widen(paper_c);
-pub const ink = widen(ink_c);
 
 pub const Scheme = struct {
     /// How the settings file names it.
@@ -238,17 +65,72 @@ pub const Scheme = struct {
 
 /// The built-in themes, light ones first. Either mode can use any of them.
 pub const schemes = [_]Scheme{
-    .{ .key = "paper", .title = "Paper", .dark = false, .colors = paper_c },
-    .{ .key = "ayu-light", .title = "Ayu Light", .dark = false, .colors = ayu_light },
-    .{ .key = "one-light", .title = "One Light", .dark = false, .colors = one_light },
-    .{ .key = "solarized-light", .title = "Solarized Light", .dark = false, .colors = solarized_light },
-    .{ .key = "gruvbox-light", .title = "Gruvbox Light", .dark = false, .colors = gruvbox_light },
-    .{ .key = "ink", .title = "Ink", .dark = true, .colors = ink_c },
-    .{ .key = "ayu-dark", .title = "Ayu Dark", .dark = true, .colors = ayu_dark },
-    .{ .key = "one-dark", .title = "One Dark", .dark = true, .colors = one_dark },
-    .{ .key = "solarized-dark", .title = "Solarized Dark", .dark = true, .colors = solarized_dark },
-    .{ .key = "gruvbox-dark", .title = "Gruvbox Dark", .dark = true, .colors = gruvbox_dark },
-    .{ .key = "black", .title = "Black", .dark = true, .colors = black_c },
+    // Warm paper in light mode.
+    .{ .key = "paper", .title = "Paper", .dark = false, .colors = .{
+        .bg = rgb(0xF5F2EA), .fg = rgb(0x2E2C28), .muted = rgb(0x736E64),
+        .kinds = .{ rgb(0x2E2C28), rgb(0x9C3D26), rgb(0x4F7A3A), rgb(0x736E64), rgb(0xA8642A), rgb(0x2F6587), rgb(0x7D4E86) },
+        .sel = rgb(0xF1C7AC), .line = rgb(0xEFEADF), .caret = rgb(0xE8590C), .match = rgb(0xF2D98A), .panel = rgb(0xECE7DB), .rule = rgb(0xD6CDB9), .header = rgb(0xE3DBCA),
+    } },
+    // Ayu Light, from the ayu theme family, with its syntax colors darkened to read at 4.5:1 on the page.
+    .{ .key = "ayu-light", .title = "Ayu Light", .dark = false, .colors = .{
+        .bg = rgb(0xF8F9FA), .fg = rgb(0x5C6166), .muted = rgb(0x6D7379),
+        .kinds = .{ rgb(0x5C6166), rgb(0xAA602A), rgb(0x5E7D00), rgb(0x717376), rgb(0x8664A8), rgb(0x956B2D), rgb(0x2B78AF) },
+        .sel = rgb(0xC2D6F2), .line = rgb(0xEDEFF0), .caret = rgb(0xFFAA33), .match = rgb(0xF5E1A8), .panel = rgb(0xF0F1F2), .rule = rgb(0xD6DADF), .header = rgb(0xE4E7EB),
+    } },
+    // One Light, Atom's light theme, with its syntax colors darkened to read at 4.5:1 on the page.
+    .{ .key = "one-light", .title = "One Light", .dark = false, .colors = .{
+        .bg = rgb(0xFAFAFA), .fg = rgb(0x383A42), .muted = rgb(0x727277),
+        .kinds = .{ rgb(0x383A42), rgb(0xA626A4), rgb(0x408140), rgb(0x727379), rgb(0x986801), rgb(0x3A6EDD), rgb(0x9B6A01) },
+        .sel = rgb(0xD8DEFB), .line = rgb(0xF0F0F1), .caret = rgb(0x526FFF), .match = rgb(0xF2E2A6), .panel = rgb(0xEFEFF0), .rule = rgb(0xD5D5D8), .header = rgb(0xE6E6E9),
+    } },
+    // Solarized Light, Ethan Schoonover's palette, with its grey and green, cyan and yellow accents darkened to read on base3.
+    .{ .key = "solarized-light", .title = "Solarized Light", .dark = false, .colors = .{
+        .bg = rgb(0xFDF6E3), .fg = rgb(0x586E75), .muted = rgb(0x5F747C),
+        .kinds = .{ rgb(0x586E75), rgb(0x798B00), rgb(0x26928A), rgb(0x697373), rgb(0xD33682), rgb(0x2589CF), rgb(0xA57D00) },
+        .sel = rgb(0xDCD4BC), .line = rgb(0xF3ECD7), .caret = rgb(0xCB4B16), .match = rgb(0xF0DD9A), .panel = rgb(0xEEE8D5), .rule = rgb(0xDDD6C1), .header = rgb(0xE8E1CC),
+    } },
+    // Gruvbox Light, morhetz's retro palette, with its greys darkened.
+    .{ .key = "gruvbox-light", .title = "Gruvbox Light", .dark = false, .colors = .{
+        .bg = rgb(0xFBF1C7), .fg = rgb(0x3C3836), .muted = rgb(0x786B60),
+        .kinds = .{ rgb(0x3C3836), rgb(0x9D0006), rgb(0x79740E), rgb(0x786C60), rgb(0x8F3F71), rgb(0x427B58), rgb(0xB57614) },
+        .sel = rgb(0xE6D3A3), .line = rgb(0xF2E5BC), .caret = rgb(0xAF3A03), .match = rgb(0xF5D58A), .panel = rgb(0xF2E5BC), .rule = rgb(0xD5C4A1), .header = rgb(0xEBDBB2),
+    } },
+    // Ink in dark mode.
+    .{ .key = "ink", .title = "Ink", .dark = true, .colors = .{
+        .bg = rgb(0x17171B), .fg = rgb(0xD9D4C7), .muted = rgb(0x8A857B),
+        .kinds = .{ rgb(0xD9D4C7), rgb(0xF08A6C), rgb(0xA7C080), rgb(0x838078), rgb(0xE8B86B), rgb(0x8DB8D8), rgb(0xCFA3D8) },
+        .sel = rgb(0x5E3B26), .line = rgb(0x1E1E24), .caret = rgb(0xFF8A3D), .match = rgb(0x5A4A24), .panel = rgb(0x202027), .rule = rgb(0x2A2A31), .header = rgb(0x212128),
+    } },
+    // Ayu Dark.
+    .{ .key = "ayu-dark", .title = "Ayu Dark", .dark = true, .colors = .{
+        .bg = rgb(0x0B0E14), .fg = rgb(0xBFBDB6), .muted = rgb(0x7C7F85),
+        .kinds = .{ rgb(0xBFBDB6), rgb(0xFF8F40), rgb(0xAAD94C), rgb(0x767B82), rgb(0xD2A6FF), rgb(0xFFB454), rgb(0x59C2FF) },
+        .sel = rgb(0x1F4470), .line = rgb(0x131721), .caret = rgb(0xE6B450), .match = rgb(0x4A3B1A), .panel = rgb(0x0F131A), .rule = rgb(0x1B1F29), .header = rgb(0x151A23),
+    } },
+    // One Dark, Atom's dark theme.
+    .{ .key = "one-dark", .title = "One Dark", .dark = true, .colors = .{
+        .bg = rgb(0x282C34), .fg = rgb(0xABB2BF), .muted = rgb(0x8B93A4),
+        .kinds = .{ rgb(0xABB2BF), rgb(0xC678DD), rgb(0x98C379), rgb(0x8D939D), rgb(0xD19A66), rgb(0x61AFEF), rgb(0xE5C07B) },
+        .sel = rgb(0x354871), .line = rgb(0x2C313C), .caret = rgb(0x528BFF), .match = rgb(0x314365), .panel = rgb(0x21252B), .rule = rgb(0x181A1F), .header = rgb(0x31363F),
+    } },
+    // Solarized Dark, with its greys lightened to read on base03.
+    .{ .key = "solarized-dark", .title = "Solarized Dark", .dark = true, .colors = .{
+        .bg = rgb(0x002B36), .fg = rgb(0x93A1A1), .muted = rgb(0x7D9096),
+        .kinds = .{ rgb(0x93A1A1), rgb(0x859900), rgb(0x2AA198), rgb(0x7F9095), rgb(0xD33682), rgb(0x268BD2), rgb(0xB58900) },
+        .sel = rgb(0x174C5A), .line = rgb(0x073642), .caret = rgb(0xCB4B16), .match = rgb(0x3E4A1C), .panel = rgb(0x00252E), .rule = rgb(0x0D3D4A), .header = rgb(0x05313D),
+    } },
+    // Gruvbox Dark, with its comment grey lightened a step.
+    .{ .key = "gruvbox-dark", .title = "Gruvbox Dark", .dark = true, .colors = .{
+        .bg = rgb(0x282828), .fg = rgb(0xEBDBB2), .muted = rgb(0xA89984),
+        .kinds = .{ rgb(0xEBDBB2), rgb(0xFB4934), rgb(0xB8BB26), rgb(0x9A8C7E), rgb(0xD3869B), rgb(0x83A598), rgb(0xFABD2F) },
+        .sel = rgb(0x504945), .line = rgb(0x32302F), .caret = rgb(0xFE8019), .match = rgb(0x5B4A1E), .panel = rgb(0x1D2021), .rule = rgb(0x3C3836), .header = rgb(0x32302F),
+    } },
+    // Black for OLED screens: pure black with off-white text a step softer than Ink's, since black raises the contrast, and Ink's hues pulled a tenth toward black to sit with it.
+    .{ .key = "black", .title = "Black", .dark = true, .colors = .{
+        .bg = rgb(0x000000), .fg = rgb(0xCBC6BA), .muted = rgb(0x7B776F),
+        .kinds = .{ rgb(0xCBC6BA), rgb(0xD87C61), rgb(0x96AD73), rgb(0x78746D), rgb(0xD1A660), rgb(0x7FA6C2), rgb(0xBA93C2) },
+        .sel = rgb(0x3A2416), .line = rgb(0x0A0A0B), .caret = rgb(0xE67A33), .match = rgb(0x3A3018), .panel = rgb(0x101012), .rule = rgb(0x1C1C20), .header = rgb(0x111113),
+    } },
 };
 
 fn schemeIndex(key: []const u8) ?u8 {
@@ -258,6 +140,8 @@ fn schemeIndex(key: []const u8) ?u8 {
 
 /// The default dark theme's index.
 const ink_index = schemeIndex("ink").?;
+pub const paper = widen(schemes[0].colors);
+pub const ink = widen(schemes[ink_index].colors);
 
 /// What `parse` couldn't use: how many lines, and the first one's line
 /// number and why.
@@ -451,9 +335,35 @@ pub fn decimal(buf: *[24]u8, v: f64) []const u8 {
     const hundredths: u64 = @intFromFloat(@round(@max(v, 0) * 100));
     const whole = hundredths / 100;
     const frac = hundredths % 100;
-    if (frac == 0) return std.fmt.bufPrint(buf, "{d}", .{whole}) catch "";
-    if (frac % 10 == 0) return std.fmt.bufPrint(buf, "{d}.{d}", .{ whole, frac / 10 }) catch "";
-    return std.fmt.bufPrint(buf, "{d}.{d:0>2}", .{ whole, frac }) catch "";
+    const head = std.fmt.bufPrint(buf, "{d}", .{whole}) catch return "";
+    var n = head.len;
+    if (frac != 0) {
+        buf[n] = '.';
+        buf[n + 1] = @intCast('0' + frac / 10);
+        n += 2;
+        if (frac % 10 != 0) {
+            buf[n] = @intCast('0' + frac % 10);
+            n += 1;
+        }
+    }
+    return buf[0..n];
+}
+
+/// Splits the right-hand side of `key = rhs` into its unquoted value and any
+/// trailing ` # comment` (keeping the spaces before `#`).
+fn splitValue(rhs: []const u8) struct { val: []const u8, comment: []const u8 } {
+    const s = std.mem.trim(u8, rhs, " \t\r");
+    if (s.len > 0 and (s[0] == '"' or s[0] == '\'')) {
+        const end = std.mem.indexOfScalarPos(u8, s, 1, s[0]) orelse return .{ .val = s[1..], .comment = "" };
+        const rest = s[end + 1 ..];
+        const trimmed = std.mem.trimStart(u8, rest, " \t");
+        return .{ .val = s[1..end], .comment = if (trimmed.len > 0 and trimmed[0] == '#') rest else "" };
+    }
+    for (s, 0..) |ch, i| if (ch == '#' and i > 0 and (s[i - 1] == ' ' or s[i - 1] == '\t')) {
+        const val = std.mem.trimEnd(u8, s[0..i], " \t");
+        return .{ .val = val, .comment = s[val.len..] };
+    };
+    return .{ .val = s, .comment = "" };
 }
 
 /// A `[section]` of the file: `[light]` and `[dark]` take color names as keys.
@@ -502,16 +412,7 @@ const Reader = struct {
             }
             const eq = std.mem.indexOfScalar(u8, line, '=') orelse
                 return .{ .kind = .junk, .key = line, .line = r.line, .section = r.section };
-            var val = std.mem.trim(u8, line[eq + 1 ..], " \t");
-            if (val.len > 0 and (val[0] == '"' or val[0] == '\'')) {
-                val = if (std.mem.indexOfScalarPos(u8, val, 1, val[0])) |end| val[1..end] else val[1..];
-            } else {
-                for (val, 0..) |ch, i| if (ch == '#' and i > 0 and (val[i - 1] == ' ' or val[i - 1] == '\t')) {
-                    val = std.mem.trimEnd(u8, val[0..i], " \t");
-                    break;
-                };
-            }
-            return .{ .key = std.mem.trim(u8, line[0..eq], " \t"), .val = val, .line = r.line, .section = r.section };
+            return .{ .key = std.mem.trim(u8, line[0..eq], " \t"), .val = splitValue(line[eq + 1 ..]).val, .line = r.line, .section = r.section };
         }
         return null;
     }
@@ -566,11 +467,6 @@ fn ranged(rep: *Report, e: Entry, cur: f64, lo: f64, hi: f64) f64 {
     return std.math.clamp(v, lo, hi);
 }
 
-/// `ranged` for a whole number.
-fn rangedInt(comptime T: type, rep: *Report, e: Entry, cur: T, lo: T, hi: T) T {
-    return @intFromFloat(@round(ranged(rep, e, @floatFromInt(cur), @floatFromInt(lo), @floatFromInt(hi))));
-}
-
 /// One color of `th`, named by `name`, from the entry's value.
 fn setColor(rep: *Report, th: *Theme, e: Entry, name: []const u8) void {
     const p = slot(th, name) orelse return rep.add(e.line, "\"{s}\" isn't a color's name", .{clip(e.key)});
@@ -622,7 +518,6 @@ pub fn parse(text: []const u8) Settings {
             },
             .other => continue,
         }
-        const val = e.val;
         switch (enumOf(Opt, e.key) orelse {
             const dot = std.mem.indexOfScalar(u8, e.key, '.') orelse {
                 rep.add(e.line, "\"{s}\" isn't a setting", .{clip(e.key)});
@@ -636,37 +531,20 @@ pub fn parse(text: []const u8) Settings {
             setColor(rep, theme, e, e.key[dot + 1 ..]);
             continue;
         }) {
-            .font => s.setFont(val),
-            .size => s.size = ranged(rep, e, s.size, size_min, size_max),
-            .@"line-height" => s.spacing = ranged(rep, e, s.spacing, 1, 3),
-            .wrap => s.wrap = flagOr(rep, e, s.wrap),
-            .pairs => s.pairs = flagOr(rep, e, s.pairs),
-            .focus => s.focus = enumOr(Focus, rep, e, s.focus),
-            .typewriter => s.typewriter = flagOr(rep, e, s.typewriter),
-            .@"line-numbers" => s.line_numbers = flagOr(rep, e, s.line_numbers),
-            .zen => s.zen = flagOr(rep, e, s.zen),
-            .@"late-night" => s.late_night = flagOr(rep, e, s.late_night),
-            .sidebar => s.sidebar = flagOr(rep, e, s.sidebar),
-            .@"sidebar-width" => s.sidebar_width = ranged(rep, e, s.sidebar_width, sidebar_min, sidebar_max),
-            .@"tab-width" => s.tab_width = rangedInt(u8, rep, e, s.tab_width, 1, 16),
-            .@"indent-with" => s.indent_with = enumOr(IndentWith, rep, e, s.indent_with),
-            .@"trim-trailing-whitespace" => s.trim_trailing_whitespace = flagOr(rep, e, s.trim_trailing_whitespace),
-            .@"ensure-final-newline" => s.ensure_final_newline = flagOr(rep, e, s.ensure_final_newline),
-            .@"hanging-indent" => s.hanging_indent = flagOr(rep, e, s.hanging_indent),
-            .@"caret-style" => s.caret_style = enumOr(CaretStyle, rep, e, s.caret_style),
-            .@"caret-width" => s.caret_width = ranged(rep, e, s.caret_width, 1, 6),
-            .@"caret-blink" => s.caret_blink = flagOr(rep, e, s.caret_blink),
-            .@"highlight-current-line" => s.highlight_current_line = flagOr(rep, e, s.highlight_current_line),
-            .@"show-invisibles" => s.show_invisibles = enumOr(Invisibles, rep, e, s.show_invisibles),
-            .@"indent-guides" => s.indent_guides = flagOr(rep, e, s.indent_guides),
-            .@"word-count" => s.word_count = enumOr(WordCount, rep, e, s.word_count),
-            .@"zen-columns" => s.zen_columns = rangedInt(u16, rep, e, s.zen_columns, 40, 160),
-            .@"focus-dim" => s.focus_dim = ranged(rep, e, s.focus_dim, 0.2, 0.95),
-            .@"late-night-warmth" => s.late_night_warmth = flagOr(rep, e, s.late_night_warmth),
-            .@"show-hidden" => s.show_hidden = flagOr(rep, e, s.show_hidden),
-            .appearance => s.look = enumOr(Look, rep, e, s.look),
-            .@"light-theme", .@"dark-theme" => if (schemeIndex(val) == null)
-                rep.add(e.line, "{s} = \"{s}\" isn't a theme", .{ clip(e.key), clip(val) }),
+            .font => s.setFont(e.val),
+            .@"light-theme", .@"dark-theme" => if (schemeIndex(e.val) == null)
+                rep.add(e.line, "{s} = \"{s}\" isn't a theme", .{ clip(e.key), clip(e.val) }),
+            inline else => |o| {
+                const f = &@field(s, fieldName(o));
+                const T = @FieldType(Settings, fieldName(o));
+                f.* = switch (@typeInfo(T)) {
+                    .bool => flagOr(rep, e, f.*),
+                    .@"enum" => enumOr(T, rep, e, f.*),
+                    .float => ranged(rep, e, f.*, options[@intFromEnum(o)].lo, options[@intFromEnum(o)].hi),
+                    .int => @intFromFloat(@round(ranged(rep, e, @floatFromInt(f.*), options[@intFromEnum(o)].lo, options[@intFromEnum(o)].hi))),
+                    else => comptime unreachable,
+                };
+            },
         }
     }
     return s;
@@ -705,44 +583,58 @@ pub const Opt = enum {
     @"light-theme",
     @"dark-theme",
 };
-const Kind = enum { string, flag, number };
+
+pub fn fieldName(comptime opt: Opt) [:0]const u8 {
+    return switch (opt) {
+        .@"line-height" => "spacing",
+        .appearance => "look",
+        .@"light-theme" => "light_scheme",
+        .@"dark-theme" => "dark_scheme",
+        else => comptime blk: {
+            var chars = @tagName(opt).*;
+            std.mem.replaceScalar(u8, chars[0..], '-', '_');
+            const out = chars;
+            break :blk &out;
+        },
+    };
+}
 
 /// One line of the file: its comment above it, and a blank line before the
 /// comment when `gap`. `render` and the launch-time fill-in share this list.
-const Row = struct { opt: Opt, kind: Kind, gap: bool = false, note: []const u8 };
+const Row = struct { opt: Opt, lo: f64 = 0, hi: f64 = 0, gap: bool = false, note: []const u8 };
 
 const options = [_]Row{
-    .{ .opt = .font, .kind = .string, .note = "# A font's PostScript name, like Menlo-Regular, or system for SF Mono.\n" },
-    .{ .opt = .size, .kind = .number, .note = "# The text size in points, from 8 to 40.\n" },
-    .{ .opt = .@"line-height", .kind = .number, .note = "# Line height, as a multiple of the size, from 1 to 3.\n" },
-    .{ .opt = .wrap, .kind = .flag, .note = "# Wrap long lines at the window's edge: true or false.\n" },
-    .{ .opt = .pairs, .kind = .flag, .note = "# Close brackets and quotes as you type them: true or false.\n" },
-    .{ .opt = .focus, .kind = .string, .note = "# Fade text outside the caret's range: off, line, sentence or paragraph.\n" },
-    .{ .opt = .typewriter, .kind = .flag, .note = "# Keep the caret's row in the middle as you type: true or false.\n" },
-    .{ .opt = .@"line-numbers", .kind = .flag, .note = "# Number the lines beside the text: true or false.\n" },
-    .{ .opt = .zen, .kind = .flag, .note = "# Hide the window's chrome and center a grey page zen-columns wide: true or false.\n" },
-    .{ .opt = .@"late-night", .kind = .flag, .note = "# Late-Night Focus: zen, typewriter, paragraph focus and Black on top of the above: true or false.\n" },
-    .{ .opt = .sidebar, .kind = .flag, .note = "# Show the folder's files on the left of the window: true or false.\n" },
-    .{ .opt = .@"sidebar-width", .kind = .number, .note = "# How wide the sidebar is, in points from 150 to 500: drag its edge to change it.\n" },
-    .{ .opt = .@"tab-width", .kind = .number, .gap = true, .note = "# Columns per tab stop, from 1 to 16.\n" },
-    .{ .opt = .@"indent-with", .kind = .string, .note = "# What the Tab key inserts: spaces or tabs.\n" },
-    .{ .opt = .@"trim-trailing-whitespace", .kind = .flag, .note = "# Strip spaces and tabs at the ends of lines when saving: true or false.\n" },
-    .{ .opt = .@"ensure-final-newline", .kind = .flag, .note = "# End the file with a newline when saving: true or false.\n" },
-    .{ .opt = .@"hanging-indent", .kind = .flag, .note = "# Start wrapped rows under their line's indent: true or false.\n" },
-    .{ .opt = .@"caret-style", .kind = .string, .gap = true, .note = "# The caret's shape: bar, block or underline.\n" },
-    .{ .opt = .@"caret-width", .kind = .number, .note = "# The bar caret's width in points, from 1 to 6.\n" },
-    .{ .opt = .@"caret-blink", .kind = .flag, .note = "# Blink the caret: true or false.\n" },
-    .{ .opt = .@"highlight-current-line", .kind = .flag, .note = "# Shade the caret's line: true or false.\n" },
-    .{ .opt = .@"show-invisibles", .kind = .string, .note = "# Mark spaces, tabs and line ends: none, trailing or all.\n" },
-    .{ .opt = .@"indent-guides", .kind = .flag, .note = "# Draw a faint line at each indent level: true or false.\n" },
-    .{ .opt = .@"word-count", .kind = .string, .note = "# Count words in the status bar: auto (prose files), always or off.\n" },
-    .{ .opt = .@"zen-columns", .kind = .number, .note = "# How wide zen's page is, in columns from 40 to 160.\n" },
-    .{ .opt = .@"focus-dim", .kind = .number, .note = "# How far Focus fades the text outside the caret's range, from 0.2 to 0.95.\n" },
-    .{ .opt = .@"late-night-warmth", .kind = .flag, .note = "# Warm the colors in Late-Night Focus: true or false.\n" },
-    .{ .opt = .@"show-hidden", .kind = .flag, .note = "# List hidden files and folders in the sidebar: true or false.\n" },
-    .{ .opt = .appearance, .kind = .string, .gap = true, .note = "# Light or dark: auto follows the Mac, light or dark keeps Zag in that mode.\n" },
-    .{ .opt = .@"light-theme", .kind = .string, .note = "# The theme for each mode: paper, ayu-light, one-light, solarized-light,\n# gruvbox-light, ink, ayu-dark, one-dark, solarized-dark, gruvbox-dark or black.\n" },
-    .{ .opt = .@"dark-theme", .kind = .string, .note = "" },
+    .{ .opt = .font, .note = "# A font's PostScript name, like Menlo-Regular, or system for SF Mono.\n" },
+    .{ .opt = .size, .lo = size_min, .hi = size_max, .note = "# The text size in points, from 8 to 40.\n" },
+    .{ .opt = .@"line-height", .lo = 1, .hi = 3, .note = "# Line height, as a multiple of the size, from 1 to 3.\n" },
+    .{ .opt = .wrap, .note = "# Wrap long lines at the window's edge: true or false.\n" },
+    .{ .opt = .pairs, .note = "# Close brackets and quotes as you type them: true or false.\n" },
+    .{ .opt = .focus, .note = "# Fade text outside the caret's range: off, line, sentence or paragraph.\n" },
+    .{ .opt = .typewriter, .note = "# Keep the caret's row in the middle as you type: true or false.\n" },
+    .{ .opt = .@"line-numbers", .note = "# Number the lines beside the text: true or false.\n" },
+    .{ .opt = .zen, .note = "# Hide the window's chrome and center a grey page zen-columns wide: true or false.\n" },
+    .{ .opt = .@"late-night", .note = "# Late-Night Focus: zen, typewriter, paragraph focus and Black on top of the above: true or false.\n" },
+    .{ .opt = .sidebar, .note = "# Show the folder's files on the left of the window: true or false.\n" },
+    .{ .opt = .@"sidebar-width", .lo = sidebar_min, .hi = sidebar_max, .note = "# How wide the sidebar is, in points from 150 to 500: drag its edge to change it.\n" },
+    .{ .opt = .@"tab-width", .lo = 1, .hi = 16, .gap = true, .note = "# Columns per tab stop, from 1 to 16.\n" },
+    .{ .opt = .@"indent-with", .note = "# What the Tab key inserts: spaces or tabs.\n" },
+    .{ .opt = .@"trim-trailing-whitespace", .note = "# Strip spaces and tabs at the ends of lines when saving: true or false.\n" },
+    .{ .opt = .@"ensure-final-newline", .note = "# End the file with a newline when saving: true or false.\n" },
+    .{ .opt = .@"hanging-indent", .note = "# Start wrapped rows under their line's indent: true or false.\n" },
+    .{ .opt = .@"caret-style", .gap = true, .note = "# The caret's shape: bar, block or underline.\n" },
+    .{ .opt = .@"caret-width", .lo = 1, .hi = 6, .note = "# The bar caret's width in points, from 1 to 6.\n" },
+    .{ .opt = .@"caret-blink", .note = "# Blink the caret: true or false.\n" },
+    .{ .opt = .@"highlight-current-line", .note = "# Shade the caret's line: true or false.\n" },
+    .{ .opt = .@"show-invisibles", .note = "# Mark spaces, tabs and line ends: none, trailing or all.\n" },
+    .{ .opt = .@"indent-guides", .note = "# Draw a faint line at each indent level: true or false.\n" },
+    .{ .opt = .@"word-count", .note = "# Count words in the status bar: auto (prose files), always or off.\n" },
+    .{ .opt = .@"zen-columns", .lo = 40, .hi = 160, .note = "# How wide zen's page is, in columns from 40 to 160.\n" },
+    .{ .opt = .@"focus-dim", .lo = 0.2, .hi = 0.95, .note = "# How far Focus fades the text outside the caret's range, from 0.2 to 0.95.\n" },
+    .{ .opt = .@"late-night-warmth", .note = "# Warm the colors in Late-Night Focus: true or false.\n" },
+    .{ .opt = .@"show-hidden", .note = "# List hidden files and folders in the sidebar: true or false.\n" },
+    .{ .opt = .appearance, .gap = true, .note = "# Light or dark: auto follows the Mac, light or dark keeps Zag in that mode.\n" },
+    .{ .opt = .@"light-theme", .note = "# The theme for each mode: paper, ayu-light, one-light, solarized-light,\n# gruvbox-light, ink, ayu-dark, one-dark, solarized-dark, gruvbox-dark or black.\n" },
+    .{ .opt = .@"dark-theme", .note = "" },
 };
 
 comptime {
@@ -754,44 +646,26 @@ fn enumOf(comptime E: type, s: []const u8) ?E {
     return null;
 }
 
-fn flagText(v: bool) []const u8 {
-    return if (v) "true" else "false";
+fn quoted(opt: Opt) bool {
+    return switch (opt) {
+        .font, .@"light-theme", .@"dark-theme" => true,
+        inline else => |o| @typeInfo(@FieldType(Settings, fieldName(o))) == .@"enum",
+    };
 }
 
 /// What `s` holds for `opt`, as the file writes it (before any quotes).
 fn valueText(s: *const Settings, opt: Opt, buf: *[24]u8) []const u8 {
     return switch (opt) {
         .font => if (s.font_len == 0) "system" else s.font(),
-        .size => decimal(buf, s.size),
-        .@"line-height" => decimal(buf, s.spacing),
-        .wrap => flagText(s.wrap),
-        .pairs => flagText(s.pairs),
-        .focus => @tagName(s.focus),
-        .typewriter => flagText(s.typewriter),
-        .@"line-numbers" => flagText(s.line_numbers),
-        .zen => flagText(s.zen),
-        .@"late-night" => flagText(s.late_night),
-        .sidebar => flagText(s.sidebar),
-        .@"sidebar-width" => decimal(buf, s.sidebar_width),
-        .@"tab-width" => decimal(buf, @floatFromInt(s.tab_width)),
-        .@"indent-with" => @tagName(s.indent_with),
-        .@"trim-trailing-whitespace" => flagText(s.trim_trailing_whitespace),
-        .@"ensure-final-newline" => flagText(s.ensure_final_newline),
-        .@"hanging-indent" => flagText(s.hanging_indent),
-        .@"caret-style" => @tagName(s.caret_style),
-        .@"caret-width" => decimal(buf, s.caret_width),
-        .@"caret-blink" => flagText(s.caret_blink),
-        .@"highlight-current-line" => flagText(s.highlight_current_line),
-        .@"show-invisibles" => @tagName(s.show_invisibles),
-        .@"indent-guides" => flagText(s.indent_guides),
-        .@"word-count" => @tagName(s.word_count),
-        .@"zen-columns" => decimal(buf, @floatFromInt(s.zen_columns)),
-        .@"focus-dim" => decimal(buf, s.focus_dim),
-        .@"late-night-warmth" => flagText(s.late_night_warmth),
-        .@"show-hidden" => flagText(s.show_hidden),
-        .appearance => @tagName(s.look),
         .@"light-theme" => schemes[s.light_scheme].key,
         .@"dark-theme" => schemes[s.dark_scheme].key,
+        inline else => |o| switch (@typeInfo(@FieldType(Settings, fieldName(o)))) {
+            .bool => if (@field(s, fieldName(o))) "true" else "false",
+            .@"enum" => @tagName(@field(s, fieldName(o))),
+            .float => decimal(buf, @field(s, fieldName(o))),
+            .int => decimal(buf, @floatFromInt(@field(s, fieldName(o)))),
+            else => comptime unreachable,
+        },
     };
 }
 
@@ -799,36 +673,7 @@ fn valueText(s: *const Settings, opt: Opt, buf: *[24]u8) []const u8 {
 pub fn same(a: *const Settings, b: *const Settings, opt: Opt) bool {
     return switch (opt) {
         .font => std.mem.eql(u8, a.font(), b.font()),
-        .size => a.size == b.size,
-        .@"line-height" => a.spacing == b.spacing,
-        .wrap => a.wrap == b.wrap,
-        .pairs => a.pairs == b.pairs,
-        .focus => a.focus == b.focus,
-        .typewriter => a.typewriter == b.typewriter,
-        .@"line-numbers" => a.line_numbers == b.line_numbers,
-        .zen => a.zen == b.zen,
-        .@"late-night" => a.late_night == b.late_night,
-        .sidebar => a.sidebar == b.sidebar,
-        .@"sidebar-width" => a.sidebar_width == b.sidebar_width,
-        .@"tab-width" => a.tab_width == b.tab_width,
-        .@"indent-with" => a.indent_with == b.indent_with,
-        .@"trim-trailing-whitespace" => a.trim_trailing_whitespace == b.trim_trailing_whitespace,
-        .@"ensure-final-newline" => a.ensure_final_newline == b.ensure_final_newline,
-        .@"hanging-indent" => a.hanging_indent == b.hanging_indent,
-        .@"caret-style" => a.caret_style == b.caret_style,
-        .@"caret-width" => a.caret_width == b.caret_width,
-        .@"caret-blink" => a.caret_blink == b.caret_blink,
-        .@"highlight-current-line" => a.highlight_current_line == b.highlight_current_line,
-        .@"show-invisibles" => a.show_invisibles == b.show_invisibles,
-        .@"indent-guides" => a.indent_guides == b.indent_guides,
-        .@"word-count" => a.word_count == b.word_count,
-        .@"zen-columns" => a.zen_columns == b.zen_columns,
-        .@"focus-dim" => a.focus_dim == b.focus_dim,
-        .@"late-night-warmth" => a.late_night_warmth == b.late_night_warmth,
-        .@"show-hidden" => a.show_hidden == b.show_hidden,
-        .appearance => a.look == b.look,
-        .@"light-theme" => a.light_scheme == b.light_scheme,
-        .@"dark-theme" => a.dark_scheme == b.dark_scheme,
+        inline else => |o| @field(a, fieldName(o)) == @field(b, fieldName(o)),
     };
 }
 
@@ -836,7 +681,7 @@ fn writeOption(gpa: Allocator, out: *std.ArrayList(u8), s: *const Settings, row:
     var buf: [24]u8 = undefined;
     if (row.gap) try out.append(gpa, '\n');
     try out.appendSlice(gpa, row.note);
-    const q: []const u8 = if (row.kind == .string) "\"" else "";
+    const q: []const u8 = if (quoted(row.opt)) "\"" else "";
     try out.print(gpa, "{s} = {s}{s}{s}\n", .{ @tagName(row.opt), q, valueText(s, row.opt, &buf), q });
 }
 
@@ -866,7 +711,8 @@ fn render(gpa: Allocator, s: *const Settings) ![]u8 {
         for (colors) |c| {
             const v = slot(&th, c).?.*;
             if (std.mem.eql(f64, &v, &slot(&base, c).?.*)) continue;
-            try out.print(gpa, "{s}.{s} = \"#{X:0>2}{X:0>2}{X:0>2}\"\n", .{ name, c, byte(v[0]), byte(v[1]), byte(v[2]) });
+            const hex = std.fmt.bytesToHex([3]u8{ byte(v[0]), byte(v[1]), byte(v[2]) }, .upper);
+            try out.print(gpa, "{s}.{s} = \"#{s}\"\n", .{ name, c, &hex });
         }
     }
     return out.toOwnedSlice(gpa);
@@ -876,55 +722,34 @@ fn byte(v: f64) u8 {
     return @intFromFloat(@round(std.math.clamp(v, 0, 1) * 255));
 }
 
-/// The ` # comment` after a line's value, with the spaces before it, or "".
-fn trailingComment(line: []const u8) []const u8 {
-    const eq = std.mem.indexOfScalar(u8, line, '=') orelse return "";
-    const val = std.mem.trimStart(u8, line[eq + 1 ..], " \t");
-    if (val.len > 0 and (val[0] == '"' or val[0] == '\'')) {
-        const end = std.mem.indexOfScalarPos(u8, val, 1, val[0]) orelse return "";
-        const rest = val[end + 1 ..];
-        const trimmed = std.mem.trimStart(u8, rest, " \t");
-        return if (trimmed.len > 0 and trimmed[0] == '#') rest else "";
-    }
-    for (val, 0..) |ch, i| if (ch == '#' and i > 0 and (val[i - 1] == ' ' or val[i - 1] == '\t'))
-        return val[std.mem.trimEnd(u8, val[0..i], " \t").len..];
-    return "";
-}
-
 /// `text` with the `opt` line set to `value`, added after the top-level keys
 /// when missing. Flags (`true`, `false`) and numbers are written bare,
 /// everything else quoted. The last top-level `opt` line is the one `parse`
 /// reads, so that one changes, and its trailing comment stays.
 pub fn setLine(gpa: Allocator, text: []const u8, opt: Opt, value: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
     const key = @tagName(opt);
-    const quote: []const u8 = if (options[@intFromEnum(opt)].kind == .string) "\"" else "";
+    const q: []const u8 = if (quoted(opt)) "\"" else "";
     const end = rootEnd(text);
-    const head = text[0..end];
-    var target: ?usize = null;
-    var it = std.mem.splitScalar(u8, head, '\n');
-    var n: usize = 0;
-    while (it.next()) |raw| : (n += 1) {
+    var hit: ?struct { a: usize, b: usize, comment: []const u8 } = null;
+    var it = std.mem.splitScalar(u8, text[0..end], '\n');
+    var pos: usize = 0;
+    while (it.next()) |raw| : (pos += raw.len + 1) {
         const line = std.mem.trim(u8, raw, " \t\r");
         const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-        if (line[0] != '#' and std.mem.eql(u8, std.mem.trim(u8, line[0..eq], " \t"), key)) target = n;
+        if (line[0] != '#' and std.mem.eql(u8, std.mem.trim(u8, line[0..eq], " \t"), key))
+            hit = .{ .a = pos, .b = pos + raw.len, .comment = splitValue(line[eq + 1 ..]).comment };
     }
-    it.reset();
-    n = 0;
-    while (it.next()) |raw| : (n += 1) {
-        if (n > 0) try out.append(gpa, '\n');
-        if (n == target) {
-            const comment = trailingComment(std.mem.trim(u8, raw, " \t\r"));
-            try out.print(gpa, "{s} = {s}{s}{s}{s}", .{ key, quote, value, quote, comment });
-        } else try out.appendSlice(gpa, raw);
-    }
-    if (target == null) {
-        if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') try out.append(gpa, '\n');
-        try out.print(gpa, "{s} = {s}{s}{s}\n", .{ key, quote, value, quote });
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    if (hit) |h| {
+        try out.print(gpa, "{s}{s} = {s}{s}{s}{s}{s}", .{ text[0..h.a], key, q, value, q, h.comment, text[h.b..] });
+    } else {
+        try out.appendSlice(gpa, text[0..end]);
+        if (end > 0 and text[end - 1] != '\n') try out.append(gpa, '\n');
+        try out.print(gpa, "{s} = {s}{s}{s}\n", .{ key, q, value, q });
         if (end < text.len) try out.append(gpa, '\n');
+        try out.appendSlice(gpa, text[end..]);
     }
-    try out.appendSlice(gpa, text[end..]);
     return out.toOwnedSlice(gpa);
 }
 
@@ -934,18 +759,19 @@ pub fn setLine(gpa: Allocator, text: []const u8, opt: Opt, value: []const u8) ![
 fn withMissing(gpa: Allocator, text: []const u8) !?[]u8 {
     const s = parse(text);
     const end = rootEnd(text);
+    var seen: [options.len]bool = @splat(false);
+    var r = Reader.init(text[0..end]);
+    while (r.next()) |e| {
+        if (e.kind == .pair) if (enumOf(Opt, e.key)) |o| {
+            seen[@intFromEnum(o)] = true;
+        };
+    }
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     try out.appendSlice(gpa, text[0..end]);
     if (end > 0 and text[end - 1] != '\n') try out.append(gpa, '\n');
     const base = out.items.len;
-    for (options) |row| {
-        var r = Reader.init(text);
-        const present = while (r.next()) |e| {
-            if (e.kind == .pair and e.section == .root and std.mem.eql(u8, e.key, @tagName(row.opt))) break true;
-        } else false;
-        if (!present) try writeOption(gpa, &out, &s, row);
-    }
+    for (options, seen) |row, ok| if (!ok) try writeOption(gpa, &out, &s, row);
     if (out.items.len == base) {
         out.deinit(gpa);
         return null;
@@ -1044,14 +870,14 @@ test "settings read colors, flags and numbers and skip what they don't know" {
     try t.expectEqual(@as(f64, 0x03) / 255, s.dark.header[2]);
     try t.expectEqual(@as(f64, 0x06) / 255, s.light.sel[2]);
     try t.expectEqual(@as(f64, 0x09) / 255, s.light.kinds[6][2]);
-    try t.expectEqual(widen(ayu_dark).bg, s.dark.bg);
+    try t.expectEqual(widen(schemes[schemeIndex("ayu-dark").?].colors).bg, s.dark.bg);
     try t.expectEqual(@as(u16, 4), s.report.count);
     try t.expectEqual(@as(u32, 3), s.report.first_line);
     try t.expectEqualStrings("size = 99 is outside 8 to 40", s.report.firstMessage());
 }
 
 test "a written file reads back as the same settings" {
-    var s: Settings = .{ .size = 16, .spacing = 2.25, .wrap = true, .pairs = false, .focus = .sentence, .typewriter = true, .line_numbers = false, .zen = true, .late_night = true, .sidebar = false, .look = .dark, .sidebar_width = 320, .tab_width = 8, .indent_with = .tabs, .trim_trailing_whitespace = true, .ensure_final_newline = true, .hanging_indent = true, .caret_style = .block, .caret_width = 3.5, .caret_blink = false, .highlight_current_line = false, .show_invisibles = .trailing, .indent_guides = true, .word_count = .always, .zen_columns = 100, .focus_dim = 0.5, .late_night_warmth = true, .show_hidden = true, .light_scheme = 2, .dark_scheme = schemeIndex("ayu-dark").?, .light = widen(one_light), .dark = widen(ayu_dark) };
+    var s: Settings = .{ .size = 16, .spacing = 2.25, .wrap = true, .pairs = false, .focus = .sentence, .typewriter = true, .line_numbers = false, .zen = true, .late_night = true, .sidebar = false, .look = .dark, .sidebar_width = 320, .tab_width = 8, .indent_with = .tabs, .trim_trailing_whitespace = true, .ensure_final_newline = true, .hanging_indent = true, .caret_style = .block, .caret_width = 3.5, .caret_blink = false, .highlight_current_line = false, .show_invisibles = .trailing, .indent_guides = true, .word_count = .always, .zen_columns = 100, .focus_dim = 0.5, .late_night_warmth = true, .show_hidden = true, .light_scheme = 2, .dark_scheme = schemeIndex("ayu-dark").?, .light = widen(schemes[schemeIndex("one-light").?].colors), .dark = widen(schemes[schemeIndex("ayu-dark").?].colors) };
     s.setFont("Menlo-Regular");
     s.dark.caret = .{ 1, 0, 0 };
     const text = try render(t.allocator, &s);
@@ -1143,7 +969,7 @@ test "a single color applies on top of the chosen theme wherever its line sits" 
         \\light-theme = nonsense
     );
     try t.expectEqual(paper, s.light);
-    try t.expectEqual(widen(one_dark).bg, s.dark.bg);
+    try t.expectEqual(widen(schemes[schemeIndex("one-dark").?].colors).bg, s.dark.bg);
     try t.expectEqual(@as(f64, 3) / 255, s.dark.kinds[1][2]);
     const text = try render(t.allocator, &s);
     defer t.allocator.free(text);
@@ -1172,7 +998,7 @@ test "every theme's muted text and comments read at 4.5:1 and its syntax at 3:1 
         try t.expect(contrastRatio(th.kinds[3], th.bg) >= 4.5);
         for (th.kinds) |k| try t.expect(contrastRatio(k, th.bg) >= 3.0);
     }
-    for ([_]Bytes{ ayu_light, one_light }) |b| {
+    for ([_]Bytes{ schemes[schemeIndex("ayu-light").?].colors, schemes[schemeIndex("one-light").?].colors }) |b| {
         const th = widen(b);
         for (th.kinds) |k| try t.expect(contrastRatio(k, th.bg) >= 4.5);
     }

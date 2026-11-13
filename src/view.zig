@@ -4547,13 +4547,8 @@ fn revealPath(p: []const u8) void {
 }
 
 /// Writes the opposite of flag `opt` to the settings file.
-pub fn flip(comptime opt: settings.Opt) void {
-    const name = comptime blk: {
-        var chars = @tagName(opt).*;
-        std.mem.replaceScalar(u8, chars[0..], '-', '_');
-        break :blk chars;
-    };
-    store(opt, if (@field(conf_saved, &name)) "false" else "true");
+fn flip(comptime opt: settings.Opt) void {
+    store(opt, if (@field(conf_saved, settings.fieldName(opt))) "false" else "true");
 }
 
 pub fn toggleTypewriter() void {
@@ -11919,22 +11914,17 @@ fn swatch(sc: settings.Scheme) Id {
     if (ctx == null) return null;
     defer objc.CFRelease(ctx.?);
     const c = sc.colors;
-    pill(ctx, rgbOf(c.rule), 1, 0, 0, 28, 28, 7);
-    pill(ctx, rgbOf(c.bg), 1, 1, 1, 26, 26, 6);
+    pill(ctx, settings.wide(c.rule), 1, 0, 0, 28, 28, 7);
+    pill(ctx, settings.wide(c.bg), 1, 1, 1, 26, 26, 6);
     // The bitmap's origin is its bottom left: the first bar is the top one.
-    pill(ctx, rgbOf(c.kinds[1]), 1, 6, 17, 12, 3, 1.5);
-    pill(ctx, rgbOf(c.fg), 1, 6, 12, 16, 3, 1.5);
-    pill(ctx, rgbOf(c.kinds[2]), 1, 6, 7, 9, 3, 1.5);
+    pill(ctx, settings.wide(c.kinds[1]), 1, 6, 17, 12, 3, 1.5);
+    pill(ctx, settings.wide(c.fg), 1, 6, 12, 16, 3, 1.5);
+    pill(ctx, settings.wide(c.kinds[2]), 1, 6, 7, 9, 3, 1.5);
     const img = objc.CGBitmapContextCreateImage(ctx) orelse return null;
     defer objc.CFRelease(img);
     const ns = msg(Id, msg(Id, objc.class("NSImage"), "alloc", .{}), "initWithCGImage:size:", .{ img, objc.Size{ .w = 14, .h = 14 } });
     return msg(Id, ns, "autorelease", .{});
 }
-
-fn rgbOf(b: [3]u8) Rgb {
-    return .{ f(b[0]) / 255, f(b[1]) / 255, f(b[2]) / 255 };
-}
-
 // ---- the menu bar ----
 //
 // One list builds the menus, binds each command's handler and says which
