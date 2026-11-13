@@ -42,7 +42,7 @@ People open Zag from the Dock, Finder or a terminal (`zag notes.txt`, `zag .`), 
 - Name: Zag (formerly ze). Icon: `AppIcon.icon`.
 - Site appearance: follow the system theme by default and offer explicit Light and Dark choices.
 - Site motion: one orchestrated move per section, built from licensed React Bits components. Respect reduced motion and offer a pause control.
-- Site design: monochrome with hairlines, system typography and mono numerals. Orange marks only Zag's own bytes and the download button. The page leads with the one-pixel-per-byte picture, then speed, what Zag leaves out, and real screenshots, without sales copy. Harsha approved this direction in zag#m53k.
+- Site design: monochrome with hairlines, Scoutie Sans for text and Paper Mono for numbers and labels. Orange marks only Zag's own bytes and the download button. The page leads with a real picture of the app, then the one-pixel-per-byte square, the size comparison, what Zag leaves out, speed, and real screenshots, without sales copy or text that explains the design. Harsha approved this direction in zag#m53k, zag#chbm and zag#5amt.
 
 ## Evidence on Hand
 
