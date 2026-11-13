@@ -19,6 +19,11 @@ const bench = if (@import("build_options").bench) @import("bench.zig") else stru
 };
 
 var args: []const [:0]const u8 = &.{};
+/// Files Finder hands over before launch finishes, opened after the session.
+var pending: Id = null;
+var launched = false;
+/// The Dock tile's menu, built on first use.
+var dock_menu: Id = null;
 
 extern const NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification: Id;
 
@@ -27,6 +32,12 @@ fn app() Id {
 }
 
 fn didFinishLaunching(_: Id, _: Sel, _: Id) callconv(.c) void {
+    // The last session comes back first, so files opened from Finder or the
+    // terminal join it and the session saved on quit still holds it. It also
+    // brings back the saved folder when the terminal gave none. With neither,
+    // Zag opens without a folder: reading home would set off the Desktop and
+    // Documents prompts.
+    _ = view.restoreSession();
     // `-Key value` pairs are AppKit defaults (like -AppleInterfaceStyle Dark), not files.
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -36,23 +47,29 @@ fn didFinishLaunching(_: Id, _: Sel, _: Id) callconv(.c) void {
             i += 1;
         } else view.openFile(a);
     }
-    if (view.count() == 0 and !view.restoreSession()) _ = view.newDoc();
-    view.adoptDrafts();
-    // A file opened from Finder skips the session, but not its folder; with
-    // neither a folder from the terminal nor a saved one, use the home folder.
-    if (view.root == null) {
-        if (view.savedRoot()) |dir| view.setRoot(dir) else if (std.c.getenv("HOME")) |h| {
-            if (view.gpa.dupe(u8, std.mem.span(h))) |dir| view.setRoot(dir) else |_| {}
-        }
+    launched = true;
+    if (pending != null) {
+        openList(pending);
+        msg(void, pending, "release", .{});
+        pending = null;
     }
+    if (view.count() == 0) _ = view.newDoc();
+    view.adoptDrafts();
     // Launched from a terminal there is no bundle and nothing brings the
     // window forward; from the bundle, Launch Services does it (or `open -g` doesn't).
     const bundle = msg(Id, objc.class("NSBundle"), "mainBundle", .{});
     if (!view.background and msg(Id, bundle, "bundleIdentifier", .{}) == null) msg(void, app(), "activate", .{});
 }
 
-fn openFiles(_: Id, _: Sel, _: Id, list: Id) callconv(.c) void {
+fn openList(list: Id) void {
     for (0..msg(usize, list, "count", .{})) |i| view.openFile(objc.utf8(msg(Id, list, "objectAtIndex:", .{i})));
+}
+
+fn openFiles(_: Id, _: Sel, _: Id, list: Id) callconv(.c) void {
+    if (launched) return openList(list);
+    // At launch Finder's files arrive before the session is restored; they wait for it.
+    if (pending == null) pending = objc.new("NSMutableArray");
+    msg(void, pending, "addObjectsFromArray:", .{list});
 }
 
 fn shouldTerminate(_: Id, _: Sel, _: Id) callconv(.c) usize {
@@ -74,19 +91,50 @@ fn becameActive(_: Id, _: Sel, _: Id) callconv(.c) void {
 const open_recent = "openRecent:";
 const clear_recent = "clearRecent:";
 
-/// Fills File > Open Recent each time it opens.
+/// Fills File > Open Recent each time it opens. Each file shows its icon,
+/// and files sharing a name show their folder's name too.
 fn fillRecent(_: Id, _: Sel, menu: Id) callconv(.c) void {
     msg(void, menu, "removeAllItems", .{});
     const paths = view.recentFiles();
     const n = msg(usize, paths, "count", .{});
+    const ws = msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{});
     for (0..n) |i| {
         const p = msg(Id, paths, "objectAtIndex:", .{i});
-        const it = view.menuItem(menu, objc.utf8(msg(Id, p, "lastPathComponent", .{})), open_recent, "", 0);
+        const name = msg(Id, p, "lastPathComponent", .{});
+        var shared = false;
+        for (0..n) |j| {
+            if (j != i and msg(bool, name, "isEqualToString:", .{msg(Id, msg(Id, paths, "objectAtIndex:", .{j}), "lastPathComponent", .{})})) {
+                shared = true;
+                break;
+            }
+        }
+        var buf: [1024]u8 = undefined;
+        const base = objc.utf8(name);
+        const title = if (shared)
+            std.fmt.bufPrint(&buf, "{s} ({s})", .{ base, objc.utf8(msg(Id, msg(Id, p, "stringByDeletingLastPathComponent", .{}), "lastPathComponent", .{})) }) catch base
+        else
+            base;
+        const it = view.menuItem(menu, title, open_recent, "", 0);
         msg(void, it, "setRepresentedObject:", .{p});
         msg(void, it, "setToolTip:", .{p});
+        const img = msg(Id, msg(Id, ws, "iconForFile:", .{p}), "copy", .{});
+        msg(void, img, "setSize:", .{objc.Size{ .w = 16, .h = 16 }});
+        msg(void, it, "setImage:", .{img});
+        msg(void, img, "release", .{});
     }
     if (n > 0) view.separator(menu);
     _ = view.menuItem(menu, "Clear Menu", if (n > 0) clear_recent else "noRecent:", "", 0);
+}
+
+/// The Dock tile's menu: a new window, the open panel and settings.
+fn dockMenu(self: Id, _: Sel, _: Id) callconv(.c) Id {
+    if (dock_menu != null) return dock_menu;
+    dock_menu = objc.new("NSMenu");
+    msg(void, dock_menu, "setAutoenablesItems:", .{false});
+    inline for (.{ .{ "New Window", "newDocument:" }, .{ "Open…", "openDocument:" }, .{ "Settings…", "openSettings:" } }) |e| {
+        msg(void, view.menuItem(dock_menu, e[0], e[1], "", 0), "setTarget:", .{self});
+    }
+    return dock_menu;
 }
 
 fn openRecent(_: Id, _: Sel, sender: Id) callconv(.c) void {
@@ -106,7 +154,7 @@ pub fn main(init: std.process.Init.Minimal) void {
     msg(void, objc.class("NSWindow"), "setAllowsAutomaticWindowTabbing:", .{false});
 
     // From a terminal, quick open and the sidebar use the folder Zag started
-    // in. Finder starts apps in /, so there the last folder or home is used.
+    // in. Finder starts apps in /, so there the session's folder is used.
     if (files.cwd(view.gpa)) |dir| {
         if (dir.len > 1) view.adoptRoot(dir) else view.gpa.free(dir);
     }
@@ -114,9 +162,10 @@ pub fn main(init: std.process.Init.Minimal) void {
     const d = objc.ClassBuilder.begin("NSObject", "ZeApp");
     d.method("applicationDidFinishLaunching:", @ptrCast(&didFinishLaunching), "v@:@");
     d.method("application:openFiles:", @ptrCast(&openFiles), "v@:@@");
-    d.method("applicationShouldTerminateAfterLastWindowClosed:", @ptrCast(&objc.yes), "c@:@");
+    d.method("applicationShouldTerminateAfterLastWindowClosed:", @ptrCast(&objc.no), "c@:@");
     d.method("applicationShouldTerminate:", @ptrCast(&shouldTerminate), "Q@:@");
     d.method("applicationShouldHandleReopen:hasVisibleWindows:", @ptrCast(&reopen), "c@:@c");
+    d.method("applicationDockMenu:", @ptrCast(&dockMenu), "@@:@");
     d.method(open_recent, @ptrCast(&openRecent), "v@:@");
     d.method(clear_recent, view.appAction(view.clearRecent, .{}), "v@:@");
     view.bindApp(d);

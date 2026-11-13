@@ -37,6 +37,7 @@ pub fn adoptRoot(dir: []const u8) void {
 /// Makes `dir` (owned by gpa) the folder, and shows it in the sidebar.
 pub fn setRoot(dir: []const u8) void {
     adoptRoot(dir);
+    noteRecentFolder(dir);
     // A quick open on show lists the new folder. Otherwise the old list stays
     // for a panel still sliding shut; the next ⌘P reads the folder again anyway.
     if (quick != null) for (docs.items) |d| if (d.mode == .open) {
@@ -46,7 +47,12 @@ pub fn setRoot(dir: []const u8) void {
     // The header's folder is written relative to the open folder.
     for (docs.items) |d| dropHead(d);
     tree.closeAll(gpa);
-    for (wins.items) |w| w.side_y = 0;
+    for (wins.items) |w| {
+        w.side_y = 0;
+        w.side_cur = null;
+        // The sidebar crossfades from the old folder's rows to the new one's.
+        if (sideShown(w) and msg(bool, w.window, "isVisible", .{})) msg(void, msg(Id, w.view, "layer", .{}), "addAnimation:forKey:", .{ themeFade(), objc.str("root") });
+    }
     dropSideLines();
     rebuildTree();
     for (wins.items) |w| msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
@@ -56,11 +62,45 @@ pub fn setRoot(dir: []const u8) void {
 /// Scans quick open again; `fresh` must not crossfade picks from the palette.
 fn rescanQuick(dir: []const u8, fresh: ?*Doc) void {
     if (quick) |*q| q.deinit();
-    quick = finder.scan(gpa, dir) catch null;
+    quick = finder.scanWithOptions(gpa, dir, conf.show_hidden, &.{}) catch null;
     for (docs.items) |o| if (o.mode == .open) pickFiles(o, o == fresh);
 }
 
+/// Reads the rows again. The row under each window's mouse and its keyboard
+/// cursor stay on the same files, wherever those rows move to.
 fn rebuildTree() void {
+    var held: [8][2]?[]u8 = @splat(.{ null, null });
+    const n = @min(wins.items.len, held.len);
+    for (wins.items[0..n], held[0..n]) |w, *h| {
+        h[0] = heldRel(w.hov.row, w.hov.gen);
+        h[1] = heldRel(w.side_cur, w.side_cur_gen);
+    }
+    defer for (held) |h| {
+        for (h) |r| if (r) |s| gpa.free(s);
+    };
+    rebuildRows();
+    for (wins.items[0..n], held[0..n]) |w, h| {
+        if (h[0]) |rel| if (tree.rowOf(rel)) |i| {
+            w.hov.row = i;
+            w.hov.last = i;
+            w.hov.gen = tree_gen;
+        };
+        if (h[1]) |rel| if (tree.rowOf(rel)) |i| {
+            w.side_cur = i;
+            w.kc.last = i;
+            w.side_cur_gen = tree_gen;
+        };
+    }
+}
+
+/// A copy of row `row`'s path while it's from the current tree.
+fn heldRel(row: ?usize, gen: u32) ?[]u8 {
+    const i = row orelse return null;
+    if (gen != tree_gen or i >= tree.rows.items.len) return null;
+    return gpa.dupe(u8, tree.rows.items[i].rel) catch null;
+}
+
+fn rebuildRows() void {
     tree_stale = false;
     const r = root orelse return;
     var kept: std.StringHashMapUnmanaged(usize) = .empty;
@@ -68,7 +108,7 @@ fn rebuildTree() void {
     for (side_lines.items, 0..) |line, i| if (line.full != null) {
         kept.put(gpa, tree.rows.items[i].rel, i) catch {
             dropSideLines();
-            return rebuildTree();
+            return rebuildRows();
         };
     };
     if (kept.count() == 0) {
@@ -196,7 +236,7 @@ fn rightEdge(d: *const Doc) f64 {
 /// sits in the middle of the card.
 fn padL(d: *const Doc) f64 {
     const z = zen(d.win);
-    return pad_x + (@max(pad_x, (d.size.x - 80 * cw) / 2 - gap) - pad_x) * z + d.gw;
+    return pad_x + (@max(pad_x, (d.size.x - f(conf.zen_columns) * cw) / 2 - gap) - pad_x) * z + d.gw;
 }
 
 /// The line numbers' width in columns: the line count's digits, at least
@@ -341,6 +381,8 @@ fn setFont() void {
         for (d.slots.items) |*s| if (!s.gone) s.drop();
     }
     msg(void, msg(Id, objc.class("NSFontManager"), "sharedFontManager", .{}), "setSelectedFont:isMultiple:", .{ font, false });
+    // The Markdown preview's type follows the editor's.
+    preview.setTypography(conf.font(), conf.size, conf.spacing);
 }
 
 fn utf16(cp: u21, out: *[2]u16) usize {
@@ -456,7 +498,7 @@ const Focus = struct {
     amt: f64,
 
     fn dim(fo: Focus, in_new: bool, in_old: bool) f64 {
-        return 1 - fo.amt * (0.78 - 0.78 * (f(@intFromBool(in_new)) * fo.t + f(@intFromBool(in_old)) * (1 - fo.t)));
+        return 1 - fo.amt * (conf.focus_dim - conf.focus_dim * (f(@intFromBool(in_new)) * fo.t + f(@intFromBool(in_old)) * (1 - fo.t)));
     }
 };
 /// Focus mode fades from one span to the next at an even rate.
@@ -850,7 +892,13 @@ fn moveCaret(d: *Doc, now: f64) void {
         y -= d.vy;
     }
     const visible = d.shown and (!d.c_text or (x >= gap + padL(d) - 2 and x < rightEdge(d) and y >= top_h - 2 and y + lh - 4 <= bottom(d)));
-    const frame = Rect{ .x = d.org.x + x, .y = d.org.y + y, .w = 2, .h = lh - 4 };
+    // In the text the caret takes the settings' shape; in a prompt it's always a bar.
+    const shape: Rect = if (!d.c_text) .{ .w = 2, .h = lh - 4 } else switch (conf.caret_style) {
+        .bar => .{ .w = conf.caret_width, .h = lh - 4 },
+        .block => .{ .x = 1, .w = cw, .h = lh - 4 },
+        .underline => .{ .x = 1, .y = lh - 6, .w = cw, .h = 2 },
+    };
+    const frame = Rect{ .x = d.org.x + x + shape.x, .y = d.org.y + y + shape.y, .w = shape.w, .h = shape.h };
     if (d.caret_at) |was| if (std.meta.eql(was, frame) and d.caret_off == !visible) return;
     d.caret_at = frame;
     d.caret_off = !visible;
@@ -884,7 +932,12 @@ fn fadeIn(layer: Id, dur: f64) void {
 
 /// Holds the caret solid for half a second, then fades it out, rests it
 /// dark, and fades it back in, once a second. The animation is made once.
+/// With blinking off in the settings the caret stays solid.
 fn blink(caret: Id) void {
+    if (!conf.caret_blink) {
+        if (blink_key != null) msg(void, caret, "removeAnimationForKey:", .{blink_key});
+        return;
+    }
     if (blink_anim == null) {
         const num = objc.class("NSNumber");
         const arr = objc.class("NSArray");
@@ -1022,7 +1075,7 @@ fn scenery(d: *const Doc, now: f64) bool {
         !d.pop.settled() or now < d.prev_t0 + fade_time or now < d.stag_t0 + stag_cap + fade_time or (d.flash_n > 0 and now >= d.flash_t0 + flash_hold and now < d.flash_t0 + flash_hold + flash_time) or
         d.load.moving(now) or (d.had_sel and d.sel_in.moving(now)) or d.bar.moving(now) or
         d.sel_out.moving(now) or
-        now < d.fresh_t0 + fade_time;
+        now < d.fresh_t0 + fade_time or d.hint_hot_t.moving(now);
 }
 
 /// Redraws the window's sidebar strip alone.
@@ -1109,6 +1162,10 @@ const Page = struct {
     /// An untitled file's first line, updated after typing pauses.
     title: [48]u8 = undefined,
     title_len: usize = 0,
+    /// The file can't be written by this user, so its header shows a lock.
+    locked: bool = false,
+    /// The file didn't exist when it opened; the header says New until it's saved.
+    new_file: bool = false,
 
     fn name(p: *const Page) []const u8 {
         return if (p.path) |path| std.fs.path.basename(path) else if (p.title_len > 0) p.title[0..p.title_len] else "Untitled";
@@ -1365,6 +1422,13 @@ const Doc = struct {
     blank_t0: f64 = -1,
     /// The header's folder line and its chevron positions.
     head: Head = .{},
+    /// The empty card's clickable lines: where each drew in the pane, what it
+    /// does, the one under the mouse, and that one's highlight.
+    hints: [max_hints]Hint = undefined,
+    hint_n: usize = 0,
+    hint_hot: ?usize = null,
+    hint_lit: usize = 0,
+    hint_hot_t: Tween = .{ .dur = fade_time },
 
     /// Unsaved changes to a file, on show or in any page. Untitled files
     /// keep themselves as drafts, so they don't count.
@@ -1453,11 +1517,12 @@ const Win = struct {
     sel_id: u32 = 0,
     /// The selected name and the one it left, kept during the hop.
     bold: [2]Bold = .{ .{}, .{} },
-    /// The button by the traffic lights (1) or the sidebar's + (2) under the
-    /// mouse, and each one's hover highlight.
+    /// The button by the traffic lights (1), the sidebar's + (2) or the
+    /// folder's name at the sidebar's top (4) under the mouse, and each
+    /// one's hover highlight.
     hot: u8 = 0,
-    hot_t: [2]Tween = @splat(.{ .dur = fade_time }),
-    /// The button the mouse pressed, 1 or 2 like `hot`, and its fill, there
+    hot_t: [3]Tween = @splat(.{ .dur = fade_time }),
+    /// The button the mouse pressed, 1, 2 or 4 like `hot`, and its fill, there
     /// at once on the click and fading after the release.
     press: u8 = 0,
     press_t: Tween = .{ .dur = press_time },
@@ -1499,6 +1564,37 @@ const Win = struct {
     peek_out: f64 = 0,
     /// The sidebar row under the mouse and its highlight.
     hov: Mark = .{ .s = .{ .k = 700, .c = 53, .eps = 0.05 } },
+    /// The pinned folder under the mouse (a tree row) and its highlight, which
+    /// fades on `pin_row` after the mouse leaves it.
+    hov_pin: ?usize = null,
+    pin_row: usize = 0,
+    pin_t: Tween = .{ .dur = fade_time },
+    /// The folder's name at the sidebar's top, as wide as it last drew.
+    head_w: f64 = 0,
+    /// The sidebar takes the arrow keys, Return and typing: the row its
+    /// outline is on (of tree `side_cur_gen`), and the outline's spring.
+    side_key: bool = false,
+    side_cur: ?usize = null,
+    side_cur_gen: u32 = 0,
+    kc: Mark = .{ .s = .{ .k = 700, .c = 53, .eps = 0.05 } },
+    /// Letters typed in the sidebar pick the next row starting with them;
+    /// a pause starts a new name.
+    seek: [32]u8 = undefined,
+    seek_len: usize = 0,
+    seek_t: f64 = 0,
+    /// Files from Finder are over the window, and its outline for them.
+    drop_on: bool = false,
+    drop_t: Tween = .{ .dur = fade_time },
+    /// A short message in a pill near the window's bottom: it fades in, holds
+    /// for `toast_hold` and fades out.
+    toast_buf: [160]u8 = undefined,
+    toast_len: usize = 0,
+    toast_t0: f64 = -1e9,
+    toast_t: Tween = .{ .dur = fade_time },
+    toast_line: Id = null,
+    /// The sidebar button's alpha: dimmed while the sidebar is on but the
+    /// window is too narrow to show it.
+    tog_dim: Tween = .{ .dur = fade_time, .from = 1, .to = 1 },
 };
 
 /// A dragged tab's or file's copy after the mouse lets go: it slides into
@@ -1682,12 +1778,19 @@ fn focus(d: *Doc) void {
     refresh(d);
 }
 
-/// Reads a file into a page, at the caret and scroll it had last time.
+/// Reads a file into a page, at the caret and scroll it had last time. A
+/// path with no file yet opens empty, as a new file.
 fn loadPage(abs: [:0]const u8) ?Page {
+    var missing = false;
     const bytes = files.read(gpa, abs) catch |err| switch (err) {
-        error.FileNotFound => gpa.alloc(u8, 0) catch return null,
+        error.FileNotFound => blk: {
+            missing = true;
+            break :blk gpa.alloc(u8, 0) catch return null;
+        },
         else => {
-            alert("Couldn't open this file.", abs);
+            var ib: [std.fs.max_path_bytes + 160]u8 = undefined;
+            const why = if (err == error.NotAFile) "It isn't a regular file" else if (err == error.FileTooBig) "It's bigger than 1 GB" else osError();
+            alert("Couldn't open this file.", std.fmt.bufPrint(&ib, "{s}.\n\n{s}", .{ why, abs }) catch abs);
             return null;
         },
     };
@@ -1697,6 +1800,7 @@ fn loadPage(abs: [:0]const u8) ?Page {
         return null;
     }
     var ed = Editor.init(gpa, bytes) catch return null;
+    styleEditor(&ed);
     const z = gpa.dupeSentinel(u8, abs, 0) catch {
         ed.deinit(gpa);
         return null;
@@ -1707,11 +1811,23 @@ fn loadPage(abs: [:0]const u8) ?Page {
         ed.select(c, c);
         sy = pl.sy;
     }
-    return .{ .ed = ed, .path = z, .lang = syntax.forPath(abs), .stamp = files.stamp(abs), .sy = sy, .id = newId(), .rise = true };
+    return .{ .ed = ed, .path = z, .lang = syntax.forPath(abs), .stamp = files.stamp(abs), .sy = sy, .id = newId(), .rise = true, .new_file = missing, .locked = !missing and !files.writable(abs) };
 }
 
 fn blankPage() ?Page {
-    return .{ .ed = Editor.init(gpa, "") catch return null, .id = newId() };
+    var ed = Editor.init(gpa, "") catch return null;
+    styleEditor(&ed);
+    return .{ .ed = ed, .id = newId() };
+}
+
+/// Gives an editor the settings' tab width, and their indent when its text
+/// doesn't show one of its own.
+fn styleEditor(ed: *Editor) void {
+    ed.tab_width = conf.tab_width;
+    const t = ed.text();
+    if (std.mem.indexOf(u8, t, "\n\t") == null and std.mem.indexOf(u8, t, "\n  ") == null) {
+        ed.indent = if (conf.indent_with == .tabs) "\t" else "    ";
+    }
 }
 
 fn isBlank(d: *const Doc) bool {
@@ -2288,7 +2404,8 @@ pub fn newDoc() ?*Doc {
     const d = newPane(w) orelse return null;
     leaf.* = .{ .pane = d };
     w.focus = d;
-    d.size = .{ .x = 880, .y = 720 };
+    const fr = defaultFrame();
+    d.size = .{ .x = fr.w, .y = fr.h };
     d.fin = d.size;
     finishWin(w);
     named(d);
@@ -2297,13 +2414,22 @@ pub fn newDoc() ?*Doc {
     return d;
 }
 
+/// A new window's size: a share of the main screen's room, so it's neither
+/// a postage stamp on a big display nor past the edges of a small one.
+fn defaultFrame() Rect {
+    const screen = msg(Id, objc.class("NSScreen"), "mainScreen", .{});
+    if (screen == null) return .{ .w = 880, .h = 720 };
+    const vis = msg(Rect, screen, "visibleFrame", .{});
+    return .{ .w = @round(@min(std.math.clamp(vis.w * 0.5, 720, 1200), vis.w)), .h = @round(@min(std.math.clamp(vis.h * 0.82, 520, 1100), vis.h)) };
+}
+
 /// A window with the layout `leaf` and no card yet. The caller sets the
 /// layout and the focused card, then `finishWin`s it.
 fn newWin(leaf: *Node) ?*Win {
     const w = gpa.create(Win) catch return null;
     wins.append(gpa, w) catch return null;
 
-    const frame: Rect = .{ .w = 880, .h = 720 };
+    const frame = defaultFrame();
     const style: usize = 1 | 2 | 4 | 8 | (1 << 15);
     const win = msg(Id, msg(Id, objc.class("NSWindow"), "alloc", .{}), "initWithContentRect:styleMask:backing:defer:", .{ frame, style, @as(usize, 2), false });
     const view = msg(Id, msg(Id, view_class, "alloc", .{}), "initWithFrame:", .{frame});
@@ -2357,9 +2483,24 @@ fn finishWin(w: *Win) void {
         msg(void, win, "center", .{});
         _ = msg(bool, win, "setFrameAutosaveName:", .{objc.str("ze")});
     } else {
-        const fr = msg(Rect, wins.items[wins.items.len - 2].window, "frame", .{});
+        // AppKit's cascade step from the last window's top left, kept on its
+        // screen: a window that would run past the visible frame's right or
+        // bottom edge starts again at that edge's other side.
+        const prev = wins.items[wins.items.len - 2].window;
+        const fr = msg(Rect, prev, "frame", .{});
         msg(void, win, "setFrame:display:", .{ fr, false });
-        msg(void, win, "setFrameTopLeftPoint:", .{Point{ .x = fr.x + 24, .y = fr.y + fr.h - 24 }});
+        const step = msg(Point, win, "cascadeTopLeftFromPoint:", .{Point{ .x = fr.x, .y = fr.y + fr.h }});
+        _ = msg(Point, win, "cascadeTopLeftFromPoint:", .{step});
+        const screen = msg(Id, prev, "screen", .{});
+        if (screen != null) {
+            const vis = msg(Rect, screen, "visibleFrame", .{});
+            var nf = msg(Rect, win, "frame", .{});
+            nf.w = @min(nf.w, vis.w);
+            nf.h = @min(nf.h, vis.h);
+            if (nf.x + nf.w > vis.x + vis.w) nf.x = vis.x;
+            if (nf.y < vis.y) nf.y = vis.y + vis.h - nf.h;
+            msg(void, win, "setFrame:display:", .{ nf, false });
+        }
     }
 }
 
@@ -2385,20 +2526,94 @@ fn runModal(panel: Id) isize {
     return msg(isize, panel, "runModal", .{});
 }
 
-/// Runs a modal alert with `buttons` in order (none gives the default OK)
+/// An Objective-C block with no captures, laid out as clang lays out a
+/// global one: never copied or freed.
+const Block = extern struct {
+    isa: *anyopaque,
+    flags: c_int,
+    reserved: c_int = 0,
+    invoke: *const anyopaque,
+    desc: *const BlockDesc,
+};
+const BlockDesc = extern struct { reserved: c_ulong = 0, size: c_ulong };
+const block_desc: BlockDesc = .{ .size = @sizeOf(Block) };
+/// BLOCK_IS_GLOBAL.
+const block_global = 1 << 28;
+extern var _NSConcreteGlobalBlock: anyopaque;
+/// The sheet's completion handler: ends the modal loop `runAlert` waits in.
+var sheet_done: Block = undefined;
+
+fn sheetEnded(_: *const Block, code: isize) callconv(.c) void {
+    msg(void, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "stopModalWithCode:", .{code});
+}
+
+/// The window an alert drops down from as a sheet: the key window, or a Dev
+/// build's front one, while it's on screen without a sheet already.
+fn sheetHost() Id {
+    const d = keyDoc() orelse return null;
+    const win = d.win.window;
+    if (!msg(bool, win, "isVisible", .{}) or msg(Id, win, "attachedSheet", .{}) != null) return null;
+    return win;
+}
+
+/// Runs alert `a` as a sheet on the front window and waits for its answer,
+/// or as a window of its own when no window can hold it.
+fn runAlert(a: Id) isize {
+    const host = sheetHost() orelse return runModal(a);
+    modal = true;
+    defer modal = false;
+    sheet_done = .{ .isa = &_NSConcreteGlobalBlock, .flags = block_global, .invoke = @ptrCast(&sheetEnded), .desc = &block_desc };
+    msg(void, a, "beginSheetModalForWindow:completionHandler:", .{ host, @as(*anyopaque, @ptrCast(&sheet_done)) });
+    return msg(isize, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "runModalForWindow:", .{msg(Id, a, "window", .{})});
+}
+
+/// Asks with an alert whose `buttons` go in order (none gives the default OK)
 /// and returns what it answered: 1000 for the first button, 1001 the next.
 fn askAlert(title: []const u8, info: []const u8, buttons: []const []const u8) isize {
+    return askAlertWith(title, info, buttons, null);
+}
+
+/// `askAlert` with `extra` (a view, such as a text field) under the words,
+/// which takes the keys first.
+fn askAlertWith(title: []const u8, info: []const u8, buttons: []const []const u8, extra: Id) isize {
     const a = objc.new("NSAlert");
     msg(void, a, "setMessageText:", .{objc.str(title)});
     msg(void, a, "setInformativeText:", .{objc.str(info)});
     for (buttons) |b| _ = msg(Id, a, "addButtonWithTitle:", .{objc.str(b)});
-    const r = runModal(a);
+    if (extra != null) {
+        msg(void, a, "setAccessoryView:", .{extra});
+        msg(void, a, "layout", .{});
+        msg(void, msg(Id, a, "window", .{}), "setInitialFirstResponder:", .{extra});
+    }
+    const r = runAlert(a);
     msg(void, a, "release", .{});
     return r;
 }
 
 fn alert(text: []const u8, detail: []const u8) void {
     _ = askAlert(text, detail, &.{});
+}
+
+/// Asks for a file or folder name in a text field that starts as `initial`.
+/// Null on Cancel, or for an empty name or one with a slash. Valid until the
+/// autorelease pool drains.
+fn askName(title: []const u8, info: []const u8, initial: []const u8, ok: []const u8) ?[]const u8 {
+    const box = msg(Id, msg(Id, objc.class("NSTextField"), "alloc", .{}), "initWithFrame:", .{Rect{ .w = 280, .h = 24 }});
+    defer msg(void, box, "release", .{});
+    msg(void, box, "setStringValue:", .{objc.str(initial)});
+    if (askAlertWith(title, info, &.{ ok, "Cancel" }, box) != 1000) return null;
+    const s = std.mem.trim(u8, objc.utf8(msg(Id, box, "stringValue", .{})), " \t");
+    if (s.len == 0 or std.mem.indexOfScalar(u8, s, '/') != null or std.mem.eql(u8, s, ".") or std.mem.eql(u8, s, "..")) return null;
+    return s;
+}
+
+extern "c" fn strerror(n: c_int) [*:0]const u8;
+
+/// What the system said about the last call that failed, like "Permission
+/// denied". Read it right after the failure.
+fn osError() []const u8 {
+    const e = std.c._errno().*;
+    return if (e == 0) "Unknown error" else std.mem.span(strerror(e));
 }
 
 fn askSave(d: *Doc, n: usize) isize {
@@ -2491,11 +2706,28 @@ fn save(d: *Doc, as: bool) bool {
         if (fresh) |z| gpa.free(z);
         return false;
     }
-    files.write(to, d.file.ed.text()) catch {
-        alert("Couldn't save this file.", to);
-        if (fresh) |z| gpa.free(z);
-        return false;
-    };
+    if (conf.trim_trailing_whitespace) d.file.ed.trimTrailingWhitespace(gpa) catch {};
+    if (conf.ensure_final_newline) d.file.ed.ensureFinalNewline(gpa) catch {};
+    // A failed write says what the system said, and offers to try again or
+    // to save somewhere else.
+    while (true) {
+        if (files.write(to, d.file.ed.text())) |_| break else |_| {}
+        var ib: [std.fs.max_path_bytes + 160]u8 = undefined;
+        const why = std.fmt.bufPrint(&ib, "{s}.\n\n{s}", .{ osError(), to }) catch to;
+        var tb: [300]u8 = undefined;
+        const title = std.fmt.bufPrint(&tb, "Couldn't save {s}.", .{std.fs.path.basename(to)}) catch "Couldn't save this file.";
+        switch (askAlert(title, why, &.{ "Try Again", "Save As…", "Cancel" })) {
+            1000 => continue,
+            1001 => {
+                if (fresh) |z| gpa.free(z);
+                return save(d, true);
+            },
+            else => {
+                if (fresh) |z| gpa.free(z);
+                return false;
+            },
+        }
+    }
     if (fresh) |z| {
         // Resolve after writing so a new file in a linked folder has a real path too.
         const abs = files.absolute(gpa, z) catch {
@@ -2527,9 +2759,15 @@ fn save(d: *Doc, as: bool) bool {
     d.file.ed.buf.markSaved();
     dropDraft(&d.file.draft);
     d.file.stamp = files.stamp(d.file.path.?);
+    d.file.new_file = false;
+    d.file.locked = !files.writable(d.file.path.?);
     d.note = "saved";
     noteRecent(d.file.path.?);
-    if (isConf(d.file.path)) loadSettings();
+    if (isConf(d.file.path)) {
+        // Saving the settings file names its problems again, even ones shown before.
+        report_key = 0;
+        loadSettings();
+    }
     // A new file shows in the tree when its folder's rows are listed; every
     // file's dot goes away.
     if (relOf(d.file.path.?)) |rel| if (!tree.has(rel) and listed(std.fs.path.dirname(rel))) {
@@ -2592,23 +2830,54 @@ pub fn openPanel() void {
     }
 }
 
+/// The sidebar header's Open Folder…: a folder for the sidebar.
+fn openFolderPanel() void {
+    const p = msg(Id, objc.class("NSOpenPanel"), "openPanel", .{});
+    msg(void, p, "setCanChooseDirectories:", .{true});
+    msg(void, p, "setCanChooseFiles:", .{false});
+    if (root) |r| msg(void, p, "setDirectoryURL:", .{msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(std.fs.path.dirname(r) orelse r)})});
+    if (runModal(p) != 1) return;
+    const urls = msg(Id, p, "URLs", .{});
+    if (msg(usize, urls, "count", .{}) == 0) return;
+    open(objc.utf8(msg(Id, msg(Id, urls, "objectAtIndex:", .{@as(usize, 0)}), "path", .{})), keyDoc());
+}
+
 /// File > Open Recent: the last files opened or saved, newest first.
 fn noteRecent(p: []const u8) void {
     if (isConf(p)) return;
+    noteIn("recent", p, 15);
+}
+
+/// The sidebar header's Recent Folders and the empty card's list: the last
+/// folders the sidebar showed, newest first.
+fn noteRecentFolder(p: []const u8) void {
+    noteIn("recentFolders", p, 8);
+}
+
+/// Puts `p` first in the defaults' list `key`, keeping at most `max`.
+fn noteIn(comptime key: []const u8, p: []const u8, max: usize) void {
     const s = objc.str(p);
     const out = msg(Id, objc.class("NSMutableArray"), "arrayWithObject:", .{s});
-    const old = recentFiles();
+    const old = listIn(key);
     for (0..msg(usize, old, "count", .{})) |i| {
-        if (msg(usize, out, "count", .{}) >= 15) break;
+        if (msg(usize, out, "count", .{}) >= max) break;
         const o = msg(Id, old, "objectAtIndex:", .{i});
         if (!msg(bool, o, "isEqualToString:", .{s})) msg(void, out, "addObject:", .{o});
     }
-    msg(void, defaults(), "setObject:forKey:", .{ out, objc.str("recent") });
+    msg(void, defaults(), "setObject:forKey:", .{ out, objc.str(key) });
+}
+
+fn listIn(comptime key: []const u8) Id {
+    const list = msg(Id, defaults(), "stringArrayForKey:", .{objc.str(key)});
+    return if (list != null) list else msg(Id, objc.class("NSArray"), "array", .{});
 }
 
 pub fn recentFiles() Id {
-    const list = msg(Id, defaults(), "stringArrayForKey:", .{objc.str("recent")});
-    return if (list != null) list else msg(Id, objc.class("NSArray"), "array", .{});
+    return listIn("recent");
+}
+
+fn recentFolders() Id {
+    return listIn("recentFolders");
 }
 
 pub fn clearRecent() void {
@@ -2704,6 +2973,7 @@ fn placeOf(p: []const u8) ?Place {
 pub fn saveSession() void {
     saveDrafts();
     quitting = true;
+    if (zoom_due) zoomWrite(@ptrFromInt(zoom_gen));
     for (docs.items) |d| rememberPlace(&d.file);
     if (places_due) writePlaces(null);
     const out = msg(Id, objc.class("NSMutableArray"), "array", .{});
@@ -2780,6 +3050,9 @@ pub fn savedRoot() ?[:0]u8 {
 /// opened.
 pub fn restoreSession() bool {
     if (root == null) if (savedRoot()) |z| adoptRoot(z);
+    // Drafts move from the old folder before any tab takes one's path.
+    var db: [std.fs.max_path_bytes]u8 = undefined;
+    _ = draftsDir(&db);
     const list = msg(Id, defaults(), "stringArrayForKey:", .{objc.str("session")});
     restoring = true;
     const n = if (list != null) msg(usize, list, "count", .{}) else 0;
@@ -2792,6 +3065,15 @@ pub fn restoreSession() bool {
     restoring = false;
     if (tree_stale) rebuildTree();
     refreshAll();
+    // Files that went away since last time are left out, and said so.
+    if (gone_n > 0) {
+        var buf: [120]u8 = undefined;
+        toastFront(if (gone_n == 1)
+            std.fmt.bufPrint(&buf, "{s} is gone, so it didn't reopen", .{gone_name[0..gone_len]}) catch "A file is gone, so it didn't reopen"
+        else
+            std.fmt.bufPrint(&buf, "{d} files are gone, so they didn't reopen", .{gone_n}) catch "Some files are gone, so they didn't reopen");
+        gone_n = 0;
+    }
     return docs.items.len > 0;
 }
 
@@ -2850,9 +3132,20 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
     for (0..head[0]) |i| {
         const p = it.next() orelse break;
         const draft = p.len > 0 and p[0] == '*';
-        const z = gpa.dupeSentinel(u8, if (draft) p[1..] else p, 0) catch continue;
-        defer gpa.free(z);
-        if (!files.exists(z)) continue;
+        const saved = gpa.dupeSentinel(u8, if (draft) p[1..] else p, 0) catch continue;
+        defer gpa.free(saved);
+        // A draft from before the Drafts folder moved is read from its new place.
+        var mb: [std.fs.max_path_bytes]u8 = undefined;
+        const z = if (draft and !files.exists(saved)) movedDraft(saved, &mb) orelse saved else saved;
+        if (!files.exists(z)) {
+            if (!draft) {
+                gone_n += 1;
+                const nm = std.fs.path.basename(z);
+                gone_len = @min(nm.len, gone_name.len);
+                @memcpy(gone_name[0..gone_len], nm[0..gone_len]);
+            }
+            continue;
+        }
         var pg = (if (draft) loadDraft(z) else loadPage(z)) orelse continue;
         // A parked page isn't rising in.
         pg.rise = false;
@@ -2885,13 +3178,35 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
     return n;
 }
 
+/// Files the session restore left out because they're gone: how many, and
+/// the last one's name.
+var gone_n: usize = 0;
+var gone_name: [64]u8 = undefined;
+var gone_len: usize = 0;
+
 // ---- drafts ----
 
 /// Untitled files keep their text in a draft file here as it changes, so
-/// it's never lost: `~/Library/Application Support/ze/Drafts`.
+/// it's never lost: `~/Library/Application Support/zag/Drafts`. Drafts from
+/// before Zag's rename, in `ze/Drafts`, move there the first time it's
+/// asked for; when that move fails they're read where they are.
 fn draftsDir(buf: []u8) ?[:0]const u8 {
     const home = std.mem.span(std.c.getenv("HOME") orelse return null);
-    return std.fmt.bufPrintSentinel(buf, "{s}/Library/Application Support/ze/Drafts", .{home}, 0) catch null;
+    const z = std.fmt.bufPrintSentinel(buf, "{s}/Library/Application Support/zag/Drafts", .{home}, 0) catch return null;
+    if (files.isDir(z)) return z;
+    var ob: [std.fs.max_path_bytes]u8 = undefined;
+    const old = std.fmt.bufPrintSentinel(&ob, "{s}/Library/Application Support/ze/Drafts", .{home}, 0) catch return z;
+    if (!files.isDir(old)) return z;
+    files.makeParent(z) catch {};
+    if (std.c.rename(old, z) == 0) return z;
+    return std.fmt.bufPrintSentinel(buf, "{s}", .{old}, 0) catch null;
+}
+
+/// Where a draft saved under the old `ze/Drafts` folder is now.
+fn movedDraft(p: []const u8, buf: []u8) ?[:0]const u8 {
+    const old = "/Application Support/ze/Drafts/";
+    const at = std.mem.indexOf(u8, p, old) orelse return null;
+    return std.fmt.bufPrintSentinel(buf, "{s}/Application Support/zag/Drafts/{s}", .{ p[0..at], p[at + old.len ..] }, 0) catch null;
 }
 
 fn saveDraftsNow(_: Id, _: Sel, _: Id) callconv(.c) void {
@@ -2940,6 +3255,7 @@ fn loadDraft(abs: [:0]const u8) ?Page {
     const bytes = files.read(gpa, abs) catch return null;
     defer gpa.free(bytes);
     var ed = Editor.init(gpa, bytes) catch return null;
+    styleEditor(&ed);
     const own = gpa.dupeSentinel(u8, abs, 0) catch {
         ed.deinit(gpa);
         return null;
@@ -2953,20 +3269,79 @@ fn loadDraft(abs: [:0]const u8) ?Page {
 /// opened files instead of the last session, come back as tabs in the front
 /// window.
 pub fn adoptDrafts() void {
+    _ = recoverDrafts();
+}
+
+/// Drafts no tab holds come back as tabs in the front window's card, oldest
+/// first, after the tab on show, which stays on show: a file opened from
+/// Finder keeps the keys. Says how many came back. Returns that count.
+fn recoverDrafts() usize {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = draftsDir(&buf) orelse return;
-    const dh = std.c.opendir(dir) orelse return;
-    defer _ = std.c.closedir(dh);
+    const dir = draftsDir(&buf) orelse return 0;
+    const dh = std.c.opendir(dir) orelse return 0;
+    // Draft names start with the second they were made: "<seconds>-<id>.txt".
+    const Found = struct { secs: u64, id: u64, name: []u8 };
+    var found: std.ArrayList(Found) = .empty;
+    defer {
+        for (found.items) |x| gpa.free(x.name);
+        found.deinit(gpa);
+    }
     while (std.c.readdir(dh)) |e| {
         const name = std.mem.sliceTo(&e.name, 0);
         if (name.len == 0 or name[0] == '.' or !std.mem.endsWith(u8, name, ".txt")) continue;
+        const stem = name[0 .. name.len - 4];
+        const dash = std.mem.indexOfScalar(u8, stem, '-');
+        const secs = std.fmt.parseInt(u64, stem[0 .. dash orelse stem.len], 10) catch std.math.maxInt(u64);
+        const id = if (dash) |k| std.fmt.parseInt(u64, stem[k + 1 ..], 10) catch 0 else 0;
+        const own = gpa.dupe(u8, name) catch continue;
+        found.append(gpa, .{ .secs = secs, .id = id, .name = own }) catch gpa.free(own);
+    }
+    _ = std.c.closedir(dh);
+    std.mem.sort(Found, found.items, {}, struct {
+        fn lt(_: void, a: Found, b: Found) bool {
+            return a.secs < b.secs or (a.secs == b.secs and a.id < b.id);
+        }
+    }.lt);
+    var n: usize = 0;
+    for (found.items) |x| {
         var pb: [std.fs.max_path_bytes]u8 = undefined;
-        const abs = std.fmt.bufPrintSentinel(&pb, "{s}/{s}", .{ dir, name }, 0) catch continue;
+        const abs = std.fmt.bufPrintSentinel(&pb, "{s}/{s}", .{ dir, x.name }, 0) catch continue;
         if (draftHeld(abs)) continue;
         var pg = loadDraft(abs) orelse continue;
-        const d = keyDoc() orelse (if (wins.items.len > 0) wins.items[wins.items.len - 1].focus else newDoc()) orelse return pg.deinitKeepDraft();
-        putTab(d, pg, d.at + 1);
+        const d = keyDoc() orelse (if (wins.items.len > 0) wins.items[wins.items.len - 1].focus else newDoc()) orelse {
+            pg.deinitKeepDraft();
+            break;
+        };
+        if (replaceable(d)) {
+            putTab(d, pg, 0);
+        } else {
+            pg.rise = false;
+            d.pages.insert(gpa, @min(d.at + n, d.pages.items.len), pg) catch {
+                pg.deinitKeepDraft();
+                continue;
+            };
+            refreshWin(d.win);
+        }
+        n += 1;
     }
+    if (n > 0) {
+        var tb: [48]u8 = undefined;
+        toastFront(if (n == 1) "Restored 1 draft" else std.fmt.bufPrint(&tb, "Restored {d} drafts", .{n}) catch "Restored drafts");
+    }
+    return n;
+}
+
+/// File > Recover Drafts: drafts no tab holds come back.
+fn recoverDraftsNow() void {
+    if (recoverDrafts() == 0) toastFront("No drafts to recover");
+}
+
+/// File > Browse Drafts…: the Drafts folder in Finder.
+fn browseDrafts() void {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = draftsDir(&buf) orelse return;
+    if (!files.isDir(dir)) return toastFront("No drafts yet");
+    msg(void, msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{}), "openURL:", .{msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(dir)})});
 }
 
 fn draftHeld(abs: []const u8) bool {
@@ -2996,6 +3371,12 @@ fn checkOutside(d: *Doc) void {
     for (d.pages.items) |*pg| checkDeleted(pg);
     const p = d.file.path orelse return;
     const now = files.stamp(p);
+    // A file made read-only, or writable again, shows or drops its lock.
+    const locked = now != null and !files.writable(p);
+    if (locked != d.file.locked) {
+        d.file.locked = locked;
+        refresh(d);
+    }
     if (std.meta.eql(now, d.file.stamp)) return;
     if (now == null) {
         d.file.stamp = now;
@@ -3003,12 +3384,12 @@ fn checkOutside(d: *Doc) void {
         d.note = "deleted on disk";
         return refresh(d);
     }
-    if (d.file.ed.buf.dirty() and !askReload(d)) {
+    const bytes = files.read(gpa, p) catch return;
+    defer gpa.free(bytes);
+    if (d.file.ed.buf.dirty() and !askReload(d, bytes)) {
         d.file.stamp = now;
         return;
     }
-    const bytes = files.read(gpa, p) catch return;
-    defer gpa.free(bytes);
     if (looksBinary(bytes)) {
         d.file.stamp = now;
         d.file.ed.buf.markUnsaved();
@@ -3017,6 +3398,7 @@ fn checkOutside(d: *Doc) void {
     }
     d.file.ed.reload(gpa, bytes) catch return;
     d.file.stamp = now;
+    d.file.new_file = false;
     d.note = "reloaded";
     refresh(d);
 }
@@ -3038,12 +3420,76 @@ fn changedTitle(d: *Doc, buf: *[300]u8) []const u8 {
     return std.fmt.bufPrint(buf, "{s} changed in another app.", .{d.file.name()}) catch "This file changed in another app.";
 }
 
-fn askReload(d: *Doc) bool {
+/// Asks what to do about a file with unsaved changes that another app
+/// changed, saying which lines differ. Show Changes opens the version on
+/// disk beside it and keeps this one. True to reload.
+fn askReload(d: *Doc, disk: []const u8) bool {
     // A Dev build never puts an alert in front of Harsha: it keeps its copy.
     if (background) return false;
     msg(void, d.win.window, "makeKeyAndOrderFront:", .{@as(Id, null)});
     var buf: [300]u8 = undefined;
-    return askAlert(changedTitle(d, &buf), "Reloading it loses your unsaved changes here.", &.{ "Keep Mine", "Reload" }) == 1001;
+    var ib: [300]u8 = undefined;
+    const info = diffSummary(&ib, d.file.ed.text(), disk);
+    switch (askAlert(changedTitle(d, &buf), info, &.{ "Keep Mine", "Reload", "Show Changes" })) {
+        1001 => return true,
+        1002 => showDiskCopy(d, disk),
+        else => {},
+    }
+    return false;
+}
+
+/// Which lines differ between `mine` and `disk`, from the first line that
+/// differs to the last, and what reloading costs.
+fn diffSummary(buf: []u8, mine: []const u8, disk: []const u8) []const u8 {
+    const lose = "Reloading it loses your unsaved changes here.";
+    var a = std.mem.splitScalar(u8, mine, '\n');
+    var b = std.mem.splitScalar(u8, disk, '\n');
+    var head: usize = 0;
+    while (true) {
+        const x = a.next();
+        const y = b.next();
+        if (x == null or y == null or !std.mem.eql(u8, x.?, y.?)) break;
+        head += 1;
+    }
+    const ml = std.mem.count(u8, mine, "\n") + 1;
+    const dl = std.mem.count(u8, disk, "\n") + 1;
+    var tail: usize = 0;
+    var i = mine.len;
+    var j = disk.len;
+    // Matching lines back from the end, without running into the matching head.
+    while (tail + head < @min(ml, dl)) {
+        const xs = if (std.mem.lastIndexOfScalar(u8, mine[0..i], '\n')) |k| k + 1 else 0;
+        const ys = if (std.mem.lastIndexOfScalar(u8, disk[0..j], '\n')) |k| k + 1 else 0;
+        if (!std.mem.eql(u8, mine[xs..i], disk[ys..j]) or xs == 0 or ys == 0) break;
+        i = xs - 1;
+        j = ys - 1;
+        tail += 1;
+    }
+    const here = ml - head - tail;
+    const there = dl - head - tail;
+    if (here == 0 and there == 0) return lose;
+    const first = head + 1;
+    const last = head + @max(here, there);
+    if (first >= last) return std.fmt.bufPrint(buf, "Line {d} differs: {d} line{s} here, {d} on disk. {s}", .{ first, here, if (here == 1) "" else "s", there, lose }) catch lose;
+    return std.fmt.bufPrint(buf, "Lines {d} to {d} differ: {d} line{s} here, {d} on disk. {s}", .{ first, last, here, if (here == 1) "" else "s", there, lose }) catch lose;
+}
+
+/// The version on disk of `d`'s file, as an untitled tab in a card split off
+/// to its right (or a tab beside it when there's no room), to compare.
+fn showDiskCopy(d: *Doc, disk: []const u8) void {
+    var ed = Editor.init(gpa, disk) catch return;
+    styleEditor(&ed);
+    var pg: Page = .{ .ed = ed, .id = newId(), .lang = d.file.lang, .rise = true };
+    const name = d.file.name();
+    const nm = std.fmt.bufPrint(&pg.title, "{s} (on disk)", .{name}) catch blk: {
+        const n = @min(name.len, pg.title.len);
+        @memcpy(pg.title[0..n], name[0..n]);
+        break :blk pg.title[0..n];
+    };
+    pg.title_len = nm.len;
+    const to = (if (roomFor(d, false)) splitOff(d, false, false, false) else null) orelse d;
+    putTab(to, pg, if (to == d) d.at + 1 else 0);
+    focus(d);
 }
 
 /// Saving over a file another app changed since Zag read or saved it.
@@ -3068,12 +3514,16 @@ fn desaturate(c: *Rgb) void {
     c.* = @splat(c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722);
 }
 
-/// Sets the colors that draw from the settings' themes: grey in zen, and
-/// with Increase Contrast on, muted text lifted to the text color at 0.8.
+/// Sets the colors that draw from the settings' themes: grey in zen, warmer
+/// in Late-Night with its warmth on, and with Increase Contrast on, muted
+/// text lifted to the text color at 0.8.
 fn buildThemes() void {
     themes = .{ conf.light, conf.dark };
     if (conf.zen) for (&themes) |*th| {
         for (settings.all(th)) |*c| desaturate(c);
+    };
+    if (conf.late_night and conf.late_night_warmth) for (&themes) |*th| {
+        for (settings.all(th)) |*c| c.* = .{ @min(1, c[0] * 1.04), c[1] * 0.94, c[2] * 0.78 };
     };
     if (contrast) for (&themes) |*th| {
         for (&th.muted, th.bg, th.fg) |*m, back, text| m.* = back + 0.8 * (text - back);
@@ -3113,10 +3563,37 @@ fn resolveConf() void {
 fn loadSettings() void {
     resolveConf();
     const p = conf_path orelse return;
-    const old_lh = lh;
-    const old_themes = themes;
     const old_conf = conf;
     conf_saved = settings.load(gpa, p);
+    // A zoom still waiting to be written wins over the file's older size.
+    if (zoom_due) conf_saved.size = zoom_size;
+    conf_stamp = files.stamp(p);
+    applySettings(old_conf);
+    reportSettings();
+}
+
+/// What `report_key` was made from when the settings file's problems were
+/// last named: 0 when it read cleanly.
+var report_key: u64 = 0;
+
+/// Names the settings file's first problem in a note on the front window,
+/// once for each new set of problems.
+fn reportSettings() void {
+    const r = &conf_saved.report;
+    const key: u64 = if (r.count == 0) 0 else (@as(u64, r.count) << 48) | (@as(u64, r.first_line) << 8) | r.msg_len;
+    if (key == report_key) return;
+    report_key = key;
+    if (key == 0) return;
+    var mb: [32]u8 = undefined;
+    const more = if (r.count > 1) std.fmt.bufPrint(&mb, " (and {d} more)", .{r.count - 1}) catch "" else "";
+    var buf: [200]u8 = undefined;
+    toastFront(std.fmt.bufPrint(&buf, "config.toml line {d}: {s}{s}", .{ r.first_line, r.firstMessage(), more }) catch "config.toml has a line Zag can't read");
+}
+
+/// Applies `conf_saved` to every window; `old_conf` is what they showed.
+fn applySettings(old_conf: settings.Settings) void {
+    const old_lh = lh;
+    const old_themes = themes;
     conf = conf_saved;
     if (conf.late_night) conf.lateNight();
     var fonts_changed = false;
@@ -3124,6 +3601,9 @@ fn loadSettings() void {
     var side_moves = false;
     var zen_changed = false;
     var look_changed = false;
+    var caret_changed = false;
+    var indent_changed = false;
+    var hidden_changed = false;
     for (std.enums.values(settings.Opt)) |o| if (!settings.same(&old_conf, &conf, o)) switch (o) {
         .font, .size, .@"line-height" => {
             fonts_changed = true;
@@ -3134,21 +3614,35 @@ fn loadSettings() void {
             text_moves = true;
             side_moves = true;
         },
-        .wrap, .@"line-numbers", .typewriter => text_moves = true,
+        .wrap, .@"line-numbers", .typewriter, .@"zen-columns", .@"hanging-indent" => text_moves = true,
+        .@"tab-width" => {
+            text_moves = true;
+            indent_changed = true;
+        },
+        .@"indent-with" => indent_changed = true,
         .zen => {
             text_moves = true;
             zen_changed = true;
         },
         .@"late-night", .appearance => look_changed = true,
-        // Colors, Focus and bracket pairs leave every line where it is.
-        .pairs, .focus, .@"light-theme", .@"dark-theme" => {},
+        .@"caret-style", .@"caret-width", .@"caret-blink" => caret_changed = true,
+        .@"show-hidden" => hidden_changed = true,
+        // Colors, Focus, bracket pairs, the caret line's band, marks and
+        // guides, the word count and what saving does leave every line
+        // where it is: the redraw below picks them up.
+        .pairs, .focus, .@"light-theme", .@"dark-theme", .@"trim-trailing-whitespace", .@"ensure-final-newline", .@"highlight-current-line", .@"show-invisibles", .@"indent-guides", .@"word-count", .@"focus-dim", .@"late-night-warmth" => {},
     };
     buildThemes();
     // A theme or appearance pick crossfades, and so does Late-Night; zen's own change doesn't.
     const crossfade = look_changed or (!zen_changed and !std.meta.eql(old_themes, themes));
     side_w = conf.sidebar_width;
-    conf_stamp = files.stamp(p);
     if (font == null or fonts_changed) setFont();
+    preview.setTypography(conf.font(), conf.size, conf.spacing);
+    if (hidden_changed) {
+        tree.show_hidden = conf.show_hidden;
+        tree_stale = true;
+        if (root != null and !restoring) rebuildTree();
+    }
     // The icons take the size and the caret and muted colors.
     for (old_themes, themes) |a, b| {
         if (old_conf.size != conf.size or !std.mem.eql(f64, &a.caret, &b.caret) or !std.mem.eql(f64, &a.muted, &b.muted)) {
@@ -3170,6 +3664,13 @@ fn loadSettings() void {
     }
     for (docs.items) |d| {
         d.dark = null;
+        if (indent_changed) for (0..tabCount(d)) |j| styleEditor(&tabPage(d, j).ed);
+        // The status strip's word count may come or go.
+        d.stat_at[0] = std.math.maxInt(u64);
+        if (caret_changed) {
+            d.caret_at = null;
+            if (d.shown) blink(d.caret);
+        }
         if (text_moves) {
             for (0..tabCount(d)) |j| {
                 const pg = tabPage(d, j);
@@ -3298,6 +3799,49 @@ pub fn openSettings() void {
     openFile(conf_path.?);
 }
 
+/// Zag > Reveal Config in Finder.
+fn revealConfig() void {
+    const p = conf_path orelse return;
+    settings.ensure(gpa, p, &conf_saved) catch return alert("Couldn't write the settings file.", p);
+    revealPath(p);
+}
+
+/// Zag > Reload Settings: reads config.toml again, naming its problems again.
+fn reloadSettings() void {
+    toastFront("Settings reloaded");
+    report_key = 0;
+    loadSettings();
+}
+
+/// Zag > Reset Settings to Defaults…: after asking, config.toml goes to the
+/// Trash and a new one with every default takes its place.
+fn resetSettings() void {
+    const p = conf_path orelse return;
+    if (askAlert("Reset all settings to their defaults?", "Zag moves your config.toml to the Trash and writes a new one with every setting at its default.", &.{ "Reset", "Cancel" }) != 1000) return;
+    if (files.exists(p) and !trash(p)) return alert("Couldn't move the settings file to the Trash.", p);
+    zoom_due = false;
+    settings.prepare(gpa, p);
+    report_key = 0;
+    loadSettings();
+    watchConf();
+    for (docs.items) |d| if (isConf(d.file.path)) checkOutside(d);
+    toastFront("Settings reset to their defaults");
+}
+
+/// Moves `p` to the Trash. False when it couldn't.
+fn trash(p: []const u8) bool {
+    const url = msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(p)});
+    const fm = msg(Id, objc.class("NSFileManager"), "defaultManager", .{});
+    return msg(bool, fm, "trashItemAtURL:resultingItemURL:error:", .{ url, @as(?*anyopaque, null), @as(?*anyopaque, null) });
+}
+
+/// Shows `p` selected in a Finder window.
+fn revealPath(p: []const u8) void {
+    const url = msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(p)});
+    const urls = msg(Id, objc.class("NSArray"), "arrayWithObject:", .{url});
+    msg(void, msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{}), "activateFileViewerSelectingURLs:", .{urls});
+}
+
 /// Writes the opposite of flag `opt` to the settings file.
 pub fn flip(comptime opt: settings.Opt) void {
     const name = comptime blk: {
@@ -3338,6 +3882,11 @@ pub fn pickLook(i: usize) void {
 // ---- prompt ----
 
 fn startPrompt(d: *Doc, m: Mode) void {
+    // A prompt takes the keys back from the sidebar.
+    if (d.win.side_key) {
+        d.win.side_key = false;
+        redrawSide(d.win);
+    }
     d.mode = m;
     d.prompt.clearRetainingCapacity();
     d.fresh = false;
@@ -3437,8 +3986,10 @@ fn addCommands(menu: Id, prefix: []const u8) void {
     var section = prefix;
     const n: usize = @intCast(msg(isize, menu, "numberOfItems", .{}));
     const palette_sel = objc.sel_registerName("commandPalette:");
+    const scheme_sel = objc.sel_registerName("pickScheme:");
     // AppKit's own entries for each open window in the Window menu.
     const window_sel = objc.sel_registerName("makeKeyAndOrderFront:");
+    const services = msg(Id, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "servicesMenu", .{});
     for (0..n) |i| {
         const it = msg(Id, menu, "itemAtIndex:", .{@as(isize, @intCast(i))});
         if (msg(bool, it, "isSeparatorItem", .{})) {
@@ -3449,8 +4000,8 @@ fn addCommands(menu: Id, prefix: []const u8) void {
         const title = objc.utf8(msg(Id, it, "title", .{}));
         const sub = msg(Id, it, "submenu", .{});
         if (sub != null) {
-            // Open Recent fills itself only as it opens.
-            if (msg(Id, sub, "delegate", .{}) == null) addCommands(sub, title);
+            // Open Recent fills itself only as it opens; Services is other apps'.
+            if (msg(Id, sub, "delegate", .{}) == null and sub != services) addCommands(sub, title);
             continue;
         }
         const act = msg(Sel, it, "action", .{});
@@ -3459,7 +4010,13 @@ fn addCommands(menu: Id, prefix: []const u8) void {
             continue;
         }
         if (act == palette_sel or act == window_sel or greyed(it)) continue;
-        const name = (if (section.len > 0) std.fmt.allocPrint(a, "{s}: {s}", .{ section, title }) else a.dupe(u8, title)) catch return;
+        // Each built-in theme is a command of its own: "Theme: Paper (Light)".
+        const name = (if (act == scheme_sel)
+            std.fmt.allocPrint(a, "Theme: {s} ({s})", .{ title, if (settings.schemes[@intCast(msg(isize, it, "tag", .{}))].dark) "Dark" else "Light" })
+        else if (section.len > 0)
+            std.fmt.allocPrint(a, "{s}: {s}", .{ section, title })
+        else
+            a.dupe(u8, title)) catch return;
         cmd_names.append(a, name) catch return;
         cmds.append(a, .{ .item = msg(Id, it, "retain", .{}), .keys = keysOf(a, it) catch "", .on = isChecked(it) }) catch {
             msg(void, it, "release", .{});
@@ -3666,7 +4223,7 @@ const Seg = struct { k: usize = 0, start: usize = 0, col: usize = 0, end: usize 
 fn wrapCols(d: *const Doc) usize {
     const room = @max(d.fin.x - 2 * gap - 2 * pad_x - gutter(d), 8 * cw);
     const cols: usize = @intFromFloat(room / cw);
-    return if (conf.zen) @min(cols, 80) else cols;
+    return if (conf.zen) @min(cols, conf.zen_columns) else cols;
 }
 
 /// Brings the row counts up to date after edits, a resize or a font change.
@@ -4174,9 +4731,9 @@ fn retitleNow(self: Id, _: Sel, _: Id) callconv(.c) void {
 
 // ---- icons ----
 
-const Icon = enum { closed, opened, sidebar, plus, close, folder, parents, crumb, check };
+const Icon = enum { closed, opened, sidebar, plus, close, folder, parents, crumb, check, lock };
 /// SF Symbols, which come with macOS, so they cost Zag no size.
-const icon_names = [_][:0]const u8{ "chevron.right", "chevron.down", "sidebar.left", "plus", "xmark", "folder.fill", "chevron.down", "chevron.forward", "checkmark" };
+const icon_names = [_][:0]const u8{ "chevron.right", "chevron.down", "sidebar.left", "plus", "xmark", "folder.fill", "chevron.down", "chevron.forward", "checkmark", "lock.fill" };
 /// Symbol images for the light and dark themes, tinted and made on first use.
 var icons: [2][icon_names.len]Id = @splat(@splat(null));
 
@@ -4197,7 +4754,8 @@ fn sideFit(sl: *SideLine, fnt: Id, room: f64) Id {
     if (sl.cut_room != room) {
         if (sl.cut) |c| objc.CFRelease(c);
         sl.cut_room = room;
-        sl.cut = objc.CTLineCreateTruncatedLine(l, room, 1, uiDots(fnt));
+        // Cut in the middle, so the end of the name and its extension stay.
+        sl.cut = objc.CTLineCreateTruncatedLine(l, room, 2, uiDots(fnt));
     }
     return sl.cut orelse l;
 }
@@ -4241,6 +4799,7 @@ fn icon(which: Icon, dark: bool, th: *const Theme) Id {
         .folder => .{ 15.0 / conf.size, 0 },
         .parents => .{ 9.0 / conf.size, 0.4 },
         .check => .{ 11.0 / conf.size, 0.3 },
+        .lock => .{ 9.0 / conf.size, 0.2 },
     };
     const cfg = objc.class("NSImageSymbolConfiguration");
     const sized = msg(Id, cfg, "configurationWithPointSize:weight:", .{ conf.size * scale, weight });
@@ -4827,10 +5386,24 @@ fn drawRow(w: *Win, ctx: Id, th: *const Theme, dark: bool, i: usize, y: f64, tur
     }
     if (lift > 0.01) objc.CGContextRestoreGState(ctx);
     const da = if (row.dir) 0 else rowDot(w, row.rel, now);
+    var ex = nx + nw;
     if (da > 0.001) {
         if (side_dot == null) side_dot = uiLine(" •", font, side_w);
-        _ = drawLineA(ctx, side_dot, th.caret, da, nx + nw, y + side_base);
+        ex += drawLineA(ctx, side_dot, th.caret, da, ex, y + side_base);
     }
+    // A file open in a card that this user can't write has a lock after its name.
+    if (!row.dir and rowLocked(w, row.rel)) drawIcon(icon(.lock, dark, th), ex + 4, y + (side_h - 10) / 2, 10);
+}
+
+/// Whether a card in `w` holds `rel` read-only.
+fn rowLocked(w: *const Win, rel: []const u8) bool {
+    for (docs.items) |d| if (d.win == w) {
+        for (0..tabCount(d)) |j| {
+            const pg = tabPage(d, j);
+            if (pg.locked) if (pg.path) |p| if (relOf(p)) |r| if (std.mem.eql(u8, r, rel)) return true;
+        }
+    };
+    return false;
 }
 
 /// Settles the sidebar's scroll position before its rows draw.
@@ -4863,8 +5436,9 @@ fn sideScroll(w: *Win, cur: ?[]const u8, view_h: f64, shut: f64, now: f64) f64 {
 /// folder down to the cards' bottom edge, fading out there when more rows
 /// sit below. The open folders holding the rows
 /// at the top pin under the name, and the next folder pushes them up.
-/// `fade` is the sidebar's alpha while it slides.
-fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, fade: f64, now: f64) void {
+/// `fade` is the sidebar's alpha while it slides, applied here unless the
+/// caller draws it `layered`, into a transparency layer with that alpha.
+fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, fade: f64, layered: bool, now: f64) void {
     const rows = tree.rows.items;
     const lt = listTop();
     const full_h = msg(Rect, w.view, "bounds", .{}).h;
@@ -4888,11 +5462,26 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
     objc.CGContextSaveGState(ctx);
     objc.CGContextClipToRect(ctx, .{ .y = top_h - 6, .w = side_w - 2, .h = full_h - top_h + 6 });
     if (side_head.full == null) side_head.full = uiLine(std.fs.path.basename(root.?), name_font, 1e9);
-    const hw = drawLineA(ctx, sideFit(&side_head, name_font, side_w - 46), th.fg, 1, 16, top_h + side_base);
+    // The folder's name is a button for its menu: a capsule under the mouse,
+    // a stronger fill while pressed.
+    const head_line = sideFit(&side_head, name_font, side_w - 46);
+    const hw = lineW(head_line);
+    w.head_w = hw + 17;
+    const head_a = @max(0.08 * w.hot_t[2].at(now), 0.14 * (if (w.press == 4) w.press_t.at(now) else 0));
+    if (head_a > 0.001) pill(ctx, th.fg, head_a * fade, 8, top_h + 3, w.head_w + 16, side_h - 6, (side_h - 6) / 2);
+    _ = drawLineA(ctx, head_line, th.fg, 1, 16, top_h + side_base);
     drawIcon(icon(.parents, dark, th), 16 + hw + 5, top_h + (side_h - 12) / 2, 12);
 
     objc.CGContextClipToRect(ctx, .{ .y = lt, .w = side_w - 2, .h = view_h });
 
+    // A folder Zag can't read, or one with nothing to list, says so in the
+    // middle of the list.
+    if (tree.unreadable or rows.len == 0) {
+        const say = if (tree.unreadable) "Zag can't read this folder" else if (conf.show_hidden) "This folder is empty" else "No files to show here";
+        const line = uiLine(say, side_font, side_w - 32);
+        defer if (line) |l| objc.CFRelease(l);
+        _ = drawLineA(ctx, line, th.muted, 1, @round((side_w - lineW(line)) / 2), @round(lt + view_h / 2 - side_h + side_base));
+    }
     // A faint highlight follows the mouse down the list, sliding from row
     // to row on a spring that settles without a bounce. It fades in where
     // the mouse comes in and fades out where it leaves.
@@ -4939,10 +5528,36 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
         }
         drawRow(w, ctx, th, dark, i, y, turnOf(vs[0..vn], i), sh, now);
     }
+    // A list cut short says so on a row after its last.
+    if (tree.truncated) {
+        const y = lt + f(rows.len) * side_h - sy - moved;
+        if (y < lt + view_h) {
+            if (side_more == null) side_more = uiLine("Too many files to list them all", side_font, side_w - 32);
+            _ = drawLineA(ctx, side_more, th.muted, 1, 26, y + side_base);
+        }
+    }
+
+    // With the keys, the sidebar outlines the row they're on, and the
+    // outline slides from row to row like the mouse's highlight.
+    const kc_row = if (w.side_key and w.side_cur_gen == tree_gen) w.side_cur else null;
+    if (kc_row) |i| if (i < rows.len) {
+        w.kc.row = i;
+        w.kc.follow(f(i) * side_h - shiftOf(vs[0..vn], i), w.kc.a.at(now) < 0.05, now);
+    } else w.kc.a.aim(0, now) else w.kc.a.aim(0, now);
+    const kc_a = w.kc.a.at(now);
+    if (kc_a > 0.01) {
+        const ky = lt + w.kc.s.step(now) - sy;
+        pill(ctx, th.caret, 0.08 * kc_a * fade, side_inset, ky, side_w - 2 * side_inset - 2, side_h, side_radius);
+        ring(ctx, th.caret, 0.55 * kc_a * fade, side_inset, ky, side_w - 2 * side_inset - 2, side_h, side_radius);
+    } else w.kc.park();
 
     // Pinned folders, each held up by the end of its rows, the outer ones
-    // drawn last so they stay on top.
+    // drawn last so they stay on top. The one under the mouse lights like a
+    // row, on its own highlight, so the rows' highlight stays under the pins.
     w.nstuck = stuckRows(sy, &w.stuck);
+    if (w.hov_pin) |hp| w.pin_row = hp;
+    w.pin_t.aim(if (w.hov_pin != null) 1 else 0, now);
+    const pin_a = w.pin_t.at(now);
     var low = lt;
     var j = w.nstuck;
     while (j > 0) {
@@ -4953,6 +5568,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
         w.stuck_y[j] = y;
         objc.CGContextClearRect(ctx, .{ .y = y, .w = side_w, .h = side_h });
         fillA(ctx, bg, chromeAlpha(th, dark, w.z.x), 0, y, side_w, side_h);
+        if (a == w.pin_row and pin_a > 0.01) pill(ctx, th.fg, (if (contrast) @as(f64, 0.08) else if (dark) @as(f64, 0.035) else 0.025) * (if (key) @as(f64, 1) else 0.7) * pin_a * fade, side_inset, y, side_w - 2 * side_inset - 2, side_h, side_radius);
         drawRow(w, ctx, th, dark, a, y, turnOf(vs[0..vn], a), 0, now);
         low = @max(low, y + side_h);
     }
@@ -4961,9 +5577,9 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
     if (shade > 0) fillA(ctx, th.fg, (if (contrast) @as(f64, 0.2) else 0.08) * shade, 12, low - 1, side_w - 24, 1);
     // With more rows below the list's end, its last points fade away.
     const more = std.math.clamp((f(rows.len) * side_h - moved - sy - view_h) / side_fade, 0, 1);
-    // Drawn at full strength: the band's height is what eases, and not while the
-    // sidebar slides, when its alpha would scale the repaint unevenly.
-    if (more * side_fade >= 1 and fade >= 1) fadeList(ctx, bg, chromeAlpha(th, dark, w.z.x), lt + view_h, more * side_fade);
+    // Drawn at full strength: the band's height is what eases. In a layer
+    // (the sidebar sliding) it only erases, and the layer's alpha does the rest.
+    if (more * side_fade >= 1 and (fade >= 1 or layered)) fadeList(ctx, bg, chromeAlpha(th, dark, w.z.x), lt + view_h, more * side_fade, layered);
     objc.CGContextRestoreGState(ctx);
 }
 
@@ -4979,8 +5595,10 @@ var fade_key: [4]f64 = undefined;
 /// Fades the rows in the `h` points above `end` into the sidebar's
 /// background `bg` (painted at alpha `a` over the material), fully.
 /// The rows are erased with a gradient, then the background goes back with
-/// the alpha that leaves the strip's empty parts as they were.
-fn fadeList(ctx: Id, bg: Rgb, a: f64, end: f64, h: f64) void {
+/// the alpha that leaves the strip's empty parts as they were. In a
+/// transparency layer (`erase_only`) the background under the layer stays,
+/// so the erase is all it takes.
+fn fadeList(ctx: Id, bg: Rgb, a: f64, end: f64, h: f64, erase_only: bool) void {
     const key = [4]f64{ bg[0], bg[1], bg[2], a };
     if (fade_out == null or !std.mem.eql(f64, &key, &fade_key)) {
         const space = objc.CGColorSpaceCreateDeviceRGB();
@@ -5008,7 +5626,7 @@ fn fadeList(ctx: Id, bg: Rgb, a: f64, end: f64, h: f64) void {
     objc.CGContextSetBlendMode(ctx, 23);
     objc.CGContextDrawLinearGradient(ctx, fade_out, from, to, 0);
     objc.CGContextSetBlendMode(ctx, 0);
-    objc.CGContextDrawLinearGradient(ctx, fade_in, from, to, 0);
+    if (!erase_only) objc.CGContextDrawLinearGradient(ctx, fade_in, from, to, 0);
     objc.CGContextRestoreGState(ctx);
 }
 
@@ -5026,13 +5644,125 @@ fn sideClick(w: *Win, p: Point, flags: usize) void {
     }
     const row = tree.rows.items[i];
     if (row.dir) {
+        // A folder click hands the sidebar the keys, on that folder.
+        sideFocus(w, i);
         startFold(i);
         return;
     }
-    // A file opens when the mouse comes up, unless it's dragged to a card.
+    // A file opens when the mouse comes up, unless it's dragged to a card;
+    // the card it opens in takes the keys.
+    if (w.side_key) {
+        w.side_key = false;
+        redrawSide(w);
+    }
     const path = std.fmt.allocPrintSentinel(gpa, "{s}/{s}", .{ root.?, row.rel }, 0) catch return;
     const ix = rowIconX(row.depth);
     w.tdrag = .{ .from = null, .file = path, .cmd = flags & objc.cmd_key != 0, .down = p, .at = p, .grab = p.x - ix + tab_pad, .row = i };
+}
+
+/// Gives the sidebar the keys: the arrows, Return and typing work on its
+/// rows until a click in a card or ⎋ hands them back. The outline starts
+/// on `row`, or where it last was, or on the file on show.
+fn sideFocus(w: *Win, row: ?usize) void {
+    w.side_key = true;
+    if (row) |r| {
+        w.side_cur = r;
+    } else if (w.side_cur == null or w.side_cur_gen != tree_gen) {
+        w.side_cur = w.sel.row orelse if (tree.rows.items.len > 0) @as(?usize, 0) else null;
+    }
+    w.side_cur_gen = tree_gen;
+    redrawSide(w);
+}
+
+/// View > Focus Sidebar (⇧⌘E): the sidebar takes the keys, shown first if
+/// it was off.
+fn focusSidebar(d: *Doc) void {
+    if (root == null) return;
+    if (!conf.sidebar) flip(.sidebar);
+    sideFocus(d.win, null);
+}
+
+/// A key while the sidebar has the keys: ↑ and ↓ move, → opens a folder or
+/// steps into it, ← closes it or steps out to its folder, Return opens a
+/// file in the focused card (which takes the keys) or folds a folder, ⎋
+/// hands the keys back, and letters pick the next row whose name starts
+/// with them. False for keys it leaves alone (⌘ and ⌃ ones).
+fn sideKey(w: *Win, ev: Id) bool {
+    if (!w.side_key) return false;
+    if (!sideShown(w)) {
+        w.side_key = false;
+        return false;
+    }
+    if (msg(usize, ev, "modifierFlags", .{}) & (objc.cmd_key | objc.ctrl_key) != 0) return false;
+    const now = CACurrentMediaTime();
+    finishFolds(now);
+    const code = msg(u16, ev, "keyCode", .{});
+    const rows = tree.rows.items;
+    if (code == 53 or rows.len == 0) {
+        w.side_key = code != 53;
+        redrawSide(w);
+        return true;
+    }
+    var i = @min(if (w.side_cur_gen == tree_gen) w.side_cur orelse 0 else 0, rows.len - 1);
+    switch (code) {
+        126 => i -|= 1,
+        125 => i = @min(i + 1, rows.len - 1),
+        124 => if (rows[i].dir) {
+            if (!tree.isOpen(rows[i].rel)) startFold(i) else if (i + 1 < tree.rows.items.len and tree.rows.items[i + 1].depth > tree.rows.items[i].depth) {
+                i += 1;
+            }
+        },
+        123 => if (rows[i].dir and tree.isOpen(rows[i].rel)) startFold(i) else if (rows[i].depth > 0) {
+            const want = rows[i].depth - 1;
+            while (i > 0 and rows[i].depth != want) i -= 1;
+        },
+        36, 76 => if (rows[i].dir) startFold(i) else {
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ root.?, rows[i].rel }) catch return true;
+            w.side_key = false;
+            open(path, w.focus);
+            redrawSide(w);
+            return true;
+        },
+        else => {
+            const s = objc.utf8(msg(Id, ev, "characters", .{}));
+            if (s.len == 0 or s[0] < 0x20 or s[0] == 0x7f) return true;
+            if (now - w.seek_t > 1.0) w.seek_len = 0;
+            w.seek_t = now;
+            const n = @min(s.len, w.seek.len - w.seek_len);
+            @memcpy(w.seek[w.seek_len..][0..n], s[0..n]);
+            w.seek_len += n;
+            const q = w.seek[0..w.seek_len];
+            // A first letter looks past the row it's on; more letters keep it if it still matches.
+            const start = if (w.seek_len == n) i + 1 else i;
+            for (0..rows.len) |k| {
+                const r = (start + k) % rows.len;
+                if (std.ascii.startsWithIgnoreCase(rows[r].rel[rows[r].base..], q)) {
+                    i = r;
+                    break;
+                }
+            }
+        },
+    }
+    w.side_cur = @min(i, tree.rows.items.len -| 1);
+    w.side_cur_gen = tree_gen;
+    sideShowRow(w, w.side_cur.?);
+    redrawSide(w);
+    return true;
+}
+
+/// Glides the sidebar's list so row `i` is in view below the pinned folders.
+fn sideShowRow(w: *Win, i: usize) void {
+    const view_h = msg(Rect, w.view, "bounds", .{}).h - listTop() - gap;
+    const y = f(i) * side_h;
+    const pinned = f(w.nstuck) * side_h;
+    var to = w.side_y;
+    if (y < w.side_y + pinned) to = y - pinned else if (y + side_h > w.side_y + view_h) to = y + side_h - view_h;
+    to = @max(0, to);
+    if (to == w.side_y) return;
+    w.side_t.snap(w.side_y);
+    w.side_y = to;
+    w.side_t.aim(to, CACurrentMediaTime());
 }
 
 // ---- text lines for the sidebar and status line ----
@@ -5068,10 +5798,17 @@ const Bold = struct { line: SideLine = .{}, row: usize = 0, gen: u32 = 0 };
 var side_lines: std.ArrayList(SideLine) = .empty;
 /// The unsaved dot after a file's name, one line shared by every row.
 var side_dot: Id = null;
+/// The row after a list cut short, and the header's New badge.
+var side_more: Id = null;
+var new_badge: Id = null;
 
 fn dropSideLines() void {
     if (side_dot) |l| objc.CFRelease(l);
     side_dot = null;
+    for ([_]*Id{ &side_more, &new_badge }) |l| if (l.*) |x| {
+        objc.CFRelease(x);
+        l.* = null;
+    };
     for (wins.items) |w| {
         for (&w.bold) |*b| freeSideLine(&b.line);
     }
@@ -5141,7 +5878,12 @@ fn statusLine(d: *Doc, room: f64) void {
         const chars = codepoints(t[s[0]..s[1]]);
         put(&buf, &n, "  ·  {s} character{s}, {d} line{s}", .{ grouped(&g, chars), if (chars == 1) "" else "s", lines, if (lines == 1) "" else "s" });
     }
-    if (d.file.lang == &syntax.plain or d.file.lang.markdown) {
+    const words_on = switch (conf.word_count) {
+        .always => true,
+        .off => false,
+        .auto => d.file.lang == &syntax.plain or d.file.lang.markdown,
+    };
+    if (words_on) {
         const words = b.wordCount();
         put(&buf, &n, "  ·  {s} word{s}", .{ grouped(&g, words), if (words == 1) "" else "s" });
     }
@@ -5322,7 +6064,12 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     fillA(ctx, chrome(th, dark, w.z.x), chromeAlpha(th, dark, w.z.x), 0, 0, r.w, r.h);
     const key = msg(bool, w.window, "isKeyWindow", .{});
     const many = w.cards.pane == null;
-    for (&w.hot_t, 1..) |*t, i| t.aim(if (w.hot == i) 1 else 0, now);
+    for (&w.hot_t, [3]u8{ 1, 2, 4 }) |*t, bit| t.aim(if (w.hot == bit) 1 else 0, now);
+    // A note waiting for a window shows in the first one that draws.
+    if (pending_len > 0) {
+        toast(w, pending_toast[0..pending_len]);
+        pending_len = 0;
+    }
     w.key_a.aim(if (key) 1 else 0, now);
     // The sidebar's own motion (its picked and hovered rows, the + button,
     // its scroll and folding folders) redraws only its strip; anything else
@@ -5368,29 +6115,104 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
         objc.CGContextSaveGState(ctx);
         objc.CGContextClipToRect(ctx, .{ .w = side_w * slid, .h = r.h });
         objc.CGContextTranslateCTM(ctx, side_w * (slid - 1), 0);
-        if (slid < 1) objc.CGContextSetAlpha(ctx, slid * slid);
-        drawSide(w, ctx, th, dark, key, chrome(th, dark, w.z.x), if (slid < 1) slid * slid else 1, now);
+        // Sliding, the strip draws into a layer that fades as a whole, so
+        // the list's bottom fade stays as it is at rest.
+        const sliding = slid < 1;
+        if (sliding) {
+            objc.CGContextSetAlpha(ctx, slid * slid);
+            objc.CGContextBeginTransparencyLayer(ctx, null);
+        }
+        drawSide(w, ctx, th, dark, key, chrome(th, dark, w.z.x), 1, sliding, now);
         hoverPill(ctx, th, w.hot_t[1].at(now), if (w.press == 2) down else 0, side_w - gap - 20, hy);
         drawIcon(icon(.plus, dark, th), side_w - gap - 30, hy - 10, 20);
+        if (sliding) objc.CGContextEndTransparencyLayer(ctx);
         objc.CGContextRestoreGState(ctx);
     } else {
         w.hov.park();
         w.sel.park();
     }
-    // In zen it fades out with the lights, on the same spring.
+    // In zen it fades out with the lights, on the same spring. With the
+    // sidebar on but the window too narrow to show it, the button dims.
+    w.tog_dim.aim(if (conf.sidebar and !shown) 0.4 else 1, now);
     if (root != null and la > 0.01) {
-        if (la < 1) objc.CGContextSetAlpha(ctx, la);
+        const ta = la * w.tog_dim.at(now);
+        if (ta < 1) objc.CGContextSetAlpha(ctx, ta);
         hoverPill(ctx, th, w.hot_t[0].at(now), if (w.press == 1) down else 0, toggle_x, hy);
         drawIcon(icon(.sidebar, dark, th), toggle_x - 10, hy - 10, 20);
-        if (la < 1) objc.CGContextSetAlpha(ctx, 1);
+        if (ta < 1) objc.CGContextSetAlpha(ctx, 1);
+    }
+    // Files from Finder over the window: the cards' room lights up.
+    w.drop_t.aim(if (w.drop_on) 1 else 0, now);
+    const drop_a = w.drop_t.at(now);
+    if (drop_a > 0.01) {
+        const dx = w.lx;
+        pill(ctx, th.caret, 0.06 * drop_a, dx, gap, r.w - dx - gap, r.h - 2 * gap, card_radius);
+        ring(ctx, th.caret, 0.6 * drop_a, dx, gap, r.w - dx - gap, r.h - 2 * gap, card_radius);
     }
     drawDrag(w, ctx, th, now);
+    const toasting = drawToast(w, ctx, th, r, now);
+    busy = busy or w.drop_t.moving(now) or w.tog_dim.moving(now) or toasting;
     const side_busy = w.side_t.moving(now) or foldsBusy(now) or !w.sel.s.settled() or w.sel.a.moving(now) or w.hot_t[1].moving(now) or !w.hov.s.settled() or w.hov.a.moving(now)
-        or dots_busy or (w.menu_card == null and w.menu_a.moving(now)) or (w.hot_t[0].moving(now) and toggleInSide(shown, slid));
+        or dots_busy or (w.menu_card == null and w.menu_a.moving(now)) or (w.hot_t[0].moving(now) and toggleInSide(shown, slid)) or
+        w.hot_t[2].moving(now) or w.pin_t.moving(now) or !w.kc.s.settled() or w.kc.a.moving(now);
     // Only the sidebar's strip moves when its rows' highlights are all that does.
     w.part = !busy and side_busy and shown and slid >= 1;
     w.busy = busy or side_busy or w.peek.moving(now);
     if (w.busy or gliding) msg(void, w.link, "setPaused:", .{false});
+}
+
+/// How long a note holds before it fades out.
+const toast_hold = 2.4;
+/// A note for a window that doesn't exist yet, shown by the first one drawn.
+var pending_toast: [160]u8 = undefined;
+var pending_len: usize = 0;
+
+/// Shows `text` in a pill near the bottom of `w`'s cards: it fades and
+/// rises in, holds, then fades out. A new note takes the old one's place.
+fn toast(w: *Win, text: []const u8) void {
+    var n = @min(text.len, w.toast_buf.len);
+    while (n > 0 and n < text.len and text[n] & 0xC0 == 0x80) n -= 1;
+    @memcpy(w.toast_buf[0..n], text[0..n]);
+    w.toast_len = n;
+    if (w.toast_line) |l| objc.CFRelease(l);
+    w.toast_line = null;
+    const now = CACurrentMediaTime();
+    w.toast_t0 = now;
+    w.toast_t.aimOver(1, fade_time, now);
+    objc.later(w.view, "holdRedraw:", w.link, toast_hold + 0.02);
+    msg(void, w.view, "setNeedsDisplay:", .{true});
+}
+
+/// `toast` on the key window, or the front one, or the first one to open.
+fn toastFront(text: []const u8) void {
+    const d = keyDoc() orelse if (wins.items.len > 0) wins.items[wins.items.len - 1].focus else null;
+    if (d) |x| return toast(x.win, text);
+    var n = @min(text.len, pending_toast.len);
+    while (n > 0 and n < text.len and text[n] & 0xC0 == 0x80) n -= 1;
+    @memcpy(pending_toast[0..n], text[0..n]);
+    pending_len = n;
+}
+
+/// Draws `w`'s note, if it has one. True while it's fading.
+fn drawToast(w: *Win, ctx: Id, th: *const Theme, r: Rect, now: f64) bool {
+    if (w.toast_len == 0) return false;
+    if (now >= w.toast_t0 + toast_hold) w.toast_t.aimOver(0, 0.3, now);
+    const a = std.math.clamp(w.toast_t.at(now), 0, 1);
+    if (w.toast_t.to == 0 and !w.toast_t.moving(now)) {
+        if (w.toast_line) |l| objc.CFRelease(l);
+        w.toast_line = null;
+        w.toast_len = 0;
+        return false;
+    }
+    const room = @max(r.w - w.lx - 4 * gap - 28, 80);
+    if (w.toast_line == null) w.toast_line = uiLine(w.toast_buf[0..w.toast_len], side_font, room);
+    const lw = lineW(w.toast_line);
+    const pw = lw + 28;
+    const x = @round((w.lx + r.w - gap) / 2 - pw / 2);
+    const y = @round(r.h - gap - strip_h - side_h - 14 + (1 - a) * 6);
+    pill(ctx, th.fg, (if (contrast) @as(f64, 0.96) else 0.86) * a, x, y, pw, side_h, side_h / 2);
+    _ = drawLineA(ctx, w.toast_line, th.bg, a, x + 14, y + side_base);
+    return w.toast_t.moving(now);
 }
 
 const FindMarks = struct { cur: ?[2]usize, pop: f64, prev_a: f64, pills: []const u8, sensitive: bool, pills_a: f64 };
@@ -5444,7 +6266,9 @@ fn findMarks(d: *Doc, s: [2]usize, finding: bool, now: f64) FindMarks {
 fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many: bool, now: f64, resizing: bool) void {
     if (d.dark != dark) {
         d.dark = dark;
-        msg(void, d.caret, "setBackgroundColor:", .{msg(Id, nscolor(th.caret), "CGColor", .{})});
+        // A block caret is see-through, so the letter under it shows.
+        const ink = nscolor(th.caret);
+        msg(void, d.caret, "setBackgroundColor:", .{msg(Id, if (conf.caret_style == .block) msg(Id, ink, "colorWithAlphaComponent:", .{@as(f64, 0.45)}) else ink, "CGColor", .{})});
         preview.update(d, th);
     }
     const card = cardRect(d);
@@ -5487,6 +6311,16 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     }
     d.vy = d.ys.at(now);
     d.vx = d.xs.at(now);
+    // The Markdown preview follows the previewed file down the page.
+    if (d.file.id == preview_id) {
+        const range = scrollRange(d);
+        const span = range[1] - range[0];
+        const fr = if (span > 0) std.math.clamp((d.vy - range[0]) / span, 0, 1) else 0;
+        if (fr != preview_frac) {
+            preview_frac = fr;
+            preview.syncScroll(fr);
+        }
+    }
     // The card that holds the text, header and prompt line, which draw
     // inside its rounded corners.
     cardShade(d, ctx, dark, now);
@@ -5549,7 +6383,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     d.band_on = band_on;
     d.band_a.aim(if (band_on) 1 else 0, now);
     const band_alpha = d.band_a.at(now);
-    if (band_alpha > 0) fillA(ctx, th.line, band_alpha, gap, top_h + d.band.at(now) - d.vy, card.w, lh);
+    if (band_alpha > 0 and conf.highlight_current_line) fillA(ctx, th.line, band_alpha, gap, top_h + d.band.at(now) - d.vy, card.w, lh);
     objc.CGContextSaveGState(ctx);
     objc.CGContextClipToRect(ctx, .{ .x = clip_l, .y = card.y, .w = ox + f(cols) * cw - clip_l, .h = card.h });
 
@@ -5981,15 +6815,165 @@ fn drawHint(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, now: f64) v
         d.hint.aimOver(0, fade_time, now);
     }
     const hint_a = d.hint.at(now);
-    if (hint_a > 0.01) {
-        const line = "⌘P Quick Open   ⌘O Open   ⌘K Commands";
-        const n = comptime codepoints(line);
-        objc.CGContextSaveGState(ctx);
-        objc.CGContextSetAlpha(ctx, @as(f64, if (contrast) 1 else hint_alpha) * hint_a);
-        _ = k.text(line, null, th, th.muted, @round(card.x + (card.w - f(n) * cw) / 2), @round((top_h + by - lh) / 2) + baseline, 0, 80);
-        k.flush();
-        objc.CGContextRestoreGState(ctx);
+    d.hint_n = 0;
+    if (hint_a <= 0.01) return;
+    // The commands, with their keys as the menu bar has them, in rows that
+    // wrap to the card's width; under them a word about dropping files, then
+    // recent files and folders. Each command and recent one is a button.
+    const commands = [_]struct { keys: []const u8, name: []const u8, act: HintAct }{
+        .{ .keys = comptime menuKeys("quickOpen:"), .name = "Quick Open", .act = .quick },
+        .{ .keys = comptime menuKeys("openDocument:"), .name = "Open", .act = .open },
+        .{ .keys = comptime menuKeys("commandPalette:"), .name = "Commands", .act = .command },
+    };
+    const drop_line = "or drop files and folders here";
+    const cols: usize = @intFromFloat(@max(@floor((card.w - 2 * pad_x) / cw), 8));
+    var widths: [commands.len]usize = undefined;
+    var row_of: [commands.len]usize = undefined;
+    var row_w: [commands.len]usize = @splat(0);
+    var nrows: usize = 1;
+    for (commands, &widths, &row_of) |c, *wd, *ro| {
+        wd.* = codepoints(c.keys) + 1 + codepoints(c.name);
+        const used = row_w[nrows - 1];
+        if (used > 0 and used + 3 + wd.* > cols) nrows += 1;
+        ro.* = nrows - 1;
+        row_w[nrows - 1] += (if (row_w[nrows - 1] > 0) @as(usize, 3) else 0) + wd.*;
     }
+    // Recent files and folders, the open folder left out.
+    var recent: [8]struct { path: []const u8, act: HintAct } = undefined;
+    var nrecent: usize = 0;
+    const rf = recentFiles();
+    for (0..@min(msg(usize, rf, "count", .{}), 5)) |i| {
+        recent[nrecent] = .{ .path = objc.utf8(msg(Id, rf, "objectAtIndex:", .{i})), .act = .{ .recent = @intCast(i) } };
+        nrecent += 1;
+    }
+    const rd = recentFolders();
+    for (0..@min(msg(usize, rd, "count", .{}), 3)) |i| {
+        const p = objc.utf8(msg(Id, rd, "objectAtIndex:", .{i}));
+        if (root) |r| if (std.mem.eql(u8, p, r)) continue;
+        recent[nrecent] = .{ .path = p, .act = .{ .folder = @intCast(i) } };
+        nrecent += 1;
+    }
+    const lines = nrows + 1 + (if (nrecent > 0) nrecent + 1 else 0);
+    const y0 = @round(@max((top_h + by - f(lines) * lh) / 2, top_h));
+    // Where each button goes: commands centered row by row, recent ones in a
+    // block centered as a whole.
+    var at_col: [commands.len]usize = undefined;
+    var fill_w: [commands.len]usize = @splat(0);
+    for (widths, row_of, &at_col) |wd, ro, *ac| {
+        ac.* = fill_w[ro] + (if (fill_w[ro] > 0) @as(usize, 3) else 0);
+        fill_w[ro] = ac.* + wd;
+    }
+    var rec_w: usize = 0;
+    var pbuf: [8][std.fs.max_path_bytes]u8 = undefined;
+    var dirs: [8][]const u8 = undefined;
+    for (recent[0..nrecent], 0..) |e, i| {
+        const dir = std.fs.path.dirname(e.path) orelse "";
+        dirs[i] = tilde(&pbuf[i], dir);
+        rec_w = @max(rec_w, @min(codepoints(std.fs.path.basename(e.path)) + 2 + codepoints(dirs[i]), cols));
+    }
+    const rec_x = @round(card.x + (card.w - f(rec_w) * cw) / 2);
+    for (commands, widths, row_of, at_col, 0..) |c, wd, ro, ac, i| {
+        const x = @round(card.x + (card.w - f(row_w[ro]) * cw) / 2) + f(ac) * cw;
+        d.hints[i] = .{ .rect = .{ .x = x - 8, .y = y0 + f(ro) * lh, .w = f(wd) * cw + 16, .h = lh }, .act = c.act };
+    }
+    d.hint_n = commands.len;
+    const rec_y = y0 + f(nrows + 2) * lh;
+    for (recent[0..nrecent], 0..) |e, i| {
+        if (d.hint_n >= max_hints) break;
+        d.hints[d.hint_n] = .{ .rect = .{ .x = rec_x - 8, .y = rec_y + f(i) * lh, .w = f(rec_w) * cw + 16, .h = lh }, .act = e.act };
+        d.hint_n += 1;
+    }
+    if (d.hint_hot) |h| d.hint_lit = h;
+    d.hint_hot_t.aim(if (d.hint_hot != null) 1 else 0, now);
+    const hot_a = d.hint_hot_t.at(now);
+
+    objc.CGContextSaveGState(ctx);
+    objc.CGContextSetAlpha(ctx, hint_a);
+    if (hot_a > 0.01 and d.hint_lit < d.hint_n) {
+        const hr = d.hints[d.hint_lit].rect;
+        pill(ctx, th.fg, (if (contrast) @as(f64, 0.14) else 0.07) * hot_a, hr.x, hr.y + 2, hr.w, hr.h - 4, (hr.h - 4) / 2);
+    }
+    const dim: f64 = if (contrast) 1 else hint_alpha;
+    for (0..d.hint_n) |i| {
+        const hr = d.hints[i].rect;
+        const lit = if (i == d.hint_lit) hot_a else 0;
+        const ink = mixRgb(mixRgb(th.bg, th.muted, dim), th.fg, lit);
+        const base_y = hr.y + baseline;
+        if (i < commands.len) {
+            const c = commands[i];
+            const kw = k.text(c.keys, null, th, ink, hr.x + 8, base_y, 0, cols);
+            _ = k.text(c.name, null, th, ink, hr.x + 8 + f(kw + 1) * cw, base_y, 0, cols);
+        } else {
+            const e = recent[i - commands.len];
+            const nm = std.fs.path.basename(e.path);
+            const nw = k.text(nm, null, th, ink, hr.x + 8, base_y, 0, rec_w);
+            if (nw + 2 < rec_w) _ = k.text(dirs[i - commands.len], null, th, mixRgb(th.bg, ink, 0.7), hr.x + 8 + f(nw + 2) * cw, base_y, 0, rec_w - nw - 2);
+        }
+    }
+    const dn = comptime codepoints(drop_line);
+    _ = k.text(drop_line, null, th, mixRgb(th.bg, th.muted, dim * 0.8), @round(card.x + (card.w - f(@min(dn, cols)) * cw) / 2), y0 + f(nrows) * lh + baseline, 0, cols);
+    k.flush();
+    objc.CGContextRestoreGState(ctx);
+}
+
+/// What a button on the empty card does: a command, or open a recent file
+/// or folder by its place in its list.
+const HintAct = union(enum) { quick, open, command, recent: u8, folder: u8 };
+const Hint = struct { rect: Rect, act: HintAct };
+const max_hints = 12;
+
+/// The empty card's button under `p`, in its pane.
+fn hintAt(d: *const Doc, p: Point) ?usize {
+    for (d.hints[0..d.hint_n], 0..) |h, i| {
+        if (p.x >= h.rect.x and p.x < h.rect.x + h.rect.w and p.y >= h.rect.y and p.y < h.rect.y + h.rect.h) return i;
+    }
+    return null;
+}
+
+/// Runs the empty card's button `i`.
+fn runHint(d: *Doc, i: usize) void {
+    switch (d.hints[i].act) {
+        .quick => startPrompt(d, .open),
+        .command => startPrompt(d, .command),
+        .open => openPanel(),
+        .recent => |j| {
+            const list = recentFiles();
+            if (j < msg(usize, list, "count", .{})) open(objc.utf8(msg(Id, list, "objectAtIndex:", .{@as(usize, j)})), d);
+        },
+        .folder => |j| {
+            const list = recentFolders();
+            if (j < msg(usize, list, "count", .{})) open(objc.utf8(msg(Id, list, "objectAtIndex:", .{@as(usize, j)})), d);
+        },
+    }
+    if (ax.alive(d)) refresh(d);
+}
+
+/// The key and modifier symbols of the menu bar's command `sel`, like ⌘P.
+fn menuKeys(comptime sel: []const u8) []const u8 {
+    @setEvalBranchQuota(100_000);
+    return comptime keysIn(menu_bar, sel) orelse "";
+}
+
+fn keysIn(comptime entries: anytype, comptime sel: []const u8) ?[]const u8 {
+    inline for (entries) |e| {
+        const T = @TypeOf(e);
+        if (@hasField(T, "items")) {
+            if (comptime keysIn(e.items, sel)) |k| return k;
+        } else if (@hasField(T, "sel") and @hasField(T, "key")) {
+            if (comptime std.mem.eql(u8, e.sel, sel)) return comptime keyText(e.key, pluck(usize, e, "mods", 0));
+        }
+    }
+    return null;
+}
+
+fn keyText(comptime key: []const u8, comptime mods: usize) []const u8 {
+    comptime var out: []const u8 = "";
+    if (mods & objc.ctrl_key != 0) out = out ++ "⌃";
+    if (mods & objc.opt_key != 0) out = out ++ "⌥";
+    if (mods & objc.shift_key != 0) out = out ++ "⇧";
+    if (mods & objc.cmd_key != 0) out = out ++ "⌘";
+    inline for (key) |ch| out = out ++ [1]u8{std.ascii.toUpper(ch)};
+    return out;
 }
 
 /// The header, over text scrolled under it. Zen blends it into a plain margin.
@@ -6249,7 +7233,22 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
     // tabs. One goes before the other comes, so they never overlap.
     const folder_a = std.math.clamp(1 - 2 * a, 0, 1);
     const plus_a = std.math.clamp(2 * a - 1, 0, 1);
-    var nx = end + 8;
+    // Badges go after the + when there are tabs.
+    var nx = end + 8 + 28 * plus_a;
+    // A file this user can't write has a lock after it, and one that isn't
+    // on disk yet says New until it's saved.
+    if (d.file.locked) {
+        drawIcon(icon(.lock, dark, th), nx, hy - 6, 12);
+        nx += 20;
+    }
+    if (d.file.new_file) {
+        if (new_badge == null) new_badge = uiLine("New", path_font, 100);
+        const bw = lineW(new_badge) + 12;
+        const bh = 16.0;
+        ring(ctx, th.muted, 0.6, nx, hy - bh / 2, bw, bh, bh / 2);
+        paintLine(ctx, new_badge, th.muted, 1, nx + 6, @round(hy + path_off));
+        nx += bw + 8;
+    }
     if (folder_a > 0.01) {
         const note_w = if (d.note.len > 0) f(d.note.len + 2) * cw else 0;
         const head_room = @max(@floor(x1 - nx - note_w), 24);
@@ -6862,6 +7861,8 @@ fn keyDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const code = msg(u16, ev, "keyCode", .{});
     // ⎋ mid-drag drops nothing: the tab or file goes home.
     if (code == 53 and d.win.tdrag != null) return cancelDrag(d.win);
+    // While the sidebar has the keys, they move through its rows.
+    if (sideKey(d.win, ev)) return;
     // ⌥Z for Soft Wrap: menus only see option keys after the text has typed them.
     if (flags & (objc.cmd_key | objc.opt_key | objc.ctrl_key) == objc.opt_key and code == 6) return flip(.wrap);
     // ⌃⌘Z reaches here while Late-Night greys the Zen item: it leaves Late-Night.
@@ -7030,7 +8031,15 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     }
     if (overSide(w, p)) {
         if (p.y < top_h) return titleStrip(w, ev);
-        if (p.y < listTop()) return parentsMenu(w);
+        if (p.y < listTop()) {
+            // The folder's name: its capsule fills while its menu is open.
+            w.press = 4;
+            w.press_t.snap(1);
+            redrawSide(w);
+            parentsMenu(w);
+            letGo(w);
+            return hoverNow(w);
+        }
         return sideClick(w, p, msg(usize, ev, "modifierFlags", .{}));
     }
     if (gapAt(w.cards, p)) |n| {
@@ -7040,6 +8049,11 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
         return;
     }
     const d = paneAt(w, p) orelse return titleStrip(w, ev);
+    // A click in a card takes the keys back from the sidebar.
+    if (w.side_key) {
+        w.side_key = false;
+        redrawSide(w);
+    }
     focus(d);
     cardDown(d, inPane(d, p), ev);
 }
@@ -7063,6 +8077,8 @@ fn cardDown(d: *Doc, p: Point, ev: Id) void {
         d.win.tdrag = .{ .from = d, .id = hit.id, .start = hit.j, .down = at, .at = at, .grab = p.x - (s.x + s.shift.x) };
         return;
     }
+    // The empty card's buttons.
+    if (d.hint_n > 0 and isBlank(d) and d.mode == .edit) if (hintAt(d, p)) |i| return runHint(d, i);
     if (listing(d) != null) {
         const top = by - f(panelRows(d)) * prow - ppad;
         if (p.y >= top and p.y < by) {
@@ -7147,11 +8163,13 @@ fn mouseMoved(self: Id, _: Sel, ev: Id) callconv(.c) void {
     hoverAt(w, p);
 }
 
-/// Lights what's under `p` in the window: its tool button, tab or tab's
-/// close button, and the sidebar's row.
+/// Lights what's under `p` in the window: its tool button, the folder's
+/// name, tab or tab's close button, the empty card's buttons, and the
+/// sidebar's row.
 fn hoverAt(w: *Win, p: Point) void {
     const tool = toolAt(w, p);
-    const hot: u8 = if (tool) |t| (if (t == .sidebar) 1 else 2) else 0;
+    const on_head = tool == null and sideShown(w) and w.tdrag == null and p.x >= 8 and p.x < 24 + w.head_w and p.y >= top_h and p.y < listTop();
+    const hot: u8 = if (tool) |t| (if (t == .sidebar) 1 else 2) else if (on_head) 4 else 0;
     if (hot != w.hot) {
         redrawHot(w, w.hot | hot);
         w.hot = hot;
@@ -7161,6 +8179,11 @@ fn hoverAt(w: *Win, p: Point) void {
         const lp = inPane(d, p);
         const hit = if (d == over and lp.y < top_h) tabAt(d, lp) else null;
         setHover(d, if (hit) |h| h.id else 0, if (hit) |h| h.close else false, d == over and onTabPlus(d, lp));
+        const hint = if (d == over and d.hint_n > 0 and w.tdrag == null) hintAt(d, lp) else null;
+        if (hint != d.hint_hot) {
+            d.hint_hot = hint;
+            msg(void, w.view, "setNeedsDisplay:", .{true});
+        }
     };
     sideHover(w, p);
 }
@@ -7180,15 +8203,24 @@ fn hoverNow(w: *Win) void {
 }
 
 /// Points the sidebar's hover highlight at the row under `p`: a row of the
-/// list, not a pinned folder, the header or the sidebar's edge, and none
-/// while something's dragged.
+/// list or a pinned folder, not the header or the sidebar's edge, and none
+/// while something's dragged. The row's full path is its tooltip.
 fn sideHover(w: *Win, p: Point) void {
     var row: ?usize = null;
-    if (sideShown(w) and p.x < side_w - edge_grab and p.y >= listTop() and w.tdrag == null and pinnedAt(w, p.y) == null) row = listRow(w, p.y);
+    var pin: ?usize = null;
+    if (sideShown(w) and p.x < side_w - edge_grab and p.y >= listTop() and w.tdrag == null) {
+        pin = pinnedAt(w, p.y);
+        if (pin == null) row = listRow(w, p.y);
+    }
+    if (pin != w.hov_pin) {
+        w.hov_pin = pin;
+        redrawSide(w);
+    }
     if (row == w.hov.row and w.hov.gen == tree_gen) return;
     w.hov.row = row;
     w.hov.gen = tree_gen;
     redrawSide(w);
+    msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
 }
 
 fn setHover(d: *Doc, id: u32, shut: bool, plus: bool) void {
@@ -7264,10 +8296,41 @@ fn mouseUp(self: Id, _: Sel, _: Id) callconv(.c) void {
 fn mouseDragged(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
     if (w.side_drag) return resizeSide(w, local(self, ev).x);
-    if (w.tdrag != null) return dragTab(w, local(self, ev));
+    if (w.tdrag) |t| {
+        // A sidebar file dragged out of the window goes on as a drag of the
+        // file itself, for Finder and other apps.
+        const p = local(self, ev);
+        const b = msg(Rect, self, "bounds", .{});
+        if (t.file != null and t.live and (p.x < 0 or p.y < 0 or p.x >= b.w or p.y >= b.h)) return dragOut(w, ev);
+        return dragTab(w, p);
+    }
     if (w.grab) |n| return dragGap(w, n, local(self, ev));
     if (w.side_down) return;
     dragText(w, local(self, ev));
+}
+
+/// Hands the sidebar file being dragged to a system drag of its file: Finder
+/// takes it as a copy. The copy inside the window lets go.
+fn dragOut(w: *Win, ev: Id) void {
+    const t = w.tdrag.?;
+    w.tdrag = null;
+    defer freeDrag(t);
+    const path = t.file.?;
+    const url = msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(path)});
+    const item = msg(Id, msg(Id, objc.class("NSDraggingItem"), "alloc", .{}), "initWithPasteboardWriter:", .{url});
+    defer msg(void, item, "release", .{});
+    const p = local(w.view, ev);
+    const s = tileSize();
+    msg(void, item, "setDraggingFrame:contents:", .{ Rect{ .x = p.x - s / 2, .y = p.y - s / 2, .w = s, .h = s }, iconFor(std.fs.path.basename(path)) });
+    _ = msg(Id, w.view, "beginDraggingSessionWithItems:event:source:", .{ msg(Id, objc.class("NSArray"), "arrayWithObject:", .{item}), ev, w.view });
+    aimPreview(w, CACurrentMediaTime());
+    msg(void, w.view, "setNeedsDisplay:", .{true});
+}
+
+/// What a file dragged out of the sidebar may do where it lands: be copied,
+/// so a drop in Finder never moves it out of the folder.
+fn dragOutMask(_: Id, _: Sel, _: Id, _: isize) callconv(.c) usize {
+    return 1;
 }
 
 /// How often a selection drag held above or below the text scrolls a line.
@@ -7346,19 +8409,37 @@ fn resetCursorRects(self: Id, _: Sel) callconv(.c) void {
         msg(void, self, "addCursorRect:cursor:", .{ Rect{ .x = side_w - edge_grab, .y = top_h, .w = 2 * edge_grab, .h = r.h - top_h }, resizeCursor(false) });
     }
     // The two buttons by the traffic lights get their menu items' names;
-    // `toolTip` answers nil where zen hides them.
+    // `toolTip` answers nil where zen hides them. The folder's name and the
+    // row under the mouse get their full paths.
     msg(void, self, "removeAllToolTips", .{});
     if (root != null) {
         _ = msg(isize, self, "addToolTipRect:owner:userData:", .{ toolRect(.sidebar), self, @as(?*anyopaque, null) });
         _ = msg(isize, self, "addToolTipRect:owner:userData:", .{ toolRect(.plus), self, @as(?*anyopaque, null) });
     }
+    if (sideShown(w)) {
+        _ = msg(isize, self, "addToolTipRect:owner:userData:", .{ Rect{ .x = 8, .y = top_h, .w = side_w - 16, .h = side_h }, self, @as(?*anyopaque, null) });
+        if (w.hov.row) |i| if (w.hov.gen == tree_gen) {
+            const y = listTop() + f(i) * side_h - w.side_y;
+            if (y >= listTop()) _ = msg(isize, self, "addToolTipRect:owner:userData:", .{ Rect{ .y = y, .w = side_w - edge_grab, .h = side_h }, self, @as(?*anyopaque, null) });
+        };
+    }
 }
 
-/// The tooltip for the button under `p`: the title of the menu item it runs.
+/// The tooltip under `p`: a button's menu item title (or why the sidebar
+/// doesn't show), or the full path of the folder or the row.
 fn toolTip(self: Id, _: Sel, _: Id, _: isize, p: Point, _: ?*anyopaque) callconv(.c) Id {
     const w = winOf(self) orelse return null;
-    const t = toolAt(w, p) orelse return null;
-    return if (t == .sidebar) objc.str(sidebar_title) else objc.str("New Tab");
+    if (toolAt(w, p)) |t| {
+        if (t != .sidebar) return objc.str("New Tab");
+        return objc.str(if (conf.sidebar and !sideShown(w)) "Widen the window to show the sidebar" else sidebar_title);
+    }
+    if (!sideShown(w) or p.x >= side_w) return null;
+    const r = root orelse return null;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (p.y < listTop()) return if (p.y >= top_h) objc.str(tilde(&buf, r)) else null;
+    const i = pinnedAt(w, p.y) orelse listRow(w, p.y) orelse return null;
+    var full: [std.fs.max_path_bytes]u8 = undefined;
+    return objc.str(tilde(&buf, std.fmt.bufPrint(&full, "{s}/{s}", .{ r, tree.rows.items[i].rel }) catch return null));
 }
 
 /// Window key and full-screen changes invalidate the titlebar layout.
@@ -7393,20 +8474,37 @@ pub fn contrastChanged(_: Id, _: Sel, _: Id) callconv(.c) void {
 extern const NSPasteboardTypeFileURL: Id;
 extern const NSPasteboardURLReadingFileURLsOnlyKey: Id;
 
-/// Files dragged over the window from Finder copy-drop, which opens them.
-fn draggingEntered(_: Id, _: Sel, _: Id) callconv(.c) usize {
+/// Files dragged over the window from Finder copy-drop, which opens them;
+/// the window lights up while they're over it.
+fn draggingEntered(self: Id, _: Sel, _: Id) callconv(.c) usize {
+    if (winOf(self)) |w| setDropOn(w, true);
     return 1;
 }
 
-/// Opens each dropped file or folder the way the Dock does: in this window
-/// when it's blank, else in a new one.
-fn performDrag(_: Id, _: Sel, sender: Id) callconv(.c) bool {
+fn draggingExited(self: Id, _: Sel, _: Id) callconv(.c) void {
+    if (winOf(self)) |w| setDropOn(w, false);
+}
+
+fn setDropOn(w: *Win, on: bool) void {
+    if (w.drop_on == on) return;
+    w.drop_on = on;
+    msg(void, w.view, "setNeedsDisplay:", .{true});
+}
+
+/// Opens the dropped files as tabs in this window's focused card, one after
+/// another; a folder becomes the sidebar's folder.
+fn performDrag(self: Id, _: Sel, sender: Id) callconv(.c) bool {
+    const w = winOf(self) orelse return false;
+    setDropOn(w, false);
     const pb = msg(Id, sender, "draggingPasteboard", .{});
     const classes = msg(Id, objc.class("NSArray"), "arrayWithObject:", .{objc.class("NSURL")});
     const opts = msg(Id, objc.class("NSDictionary"), "dictionaryWithObject:forKey:", .{ msg(Id, objc.class("NSNumber"), "numberWithBool:", .{true}), NSPasteboardURLReadingFileURLsOnlyKey });
     const urls = msg(Id, pb, "readObjectsForClasses:options:", .{ classes, opts });
     const n = if (urls != null) msg(usize, urls, "count", .{}) else 0;
-    for (0..n) |i| openFile(objc.utf8(msg(Id, msg(Id, urls, "objectAtIndex:", .{i}), "path", .{})));
+    for (0..n) |i| {
+        if (!ax.winAlive(w)) break;
+        open(objc.utf8(msg(Id, msg(Id, urls, "objectAtIndex:", .{i}), "path", .{})), w.focus);
+    }
     return n > 0;
 }
 
@@ -7416,13 +8514,20 @@ fn performDrag(_: Id, _: Sel, sender: Id) callconv(.c) bool {
 /// they reach the key window's view through the responder chain.
 var text_menu: Id = null;
 var side_menu: Id = null;
+/// The side menu's items that need a file (`side_items`) or any row
+/// (`row_items`), and its Show Hidden Files item, whose check changes.
 var side_items: [3]Id = @splat(null);
+var row_items: [5]Id = @splat(null);
+var hidden_item: Id = null;
 var tab_menu: Id = null;
 var tab_items: [6]Id = @splat(null);
 /// The file of the sidebar row or tab the menu was opened on and its window.
 var menu_path: [std.fs.max_path_bytes:0]u8 = undefined;
 var menu_len: usize = 0;
 var menu_win: ?*Win = null;
+/// The menu's path is a folder (or the open folder itself, for a click on
+/// no row).
+var menu_dir = false;
 
 pub fn menuItem(menu: Id, title: []const u8, sel: [:0]const u8, key: []const u8, mods: usize) Id {
     const it = msg(Id, msg(Id, objc.class("NSMenuItem"), "alloc", .{}), "initWithTitle:action:keyEquivalent:", .{ objc.str(title), objc.sel_registerName(sel), objc.str(key) });
@@ -7440,11 +8545,25 @@ pub fn separator(m: Id) void {
     msg(void, m, "addItem:", .{msg(Id, objc.class("NSMenuItem"), "separatorItem", .{})});
 }
 
+/// An SF Symbol as a menu item's image.
+fn symbol(name: [:0]const u8) Id {
+    return msg(Id, objc.class("NSImage"), "imageWithSystemSymbolName:accessibilityDescription:", .{ objc.str(name), @as(Id, null) });
+}
+
+/// `menuItem` with an SF Symbol before its title.
+fn symbolItem(menu: Id, title: []const u8, sel: [:0]const u8, sym: [:0]const u8) Id {
+    const it = menuItem(menu, title, sel, "", 0);
+    msg(void, it, "setImage:", .{symbol(sym)});
+    return it;
+}
+
 /// A click on the folder's name: a menu of the folder and the folders above
-/// it, each with its icon. Picking one shows it in Finder.
+/// it, each with its icon (picking one shows it in Finder), then Reveal in
+/// Finder, Open Folder…, Recent Folders and Show Hidden Files.
 fn parentsMenu(w: *Win) void {
     const m = objc.new("NSMenu");
     defer msg(void, m, "release", .{});
+    msg(void, m, "setAutoenablesItems:", .{false});
     const ws = msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{});
     const fm = msg(Id, objc.class("NSFileManager"), "defaultManager", .{});
     var path: []const u8 = root.?;
@@ -7460,7 +8579,52 @@ fn parentsMenu(w: *Win) void {
         if (path.len <= 1) break;
         path = std.fs.path.dirname(path) orelse break;
     }
+    separator(m);
+    _ = symbolItem(m, "Reveal in Finder", "revealRoot:", "folder");
+    _ = symbolItem(m, "Open Folder…", "openFolder:", "folder.badge.plus");
+    const sub = msg(Id, msg(Id, objc.class("NSMenu"), "alloc", .{}), "initWithTitle:", .{objc.str("Recent Folders")});
+    defer msg(void, sub, "release", .{});
+    msg(void, sub, "setAutoenablesItems:", .{false});
+    const list = recentFolders();
+    var shown: usize = 0;
+    for (0..msg(usize, list, "count", .{})) |i| {
+        const p = msg(Id, list, "objectAtIndex:", .{i});
+        if (msg(bool, p, "isEqualToString:", .{objc.str(root.?)})) continue;
+        const it = menuItem(sub, objc.utf8(msg(Id, fm, "displayNameAtPath:", .{p})), "openRecentFolder:", "", 0);
+        msg(void, it, "setRepresentedObject:", .{p});
+        msg(void, it, "setToolTip:", .{p});
+        const img = msg(Id, msg(Id, ws, "iconForFile:", .{p}), "copy", .{});
+        msg(void, img, "setSize:", .{Point{ .x = 16, .y = 16 }});
+        msg(void, it, "setImage:", .{img});
+        msg(void, img, "release", .{});
+        shown += 1;
+    }
+    const recent = symbolItem(m, "Recent Folders", "", "clock");
+    msg(void, recent, "setSubmenu:", .{sub});
+    msg(void, recent, "setEnabled:", .{shown > 0});
+    separator(m);
+    const hid = symbolItem(m, "Show Hidden Files", "toggleHidden:", "eye");
+    msg(void, hid, "setState:", .{@as(isize, @intFromBool(conf.show_hidden))});
     _ = msg(bool, m, "popUpMenuPositioningItem:atLocation:inView:", .{ @as(Id, null), Point{ .x = 16, .y = listTop() }, w.view });
+}
+
+/// The folder name menu's Reveal in Finder.
+fn revealRoot(_: Id, _: Sel, _: Id) callconv(.c) void {
+    if (root) |r| revealPath(r);
+}
+
+/// The folder name menu's Open Folder….
+fn openFolder(_: Id, _: Sel, _: Id) callconv(.c) void {
+    openFolderPanel();
+}
+
+/// A folder from the folder name menu's Recent Folders.
+fn openRecentFolder(_: Id, _: Sel, item: Id) callconv(.c) void {
+    const p = objc.utf8(msg(Id, item, "representedObject", .{}));
+    var z: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = std.fmt.bufPrintSentinel(&z, "{s}", .{p}, 0) catch return;
+    if (!files.isDir(dir)) return toastFront("That folder is gone");
+    open(dir, keyDoc());
 }
 
 /// A folder picked in the folder name's menu, by how many levels above the
@@ -7537,10 +8701,13 @@ fn menuForEvent(self: Id, _: Sel, ev: Id) callconv(.c) Id {
         return text_menu;
     }
     if (p.y < top_h) return null;
-    const i = sideRow(w, p.y) orelse return null;
-    const row = tree.rows.items[i];
+    if (p.y < listTop()) return null;
+    // Over no row, the menu is about the open folder itself.
+    const at = sideRow(w, p.y);
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (!setMenuPath(std.fmt.bufPrint(&buf, "{s}/{s}", .{ root.?, row.rel }) catch return null)) return null;
+    const path = if (at) |i| std.fmt.bufPrint(&buf, "{s}/{s}", .{ root.?, tree.rows.items[i].rel }) catch return null else root.?;
+    if (!setMenuPath(path)) return null;
+    menu_dir = if (at) |i| tree.rows.items[i].dir else true;
     if (side_menu == null) {
         const m = objc.new("NSMenu");
         msg(void, m, "setAutoenablesItems:", .{false});
@@ -7550,14 +8717,28 @@ fn menuForEvent(self: Id, _: Sel, ev: Id) callconv(.c) Id {
             menuItem(m, "Open in New Window", "openInNewWindow:", "", 0),
         };
         separator(m);
-        _ = menuItem(m, "Reveal in Finder", "revealInFinder:", "", 0);
-        _ = menuItem(m, "Copy Path", "copyPath:", "", 0);
+        _ = symbolItem(m, "New File…", "sideNewFile:", "doc.badge.plus");
+        _ = symbolItem(m, "New Folder…", "sideNewFolder:", "folder.badge.plus");
+        separator(m);
+        row_items[0] = symbolItem(m, "Rename…", "sideRename:", "pencil");
+        row_items[1] = symbolItem(m, "Duplicate", "sideDuplicate:", "plus.square.on.square");
+        row_items[2] = symbolItem(m, "Move to Trash", "sideTrash:", "trash");
+        separator(m);
+        _ = symbolItem(m, "Reveal in Finder", "revealInFinder:", "folder");
+        _ = symbolItem(m, "Copy Path", "copyPath:", "doc.on.doc");
+        row_items[3] = symbolItem(m, "Copy Relative Path", "copyRelativePath:", "doc.on.clipboard");
+        separator(m);
+        row_items[4] = symbolItem(m, "Collapse All", "collapseAll:", "rectangle.compress.vertical");
+        hidden_item = symbolItem(m, "Show Hidden Files", "toggleHidden:", "eye");
         side_menu = m;
     }
-    for (side_items) |it| msg(void, it, "setEnabled:", .{!row.dir});
-    const same = w.menu_card == null and w.menu_row == i and w.menu_gen == tree_gen;
+    for (side_items) |it| msg(void, it, "setEnabled:", .{at != null and !menu_dir});
+    for (row_items[0..4]) |it| msg(void, it, "setEnabled:", .{at != null});
+    msg(void, row_items[4], "setEnabled:", .{tree.open.items.len > 0});
+    msg(void, hidden_item, "setState:", .{@as(isize, @intFromBool(conf.show_hidden))});
+    const same = w.menu_card == null and at != null and w.menu_row == at and w.menu_gen == tree_gen;
     w.menu_card = null;
-    w.menu_row = i;
+    w.menu_row = at;
     w.menu_gen = tree_gen;
     return markMenu(self, w, side_menu, same);
 }
@@ -7657,13 +8838,156 @@ fn openInNewWindow(_: Id, _: Sel, _: Id) callconv(.c) void {
 }
 
 fn revealInFinder(_: Id, _: Sel, _: Id) callconv(.c) void {
-    const url = msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(menuFile())});
-    const urls = msg(Id, objc.class("NSArray"), "arrayWithObject:", .{url});
-    msg(void, msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{}), "activateFileViewerSelectingURLs:", .{urls});
+    revealPath(menuFile());
 }
 
 fn copyPath(_: Id, _: Sel, _: Id) callconv(.c) void {
     putClipboard(menuFile());
+}
+
+/// The path from the open folder, or the whole path outside it.
+fn copyRelativePath(_: Id, _: Sel, _: Id) callconv(.c) void {
+    putClipboard(relOf(menuFile()) orelse menuFile());
+}
+
+/// The folder the side menu's New File… and New Folder… make things in:
+/// the row's folder, or the folder the row's file is in.
+fn menuFolder() []const u8 {
+    const p = menuFile();
+    return if (menu_dir) p else std.fs.path.dirname(p) orelse p;
+}
+
+/// After a file or folder appears, moves or goes: the sidebar lists the
+/// folder again, with `shown` (a path inside the open folder) in view.
+fn sideChanged(shown: ?[]const u8) void {
+    if (shown) |s| if (relOf(s)) |rel| revealFile(rel);
+    tree_stale = true;
+    rebuildTree();
+    for (wins.items) |w| w.side_find = true;
+    refreshAll();
+}
+
+/// `dir`/`name` into `buf`, null-terminated.
+fn joinPath(buf: []u8, dir: []const u8, name: []const u8) ?[:0]const u8 {
+    return std.fmt.bufPrintSentinel(buf, "{s}/{s}", .{ dir, name }, 0) catch null;
+}
+
+/// Says a file operation failed, with the system's reason.
+fn failed(what: []const u8, path: []const u8) void {
+    var ib: [std.fs.max_path_bytes + 160]u8 = undefined;
+    alert(what, std.fmt.bufPrint(&ib, "{s}.\n\n{s}", .{ osError(), path }) catch path);
+}
+
+/// The side menu's New File…: asks for a name, makes the file empty, and
+/// opens it in the focused card.
+fn sideNewFile(_: Id, _: Sel, _: Id) callconv(.c) void {
+    const w = menu_win orelse return;
+    var db: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = db[0..menuFolder().len];
+    @memcpy(dir, menuFolder());
+    var ib: [300]u8 = undefined;
+    const name = askName("New File", std.fmt.bufPrint(&ib, "A new, empty file in {s}.", .{std.fs.path.basename(dir)}) catch "", "untitled.txt", "Create") orelse return;
+    var pb: [std.fs.max_path_bytes]u8 = undefined;
+    const p = joinPath(&pb, dir, name) orelse return;
+    if (files.exists(p)) return alert("A file with that name is already there.", p);
+    files.write(p, "") catch return failed("Couldn't make the file.", p);
+    sideChanged(p);
+    if (ax.winAlive(w)) open(p, w.focus);
+}
+
+/// The side menu's New Folder….
+fn sideNewFolder(_: Id, _: Sel, _: Id) callconv(.c) void {
+    var db: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = db[0..menuFolder().len];
+    @memcpy(dir, menuFolder());
+    var ib: [300]u8 = undefined;
+    const name = askName("New Folder", std.fmt.bufPrint(&ib, "A new folder in {s}.", .{std.fs.path.basename(dir)}) catch "", "untitled folder", "Create") orelse return;
+    var pb: [std.fs.max_path_bytes]u8 = undefined;
+    const p = joinPath(&pb, dir, name) orelse return;
+    if (files.exists(p)) return alert("Something with that name is already there.", p);
+    if (std.c.mkdir(p, 0o755) != 0) return failed("Couldn't make the folder.", p);
+    sideChanged(p);
+}
+
+/// The side menu's Rename…: open tabs of the file, or of files in the
+/// folder, follow it to its new name.
+fn sideRename(_: Id, _: Sel, _: Id) callconv(.c) void {
+    var ob: [std.fs.max_path_bytes]u8 = undefined;
+    const old = std.fmt.bufPrintSentinel(&ob, "{s}", .{menuFile()}, 0) catch return;
+    const base = std.fs.path.basename(old);
+    const name = askName("Rename", "", base, "Rename") orelse return;
+    if (std.mem.eql(u8, name, base)) return;
+    var pb: [std.fs.max_path_bytes]u8 = undefined;
+    const p = joinPath(&pb, std.fs.path.dirname(old) orelse "/", name) orelse return;
+    if (files.exists(p)) return alert("Something with that name is already there.", p);
+    if (std.c.rename(old, p) != 0) return failed("Couldn't rename it.", old);
+    movedPath(old, p);
+    sideChanged(p);
+}
+
+/// Open tabs whose file is `old`, or inside the folder `old`, take the
+/// same place under `new`.
+fn movedPath(old: []const u8, new: []const u8) void {
+    for (docs.items) |d| for (0..tabCount(d)) |j| {
+        const pg = tabPage(d, j);
+        const p = pg.path orelse continue;
+        if (!std.mem.startsWith(u8, p, old) or (p.len > old.len and p[old.len] != '/')) continue;
+        const np = std.mem.concatWithSentinel(gpa, u8, &.{ new, p[old.len..] }, 0) catch continue;
+        preview.rename(pg.id, np);
+        gpa.free(p);
+        pg.path = np;
+        pg.lang = syntax.forPath(np);
+        pg.stamp = files.stamp(np);
+        if (j == d.at) {
+            clearSyntax(d);
+            named(d);
+        }
+    };
+}
+
+/// The side menu's Duplicate: a copy beside it named "name copy.ext", or
+/// "name copy 2.ext" and on when that's taken.
+fn sideDuplicate(_: Id, _: Sel, _: Id) callconv(.c) void {
+    const src = menuFile();
+    const dir = std.fs.path.dirname(src) orelse return;
+    const base = std.fs.path.basename(src);
+    const dot = if (menu_dir) null else std.mem.lastIndexOfScalar(u8, base, '.');
+    const stem = if (dot) |k| (if (k > 0) base[0..k] else base) else base;
+    const ext = if (dot) |k| (if (k > 0) base[k..] else "") else "";
+    var pb: [std.fs.max_path_bytes]u8 = undefined;
+    var n: usize = 1;
+    const p = while (n < 100) : (n += 1) {
+        var nb: [std.fs.max_path_bytes]u8 = undefined;
+        const name = (if (n == 1) std.fmt.bufPrint(&nb, "{s} copy{s}", .{ stem, ext }) else std.fmt.bufPrint(&nb, "{s} copy {d}{s}", .{ stem, n, ext })) catch return;
+        const q = joinPath(&pb, dir, name) orelse return;
+        if (!files.exists(q)) break q;
+    } else return;
+    const fm = msg(Id, objc.class("NSFileManager"), "defaultManager", .{});
+    if (!msg(bool, fm, "copyItemAtPath:toPath:error:", .{ objc.str(src), objc.str(p), @as(?*anyopaque, null) })) return failed("Couldn't duplicate it.", src);
+    sideChanged(p);
+}
+
+/// The side menu's Move to Trash. Open tabs of what went keep their text
+/// as unsaved changes.
+fn sideTrash(_: Id, _: Sel, _: Id) callconv(.c) void {
+    const p = menuFile();
+    if (!trash(p)) return failed("Couldn't move it to the Trash.", p);
+    for (docs.items) |d| checkOutside(d);
+    sideChanged(null);
+}
+
+/// The side menu's Collapse All: every open folder shuts, and the list
+/// crossfades to its top.
+fn collapseAll(_: Id, _: Sel, _: Id) callconv(.c) void {
+    tree.closeAll(gpa);
+    for (wins.items) |w| {
+        w.side_y = 0;
+        w.side_t.snap(0);
+        if (sideShown(w)) msg(void, msg(Id, w.view, "layer", .{}), "addAnimation:forKey:", .{ themeFade(), objc.str("root") });
+    }
+    tree_stale = true;
+    rebuildTree();
+    refreshAll();
 }
 
 fn windowShouldClose(self: Id, _: Sel, _: Id) callconv(.c) bool {
@@ -7687,6 +9011,7 @@ fn windowWillClose(self: Id, _: Sel, _: Id) callconv(.c) void {
     }
     freeNodes(w.cards);
     for (&w.bold) |*b| freeSideLine(&b.line);
+    if (w.toast_line) |l| objc.CFRelease(l);
     if (std.mem.indexOfScalar(*Win, wins.items, w)) |j| _ = wins.orderedRemove(j);
     gpa.destroy(w);
 }
@@ -7799,7 +9124,14 @@ pub fn previewText(id: u32) ?[]const u8 {
     return null;
 }
 
+/// The tab the Markdown preview shows, and how far down it was last scrolled.
+var preview_id: u32 = 0;
+var preview_frac: f64 = -1;
+
 fn markdownPreview(d: *Doc) void {
+    preview.setTypography(conf.font(), conf.size, conf.spacing);
+    preview_id = d.file.id;
+    preview_frac = -1;
     preview.toggle(d, themeOf(d.win));
 }
 
@@ -7814,10 +9146,41 @@ fn formatJson(d: *Doc) void {
     if (!ok) d.note = if (d.file.ed.hasSel()) "selection isn't valid JSON" else "not valid JSON";
 }
 
+/// A zoom's size, applied at once and written to the settings file once
+/// zooming pauses, so a run of ⌘= writes the file once.
+var zoom_due = false;
+var zoom_size: f64 = settings.default_size;
+/// Counts zooms, so only the last one's timer writes.
+var zoom_gen: usize = 0;
+
+/// View > Bigger, Smaller and Actual Size. The new size shows in a note;
+/// at 8 or 40 points the trackpad taps.
 fn zoom(by: f64) void {
-    const size = if (by == 0) settings.default_size else std.math.clamp(conf.size + by, settings.size_min, settings.size_max);
+    const was = conf_saved.size;
+    const size = if (by == 0) settings.default_size else std.math.clamp(was + by, settings.size_min, settings.size_max);
+    const limit = by != 0 and (size == settings.size_min or size == settings.size_max);
+    if (limit) haptic(.level);
+    if (size != was) {
+        const old = conf;
+        conf_saved.size = size;
+        zoom_size = size;
+        zoom_due = true;
+        zoom_gen +%= 1;
+        dispatch_after_f(dispatch_time(0, 400 * std.time.ns_per_ms), &_dispatch_main_q, @ptrFromInt(zoom_gen), zoomWrite);
+        applySettings(old);
+    }
+    var nb: [24]u8 = undefined;
+    var tb: [64]u8 = undefined;
+    const edge: []const u8 = if (!limit) "" else if (size == settings.size_max) ", the largest" else ", the smallest";
+    toastFront(std.fmt.bufPrint(&tb, "{s} pt{s}", .{ settings.decimal(&nb, size), edge }) catch "");
+}
+
+/// Writes the last zoom's size, unless a later zoom (`ctx` is its count) is waiting.
+fn zoomWrite(ctx: ?*anyopaque) callconv(.c) void {
+    if (@intFromPtr(ctx) != zoom_gen or !zoom_due) return;
+    zoom_due = false;
     var buf: [24]u8 = undefined;
-    store(.size, settings.decimal(&buf, size));
+    store(.size, settings.decimal(&buf, zoom_size));
 }
 
 /// The Font panel's choice, saved to the settings file.
@@ -7829,6 +9192,97 @@ fn changeFont(_: Id, _: Sel, sender: Id) callconv(.c) void {
     store(.font, if (name.len == 0 or name[0] == '.') "system" else name);
     var buf: [24]u8 = undefined;
     store(.size, settings.decimal(&buf, @round(msg(f64, picked, "pointSize", .{}))));
+}
+
+/// File > Save All: every file with unsaved changes, in every window. A
+/// Cancel in a Save As stops there.
+fn saveEverything(_: *Doc) void {
+    var i: usize = 0;
+    while (i < docs.items.len) : (i += 1) {
+        const x = docs.items[i];
+        if (!x.closing and !saveAll(x, true)) return;
+    }
+}
+
+/// File > Reveal in Finder: the file on show, selected in Finder.
+fn revealCurrent(d: *Doc) void {
+    if (d.file.path) |p| revealPath(p) else d.note = "not saved yet";
+}
+
+/// Window > Merge All Windows: every other window's tabs move into this
+/// card, and those windows close.
+fn mergeWindows(d: *Doc) void {
+    var others: [64]*Win = undefined;
+    var n: usize = 0;
+    for (wins.items) |w| if (w != d.win and n < others.len) {
+        others[n] = w;
+        n += 1;
+    };
+    for (others[0..n]) |w| {
+        for (docs.items) |x| if (x.win == w and !x.closing) {
+            while (!(tabCount(x) == 1 and isBlank(x))) {
+                var pg = takeTab(x, 0) orelse break;
+                if (pg.path == null and pg.ed.text().len == 0) {
+                    pg.deinit();
+                    continue;
+                }
+                putTab(d, pg, tabCount(d));
+            }
+        };
+        // Only blank cards are left, so closing asks nothing.
+        msg(void, w.window, "close", .{});
+    }
+    focus(d);
+    showWin(d.win.window);
+}
+
+/// Window > Move Tab to New Window: the tab on show leaves for a window of
+/// its own. A window's only tab stays where it is.
+fn tabToNewWindow(d: *Doc) void {
+    const last = tabCount(d) == 1;
+    if (last and d.win.cards.pane != null) return;
+    const pg = takeTab(d, d.at) orelse return;
+    const nd = newDoc() orelse {
+        var p = pg;
+        return p.deinitKeepDraft();
+    };
+    putTab(nd, pg, 0);
+    if (last) foldCard(d);
+}
+
+/// Help menu links.
+const guide_url = "https://github.com/hkay-dev/zag/blob/main/docs/guide/index.md";
+const issues_url = "https://github.com/hkay-dev/zag/issues/new";
+
+fn openUrl(url: []const u8) void {
+    const u = msg(Id, objc.class("NSURL"), "URLWithString:", .{objc.str(url)});
+    if (u != null) _ = msg(bool, msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{}), "openURL:", .{u});
+}
+
+/// A 14-point picture of built-in theme `sc` for the Theme menu: its
+/// background in a rounded square edged in its rule color, with bars in
+/// its keyword, text and string colors.
+fn swatch(sc: settings.Scheme) Id {
+    const space = objc.CGColorSpaceCreateDeviceRGB();
+    defer if (space) |s| objc.CFRelease(s);
+    const ctx = objc.CGBitmapContextCreate(null, 28, 28, 8, 0, space, 1);
+    if (ctx == null) return null;
+    defer objc.CFRelease(ctx.?);
+    const c = sc.colors;
+    pill(ctx, rgbOf(c.rule), 1, 0, 0, 28, 28, 7);
+    pill(ctx, rgbOf(c.bg), 1, 1, 1, 26, 26, 6);
+    // The bitmap's origin is its bottom left: the first bar is the top one.
+    pill(ctx, rgbOf(c.kinds[1]), 1, 6, 17, 12, 3, 1.5);
+    pill(ctx, rgbOf(c.fg), 1, 6, 12, 16, 3, 1.5);
+    pill(ctx, rgbOf(c.kinds[2]), 1, 6, 7, 9, 3, 1.5);
+    const img = objc.CGBitmapContextCreateImage(ctx) orelse return null;
+    defer objc.CFRelease(img);
+    const ns = msg(Id, msg(Id, objc.class("NSImage"), "alloc", .{}), "initWithCGImage:size:", .{ img, objc.Size{ .w = 14, .h = 14 } });
+    return msg(Id, ns, "autorelease", .{});
+}
+
+fn rgbOf(b: [3]u8) Rgb {
+    return .{ f(b[0]) / 255, f(b[1]) / 255, f(b[2]) / 255 };
 }
 
 // ---- the menu bar ----
@@ -7845,7 +9299,7 @@ fn changeFont(_: Id, _: Sel, sender: Id) callconv(.c) void {
 const Target = enum { app, view, system, fonts };
 
 /// The setting a command's checkmark shows. Picks compare their tag.
-const Check = enum { wrap, pairs, sidebar, line_numbers, typewriter, zen, late_night, focus, scheme, look };
+const Check = enum { wrap, pairs, sidebar, line_numbers, typewriter, zen, late_night, focus, scheme, look, show_hidden };
 
 /// `e`'s field `name` as a `T`, or `default` when the entry has none.
 fn pluck(comptime T: type, comptime e: anytype, comptime name: []const u8, comptime default: T) T {
@@ -7867,6 +9321,11 @@ const menu_bar = .{
         .{ .title = "About Zag", .sel = "orderFrontStandardAboutPanel:" },
         .{ .sep = true },
         .{ .title = "Settings…", .sel = "openSettings:", .key = ",", .mods = objc.cmd_key, .to = .app, .run = openSettings },
+        .{ .title = "Reveal Config in Finder", .sel = "revealConfig:", .to = .app, .run = revealConfig },
+        .{ .title = "Reload Settings", .sel = "reloadSettings:", .to = .app, .run = reloadSettings },
+        .{ .title = "Reset Settings to Defaults…", .sel = "resetSettings:", .to = .app, .run = resetSettings },
+        .{ .sep = true },
+        .{ .services = true },
         .{ .sep = true },
         .{ .title = "Hide Zag", .sel = "hide:", .key = "h", .mods = objc.cmd_key },
         .{ .title = "Hide Others", .sel = "hideOtherApplications:", .key = "h", .mods = objc.cmd_key | objc.opt_key },
@@ -7886,6 +9345,11 @@ const menu_bar = .{
         .{ .title = "Close Window", .sel = "performClose:", .key = "w", .mods = objc.cmd_key | objc.shift_key },
         .{ .title = "Save", .sel = "saveDocument:", .key = "s", .mods = objc.cmd_key, .to = .view, .run = save, .args = .{false} },
         .{ .title = "Save As…", .sel = "saveDocumentAs:", .key = "s", .mods = objc.cmd_key | objc.shift_key, .to = .view, .run = save, .args = .{true} },
+        .{ .title = "Save All", .sel = "saveAll:", .key = "s", .mods = objc.cmd_key | objc.opt_key, .to = .view, .run = saveEverything },
+        .{ .sep = true },
+        .{ .title = "Reveal in Finder", .sel = "revealCurrent:", .to = .view, .run = revealCurrent },
+        .{ .title = "Recover Drafts", .sel = "recoverDrafts:", .to = .app, .run = recoverDraftsNow },
+        .{ .title = "Browse Drafts…", .sel = "browseDrafts:", .to = .app, .run = browseDrafts },
     } },
     .{ .menu = "Edit", .items = .{
         .{ .title = "Undo", .sel = "undo:", .key = "z", .mods = objc.cmd_key, .to = .view, .run = stepHistory, .args = .{false} },
@@ -7916,6 +9380,8 @@ const menu_bar = .{
         .{ .title = "Line Numbers", .sel = "toggleLineNumbers:", .key = "l", .mods = objc.cmd_key | objc.shift_key, .to = .app, .run = flip, .args = .{.@"line-numbers"}, .check = .line_numbers },
         .{ .title = "Auto-Close Brackets", .sel = "togglePairs:", .to = .app, .run = flip, .args = .{.pairs}, .check = .pairs },
         .{ .title = sidebar_title, .sel = "toggleSidebar:", .key = "\\", .mods = objc.cmd_key, .to = .app, .run = flip, .args = .{.sidebar}, .check = .sidebar },
+        .{ .title = "Focus Sidebar", .sel = "focusSidebar:", .key = "e", .mods = objc.cmd_key | objc.shift_key, .to = .view, .run = focusSidebar },
+        .{ .title = "Show Hidden Files", .sel = "toggleHidden:", .to = .app, .run = flip, .args = .{.@"show-hidden"}, .check = .show_hidden },
         .{ .title = "Zen Mode", .sel = "toggleZen:", .key = "z", .mods = objc.ctrl_key | objc.cmd_key, .to = .app, .run = toggleZen, .check = .zen, .grey = true },
         // Late-Night's own checkmark reads its flag; the items it sets show the effective values.
         .{ .title = "Late-Night Focus", .sel = "toggleLateNight:", .key = "n", .mods = objc.ctrl_key | objc.cmd_key, .to = .app, .run = flip, .args = .{.@"late-night"}, .check = .late_night },
@@ -7942,8 +9408,16 @@ const menu_bar = .{
     .{ .menu = "Window", .items = .{
         .{ .title = "Minimize", .sel = "performMiniaturize:", .key = "m", .mods = objc.cmd_key },
         .{ .title = "Zoom", .sel = "performZoom:" },
+        .{ .sep = true },
+        .{ .title = "Move Tab to New Window", .sel = "tabToNewWindow:", .to = .view, .run = tabToNewWindow },
+        .{ .title = "Merge All Windows", .sel = "mergeWindows:", .to = .view, .run = mergeWindows },
     } },
-    .{ .menu = "Help", .items = .{} },
+    .{ .menu = "Help", .items = .{
+        .{ .title = "Zag User Guide", .sel = "openGuide:", .to = .app, .run = openUrl, .args = .{guide_url} },
+        .{ .title = "Keyboard Shortcuts", .sel = "showShortcuts:", .to = .view, .run = startPrompt, .args = .{Mode.command} },
+        .{ .sep = true },
+        .{ .title = "Report an Issue", .sel = "reportIssue:", .to = .app, .run = openUrl, .args = .{issues_url} },
+    } },
 };
 
 fn submenu(bar: Id, title: []const u8) Id {
@@ -7958,7 +9432,11 @@ fn submenu(bar: Id, title: []const u8) Id {
 fn fillMenu(menu: Id, comptime entries: anytype, delegate: Id) void {
     inline for (entries) |e| {
         const T = @TypeOf(e);
-        if (@hasField(T, "sep")) {
+        if (@hasField(T, "services")) {
+            // AppKit fills the Services menu with other apps' services.
+            const m = submenu(menu, "Services");
+            msg(void, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "setServicesMenu:", .{m});
+        } else if (@hasField(T, "sep")) {
             separator(menu);
         } else if (@hasField(T, "heading")) {
             msg(void, menuItem(menu, e.heading, "", "", 0), "setEnabled:", .{false});
@@ -7974,10 +9452,11 @@ fn fillMenu(menu: Id, comptime entries: anytype, delegate: Id) void {
                     separator(menu);
                     msg(void, menuItem(menu, if (sc.dark) "Dark Mode" else "Light Mode", "", "", 0), "setEnabled:", .{false});
                 }
-                pick(menu, sc.title, e.sel, i, pluck(isize, e, "indent", 0));
+                // Each theme shows a swatch of its colors.
+                msg(void, pick(menu, sc.title, e.sel, i, pluck(isize, e, "indent", 0)), "setImage:", .{swatch(sc)});
             }
         } else if (@hasField(T, "titles")) {
-            inline for (e.titles, 0..) |title, i| pick(menu, title, e.sel, i, pluck(isize, e, "indent", 0));
+            inline for (e.titles, 0..) |title, i| _ = pick(menu, title, e.sel, i, pluck(isize, e, "indent", 0));
         } else {
             const it = menuItem(menu, e.title, e.sel, pluck([]const u8, e, "key", ""), pluck(usize, e, "mods", 0));
             if (pluck(Target, e, "to", .system) == .fonts) {
@@ -7992,10 +9471,11 @@ fn fillMenu(menu: Id, comptime entries: anytype, delegate: Id) void {
 }
 
 /// A pick item: its index rides in `tag`.
-fn pick(menu: Id, title: []const u8, sel: [:0]const u8, i: usize, indent: isize) void {
+fn pick(menu: Id, title: []const u8, sel: [:0]const u8, i: usize, indent: isize) Id {
     const it = menuItem(menu, title, sel, "", 0);
     msg(void, it, "setTag:", .{@as(isize, @intCast(i))});
     if (indent != 0) msg(void, it, "setIndentationLevel:", .{indent});
+    return it;
 }
 
 /// Builds the menu bar and installs it. `delegate` fills Open Recent.
@@ -8067,6 +9547,7 @@ fn checked(c: Check, tag: usize) bool {
         .focus => tag == @intFromEnum(conf.focus),
         .scheme => tag == conf.light_scheme or tag == conf.dark_scheme,
         .look => tag == @intFromEnum(conf.look),
+        .show_hidden => conf.show_hidden,
     };
 }
 
@@ -8126,7 +9607,12 @@ pub fn setup() void {
     c.method("windowDidResignKey:", @ptrCast(&keyChanged), "v@:@");
     c.method("windowDidExitFullScreen:", @ptrCast(&keyChanged), "v@:@");
     c.method("draggingEntered:", @ptrCast(&draggingEntered), "Q@:@");
+    c.method("draggingExited:", @ptrCast(&draggingExited), "v@:@");
+    c.method("draggingEnded:", @ptrCast(&draggingExited), "v@:@");
     c.method("performDragOperation:", @ptrCast(&performDrag), "c@:@");
+    // A sidebar file dragged out to Finder.
+    c.method("draggingSession:sourceOperationMaskForDraggingContext:", @ptrCast(&dragOutMask), "Q@:@q");
+    _ = class_addProtocol(c.cls, objc_getProtocol("NSDraggingSource"));
     c.method("windowShouldClose:", @ptrCast(&windowShouldClose), "c@:@");
     c.method("windowWillClose:", @ptrCast(&windowWillClose), "v@:@");
     c.method("window:willUseFullScreenPresentationOptions:", @ptrCast(&fullScreenOptions), "Q@:@Q");
@@ -8149,9 +9635,22 @@ pub fn setup() void {
     c.method("revealInFinder:", @ptrCast(&revealInFinder), "v@:@");
     c.method("sideParent:", @ptrCast(&sideParent), "v@:@");
     c.method("copyPath:", @ptrCast(&copyPath), "v@:@");
+    c.method("copyRelativePath:", @ptrCast(&copyRelativePath), "v@:@");
+    c.method("revealRoot:", @ptrCast(&revealRoot), "v@:@");
+    c.method("openFolder:", @ptrCast(&openFolder), "v@:@");
+    c.method("openRecentFolder:", @ptrCast(&openRecentFolder), "v@:@");
+    c.method("sideNewFile:", @ptrCast(&sideNewFile), "v@:@");
+    c.method("sideNewFolder:", @ptrCast(&sideNewFolder), "v@:@");
+    c.method("sideRename:", @ptrCast(&sideRename), "v@:@");
+    c.method("sideDuplicate:", @ptrCast(&sideDuplicate), "v@:@");
+    c.method("sideTrash:", @ptrCast(&sideTrash), "v@:@");
+    c.method("collapseAll:", @ptrCast(&collapseAll), "v@:@");
     c.method("runCommand:", @ptrCast(&runCommand), "v@:@");
     access.addViewMethods(c);
     bind(menu_bar, .view, c);
     view_class = c.finish();
     win_ivar = objc.ivarOffset(view_class, "win");
 }
+
+extern fn objc_getProtocol(name: [*:0]const u8) ?*anyopaque;
+extern fn class_addProtocol(cls: Id, protocol: ?*anyopaque) bool;

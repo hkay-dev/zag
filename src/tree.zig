@@ -30,6 +30,12 @@ pub const Tree = struct {
     /// before the read. In the arena.
     read: std.ArrayList(Read) = .empty,
     read_open: usize = 0,
+    /// Lists names that start with a dot too, except `.` and `..`.
+    show_hidden: bool = false,
+    /// The last `rebuild` couldn't open the root folder.
+    unreadable: bool = false,
+    /// The last `rebuild` stopped at `max_rows`, so rows are missing.
+    truncated: bool = false,
 
     pub fn init(gpa: Allocator) Tree {
         return .{ .arena = .init(gpa) };
@@ -96,6 +102,8 @@ pub const Tree = struct {
         t.rows = .empty;
         t.read = .empty;
         t.read_open = t.open.items.len;
+        t.unreadable = false;
+        t.truncated = false;
         var path: std.ArrayList(u8) = .empty;
         defer path.deinit(gpa);
         path.appendSlice(gpa, root) catch return;
@@ -130,15 +138,22 @@ pub const Tree = struct {
         const dir = c.opendir(@ptrCast(path.items.ptr));
         if (stamp) |s| try t.read.append(a, .{ .path = try a.dupeSentinel(u8, path.items[0 .. path.items.len - 1], 0), .stamp = if (dir == null) null else s });
         path.items.len -= 1;
-        const dh = dir orelse return;
+        const dh = dir orelse {
+            if (depth == 0) t.unreadable = true;
+            return;
+        };
         const len = path.items.len;
         var entries: std.ArrayList(Entry) = .empty;
         while (c.readdir(dh)) |ent| {
             const name = ent.name[0..ent.namlen];
-            if (name[0] == '.') continue;
+            if (name[0] == '.') {
+                if (!t.show_hidden) continue;
+                if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+            }
             var is_dir = ent.type == c.DT.DIR;
-            if (ent.type == c.DT.LNK) {
-                // A link to a folder shows as a folder.
+            if (ent.type == c.DT.LNK or ent.type == c.DT.UNKNOWN) {
+                // A link to a folder shows as a folder, and a filesystem
+                // that doesn't report types gets a stat.
                 path.shrinkRetainingCapacity(len);
                 try path.append(gpa, '/');
                 try path.appendSlice(gpa, name);
@@ -151,7 +166,10 @@ pub const Tree = struct {
         _ = c.closedir(dh);
         std.mem.sort(Entry, entries.items, {}, before);
         for (entries.items) |e| {
-            if (t.rows.items.len >= max_rows) return;
+            if (t.rows.items.len >= max_rows) {
+                t.truncated = true;
+                return;
+            }
             path.shrinkRetainingCapacity(len);
             try path.append(gpa, '/');
             try path.appendSlice(gpa, e.name);
@@ -161,12 +179,53 @@ pub const Tree = struct {
         }
     }
 
-    /// Folders first, then names in letter order, ignoring case.
+    /// Folders first, then names in letter order, ignoring case, with
+    /// runs of digits compared as numbers so `file2` comes before `file10`.
     fn before(_: void, x: Entry, y: Entry) bool {
         if (x.dir != y.dir) return x.dir;
-        return std.ascii.lessThanIgnoreCase(x.name, y.name);
+        return naturalLess(x.name, y.name);
     }
 };
+
+fn naturalLess(x: []const u8, y: []const u8) bool {
+    var i: usize = 0;
+    var j: usize = 0;
+    while (i < x.len and j < y.len) {
+        if (std.ascii.isDigit(x[i]) and std.ascii.isDigit(y[j])) {
+            while (i < x.len and x[i] == '0') i += 1;
+            while (j < y.len and y[j] == '0') j += 1;
+            const xs = i;
+            const ys = j;
+            while (i < x.len and std.ascii.isDigit(x[i])) i += 1;
+            while (j < y.len and std.ascii.isDigit(y[j])) j += 1;
+            const xn = x[xs..i];
+            const yn = y[ys..j];
+            if (xn.len != yn.len) return xn.len < yn.len;
+            switch (std.mem.order(u8, xn, yn)) {
+                .lt => return true,
+                .gt => return false,
+                .eq => continue,
+            }
+        }
+        const a = std.ascii.toLower(x[i]);
+        const b = std.ascii.toLower(y[j]);
+        if (a != b) return a < b;
+        i += 1;
+        j += 1;
+    }
+    return x.len - i < y.len - j;
+}
+
+test "names with numbers sort by value, ignoring case" {
+    const t = std.testing;
+    try t.expect(naturalLess("file2", "file10"));
+    try t.expect(!naturalLess("file10", "file2"));
+    try t.expect(naturalLess("File2", "file10"));
+    try t.expect(naturalLess("a", "B"));
+    try t.expect(naturalLess("x9y", "x09z"));
+    try t.expect(!naturalLess("abc", "ABC"));
+    try t.expect(naturalLess("ab", "abc"));
+}
 
 test "folders first, names ignore case, hidden files skipped, open folders list inside" {
     const t = std.testing;

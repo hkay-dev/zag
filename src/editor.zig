@@ -4,7 +4,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Buffer = @import("buffer.zig").Buffer;
 
-const tab_width = 4;
+/// Columns between tab stops when an editor doesn't set its own.
+pub const default_tab_width = 4;
+const spaces: [256]u8 = @splat(' ');
 
 pub const Motion = enum { left, right, word_left, word_right, home, end, line_start, line_end, top, bottom };
 
@@ -18,6 +20,8 @@ pub const Editor = struct {
     typing: bool = false,
     indent: []const u8 = "    ",
     eol: []const u8 = "\n",
+    /// Columns between tab stops, and the width of one spaces indent.
+    tab_width: u8 = default_tab_width,
 
     pub fn init(gpa: Allocator, bytes: []const u8) !Editor {
         var e: Editor = .{ .buf = try Buffer.init(gpa, bytes) };
@@ -76,8 +80,8 @@ pub const Editor = struct {
         const t = e.text();
         const row = b.lineOf(e.cur);
         return switch (m) {
-            .left => if (e.cur == b.lineStart(row) and row > 0) b.lineEnd(row - 1) else prevChar(t, e.cur),
-            .right => if (e.cur == b.lineEnd(row) and row + 1 < b.lines()) b.lineStart(row + 1) else nextChar(t, e.cur),
+            .left => if (e.cur == b.lineStart(row) and row > 0) b.lineEnd(row - 1) else prevCluster(t, e.cur),
+            .right => if (e.cur == b.lineEnd(row) and row + 1 < b.lines()) b.lineStart(row + 1) else nextCluster(t, e.cur),
             .word_left => wordLeft(t, e.cur),
             .word_right => wordRight(t, e.cur),
             .home => blk: {
@@ -183,10 +187,21 @@ pub const Editor = struct {
         if (!whole and first == e.buf.lineOf(r[1])) {
             if (e.indent[0] == '\t') return e.insert(gpa, "\t");
             const row = e.buf.lineOf(e.cur);
-            const col = colOf(e.buf.line(row), 0, 0, e.cur - e.buf.lineStart(row));
-            return e.insert(gpa, "    "[0 .. tab_width - col % tab_width]);
+            const tw = e.tabWidth();
+            const col = colOfTab(e.buf.line(row), 0, 0, e.cur - e.buf.lineStart(row), tw);
+            return e.insert(gpa, spaces[0 .. tw - col % tw]);
         }
         try e.eachLine(gpa, .indent);
+    }
+
+    /// The tab width, never below one column.
+    pub fn tabWidth(e: *const Editor) usize {
+        return @max(1, e.tab_width);
+    }
+
+    /// What one level of indent inserts: a tab, or `tab_width` spaces.
+    fn indentUnit(e: *const Editor) []const u8 {
+        return if (e.indent.len > 0 and e.indent[0] == '\t') "\t" else spaces[0..e.tabWidth()];
     }
 
     pub fn outdent(e: *Editor, gpa: Allocator) !void {
@@ -268,20 +283,30 @@ pub const Editor = struct {
     fn breakLine(e: *const Editor, gpa: Allocator, out: *std.ArrayList(u8), base: []const u8, depth: usize) !void {
         try out.appendSlice(gpa, e.eol);
         try out.appendSlice(gpa, base);
-        for (0..depth) |_| try out.appendSlice(gpa, e.indent);
+        for (0..depth) |_| try out.appendSlice(gpa, e.indentUnit());
     }
 
     const LineOp = union(enum) { indent, outdent, comment: []const u8 };
+
+    /// The first and last rows the selection touches, leaving out a last row
+    /// the selection only reaches the start of.
+    fn selRows(e: *const Editor) [2]usize {
+        const b = &e.buf;
+        const r = e.sel();
+        const first = b.lineOf(r[0]);
+        var last = b.lineOf(r[1]);
+        if (last > first and r[1] == b.lineStart(last)) last -= 1;
+        return .{ first, last };
+    }
 
     /// Rewrites every line the selection touches as one undo step, and
     /// selects the rewritten lines. With only a caret, the caret stays on the
     /// same character instead.
     fn eachLine(e: *Editor, gpa: Allocator, op: LineOp) !void {
         const b = &e.buf;
-        const r = e.sel();
-        const first = b.lineOf(r[0]);
-        var last = b.lineOf(r[1]);
-        if (last > first and r[1] == b.lineStart(last)) last -= 1;
+        const rows = e.selRows();
+        const first = rows[0];
+        const last = rows[1];
         const start = b.lineStart(first);
         const end = b.lineEnd(last);
         const t = e.text();
@@ -312,12 +337,13 @@ pub const Editor = struct {
             const ws = leadingWs(l);
             switch (op) {
                 .indent => {
-                    if (l.len > 0) add = e.indent.len;
-                    try out.appendSlice(gpa, e.indent[0..add]);
+                    const unit = e.indentUnit();
+                    if (l.len > 0) add = unit.len;
+                    try out.appendSlice(gpa, unit[0..add]);
                     try out.appendSlice(gpa, l);
                 },
                 .outdent => {
-                    if (del < l.len and l[0] == '\t') del = 1 else while (del < l.len and del < tab_width and l[del] == ' ') del += 1;
+                    if (del < l.len and l[0] == '\t') del = 1 else while (del < l.len and del < e.tabWidth() and l[del] == ' ') del += 1;
                     try out.appendSlice(gpa, l[del..]);
                 },
                 .comment => |p| if (ws == l.len) {
@@ -389,9 +415,25 @@ pub const Editor = struct {
     /// Selects the next match of `q` at or after `from`, or before `from` when
     /// `back`, wrapping around. False when there is none.
     pub fn find(e: *Editor, q: []const u8, from: usize, back: bool) bool {
-        const p = search(e.text(), q, from, back) orelse return false;
+        return e.findWith(q, from, back, .{});
+    }
+
+    /// `find` with a case rule and whole-word matching.
+    pub fn findWith(e: *Editor, q: []const u8, from: usize, back: bool, opts: SearchOpts) bool {
+        const p = searchWith(e.text(), q, from, back, opts) orelse return false;
         e.select(p, p + q.len);
         return true;
+    }
+
+    /// The bracket next to the caret and its partner, `( )`, `[ ]` or
+    /// `{ }` counting nesting, as `.{ bracket, partner }`. The bracket after
+    /// the caret goes first; the one before it is the fallback. Null when
+    /// neither has a partner.
+    pub fn matchingBracket(e: *const Editor) ?[2]usize {
+        const t = e.text();
+        if (matchingBracketAt(t, e.cur)) |m| return .{ e.cur, m };
+        if (e.cur > 0) if (matchingBracketAt(t, e.cur - 1)) |m| return .{ e.cur - 1, m };
+        return null;
     }
 
     /// Typing with auto-closing pairs: an opener adds its closer (or wraps
@@ -436,8 +478,13 @@ pub const Editor = struct {
 
     /// Replaces the selection with `with` when it's a match of `q`.
     pub fn replaceOne(e: *Editor, gpa: Allocator, q: []const u8, with: []const u8) !bool {
+        return e.replaceOneWith(gpa, q, with, .{});
+    }
+
+    /// `replaceOne` with a case rule and whole-word matching.
+    pub fn replaceOneWith(e: *Editor, gpa: Allocator, q: []const u8, with: []const u8, opts: SearchOpts) !bool {
         const s = e.sel();
-        if (q.len == 0 or s[1] - s[0] != q.len or !matchAt(e.text(), s[0], q, caseSensitive(q))) return false;
+        if (q.len == 0 or s[1] - s[0] != q.len or !matches(e.text(), s[0], q, opts.sensitive(q), opts.whole_word)) return false;
         e.typing = false;
         try e.insert(gpa, with);
         return true;
@@ -445,6 +492,11 @@ pub const Editor = struct {
 
     /// Replaces every match of `q` as one undo step. Returns how many.
     pub fn replaceAll(e: *Editor, gpa: Allocator, q: []const u8, with: []const u8, spots: [][2]usize) !usize {
+        return e.replaceAllWith(gpa, q, with, spots, .{});
+    }
+
+    /// `replaceAll` with a case rule and whole-word matching.
+    pub fn replaceAllWith(e: *Editor, gpa: Allocator, q: []const u8, with: []const u8, spots: [][2]usize, opts: SearchOpts) !usize {
         const t = e.text();
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(gpa);
@@ -452,9 +504,9 @@ pub const Editor = struct {
         var first: ?usize = null;
         var done: usize = 0;
         var i: usize = 0;
-        const sensitive = caseSensitive(q);
+        const sensitive = opts.sensitive(q);
         while (q.len > 0 and i + q.len <= t.len) {
-            if (!matchAt(t, i, q, sensitive)) {
+            if (!matches(t, i, q, sensitive, opts.whole_word)) {
                 i += 1;
                 continue;
             }
@@ -476,6 +528,160 @@ pub const Editor = struct {
         try e.buf.replace(gpa, start, done, out.items, e.cur, false);
         e.select(start, start);
         return n;
+    }
+
+    /// Copies the selected lines, or the caret's line, below themselves as
+    /// one undo step, and moves the caret or selection onto the copy.
+    pub fn duplicateLine(e: *Editor, gpa: Allocator) !void {
+        const b = &e.buf;
+        const rows = e.selRows();
+        const t = e.text();
+        const end = b.lineEnd(rows[1]);
+        const block = t[b.lineStart(rows[0])..end];
+        const add = try std.mem.concat(gpa, u8, &.{ e.eol, block });
+        defer gpa.free(add);
+        const anchor = e.anchor;
+        const cur = e.cur;
+        try b.replace(gpa, end, end, add, cur, false);
+        e.select(anchor + add.len, cur + add.len);
+    }
+
+    /// Swaps the selected lines, or the caret's line, with the line above,
+    /// as one undo step. The caret and selection move with the lines.
+    pub fn moveLinesUp(e: *Editor, gpa: Allocator) !void {
+        const rows = e.selRows();
+        if (rows[0] == 0) return;
+        try e.swapLines(gpa, rows[0] - 1, rows[0], rows[1], false);
+    }
+
+    /// Swaps the selected lines, or the caret's line, with the line below,
+    /// as one undo step. The caret and selection move with the lines.
+    pub fn moveLinesDown(e: *Editor, gpa: Allocator) !void {
+        const rows = e.selRows();
+        if (rows[1] + 1 >= e.buf.lines()) return;
+        try e.swapLines(gpa, rows[0], rows[1], rows[1] + 1, true);
+    }
+
+    /// Swaps the block of rows `a..m` with row `z` below it (`down`), or row
+    /// `a` with the block of rows `m..z` below it (up), keeping the line
+    /// break between the two parts where it was.
+    fn swapLines(e: *Editor, gpa: Allocator, a: usize, m: usize, z: usize, down: bool) !void {
+        const b = &e.buf;
+        const t = e.text();
+        // Up: the lone line is `a`, the block `m..z`. Down: the block is
+        // `a..m`, the lone line `z`.
+        const top_end = if (down) b.lineEnd(m) else b.lineEnd(a);
+        const bot_start = if (down) b.lineStart(z) else b.lineStart(m);
+        const start = b.lineStart(a);
+        const end = b.lineEnd(z);
+        const top = t[start..top_end];
+        const brk = t[top_end..bot_start];
+        const bot = t[bot_start..end];
+        const out = try std.mem.concat(gpa, u8, &.{ bot, brk, top });
+        defer gpa.free(out);
+        const anchor = e.anchor;
+        const cur = e.cur;
+        // The selection's lines move by the other part and the break. A
+        // selection end at the start of the row after the block goes to the
+        // start of the row after the block's new place.
+        const by = brk.len + if (down) bot.len else top.len;
+        const hi = if (down) top_end else end;
+        const past = if (down) b.lineStop(z) else start + bot.len + brk.len;
+        try b.replace(gpa, start, end, out, cur, false);
+        e.select(mapSwap(anchor, hi, by, down, past), mapSwap(cur, hi, by, down, past));
+    }
+
+    /// Joins the selected lines, or the caret's line and the next, into one
+    /// as one undo step: each line break and the next line's indent become
+    /// one space, or nothing next to a blank line or trailing space. The
+    /// caret goes to the first join; a selection covers the joined line.
+    pub fn joinLines(e: *Editor, gpa: Allocator) !void {
+        const b = &e.buf;
+        const rows = e.selRows();
+        const first = rows[0];
+        const last = if (rows[1] > first) rows[1] else first + 1;
+        if (last >= b.lines()) return;
+        const t = e.text();
+        const start = b.lineEnd(first);
+        const end = b.lineEnd(last);
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(gpa);
+        const head = b.line(first);
+        var bare = head.len == 0 or head[head.len - 1] == ' ' or head[head.len - 1] == '\t';
+        for (first + 1..last + 1) |i| {
+            const l = b.line(i);
+            const rest = l[leadingWs(l)..];
+            if (rest.len == 0) continue;
+            if (!bare) try out.append(gpa, ' ');
+            try out.appendSlice(gpa, rest);
+            bare = rest[rest.len - 1] == ' ' or rest[rest.len - 1] == '\t';
+        }
+        if (std.mem.eql(u8, out.items, t[start..end])) return;
+        const had_sel = e.hasSel();
+        const sel_start = e.sel()[0];
+        try b.replace(gpa, start, end, out.items, e.cur, false);
+        if (had_sel) return e.select(sel_start, start + out.items.len);
+        e.select(start, start);
+    }
+
+    /// Deletes the selected lines, or the caret's line, with their line
+    /// break as one undo step. The caret keeps its byte column on the line
+    /// that takes their place.
+    pub fn deleteLine(e: *Editor, gpa: Allocator) !void {
+        const b = &e.buf;
+        const rows = e.selRows();
+        var start = b.lineStart(rows[0]);
+        const end = b.lineStop(rows[1]);
+        // The last line has no break of its own, so it takes the one before.
+        if (end == e.text().len and rows[0] > 0) start = b.lineEnd(rows[0] - 1);
+        if (start == end) return;
+        const col = e.cur - b.lineStart(b.lineOf(e.cur));
+        try b.replace(gpa, start, end, "", e.cur, false);
+        const row = b.lineOf(@min(start, e.text().len));
+        const ls = b.lineStart(row);
+        const c = charStart(e.text(), @min(ls + col, b.lineEnd(row)));
+        e.select(c, c);
+    }
+
+    /// Removes spaces and tabs at the ends of lines as one undo step, leaving
+    /// the caret and selection on the same characters.
+    pub fn trimTrailingWhitespace(e: *Editor, gpa: Allocator) !void {
+        const b = &e.buf;
+        const t = e.text();
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(gpa);
+        // The rewritten span runs from the first trimmed run to the last.
+        var from: ?usize = null;
+        var done: usize = 0;
+        // Bytes removed before the anchor and the caret.
+        var anchor_cut: usize = 0;
+        var cur_cut: usize = 0;
+        for (0..b.lines()) |i| {
+            const le = b.lineEnd(i);
+            var ws = le;
+            while (ws > b.lineStart(i) and (t[ws - 1] == ' ' or t[ws - 1] == '\t')) ws -= 1;
+            if (ws == le) continue;
+            if (from == null) {
+                from = ws;
+                done = ws;
+            }
+            try out.appendSlice(gpa, t[done..ws]);
+            done = le;
+            if (e.anchor > ws) anchor_cut += @min(e.anchor, le) - ws;
+            if (e.cur > ws) cur_cut += @min(e.cur, le) - ws;
+        }
+        const a = from orelse return;
+        try b.replace(gpa, a, done, out.items, e.cur, false);
+        e.select(e.anchor - anchor_cut, e.cur - cur_cut);
+    }
+
+    /// Adds the file's line ending after the last line when the text doesn't
+    /// end with one. Empty text stays empty.
+    pub fn ensureFinalNewline(e: *Editor, gpa: Allocator) !void {
+        const t = e.text();
+        if (t.len == 0 or t[t.len - 1] == '\n') return;
+        try e.buf.replace(gpa, t.len, t.len, e.eol, e.cur, false);
+        e.select(e.anchor, e.cur);
     }
 
     /// Swaps in a file's new text from disk as one undoable edit of just the
@@ -505,6 +711,26 @@ pub const Editor = struct {
     }
 };
 
+/// How a search matches: its case rule, and whether a match must be a whole
+/// word.
+pub const SearchOpts = struct {
+    pub const CaseMode = enum { smart, sensitive, insensitive };
+
+    /// `smart` ignores case unless the query has an uppercase letter.
+    case_mode: CaseMode = .smart,
+    /// A match that starts or ends with a word character must not continue
+    /// a word on that side.
+    whole_word: bool = false,
+
+    pub fn sensitive(o: SearchOpts, q: []const u8) bool {
+        return switch (o.case_mode) {
+            .smart => caseSensitive(q),
+            .sensitive => true,
+            .insensitive => false,
+        };
+    }
+};
+
 /// Matching ignores case unless the query has an uppercase letter.
 pub fn caseSensitive(q: []const u8) bool {
     for (q) |c| if (std.ascii.isUpper(c)) return true;
@@ -515,6 +741,17 @@ pub fn matchAt(t: []const u8, i: usize, q: []const u8, sensitive: bool) bool {
     if (i + q.len > t.len) return false;
     if (sensitive) return std.mem.eql(u8, t[i .. i + q.len], q);
     return std.ascii.eqlIgnoreCase(t[i .. i + q.len], q);
+}
+
+/// `matchAt` that, with `whole`, also needs word boundaries on each side
+/// of the match that starts or ends with a word character.
+pub fn matches(t: []const u8, i: usize, q: []const u8, sensitive: bool, whole: bool) bool {
+    if (!matchAt(t, i, q, sensitive)) return false;
+    if (!whole or q.len == 0) return true;
+    const z = i + q.len;
+    if (class(q[0]) == 0 and i > 0 and class(t[i - 1]) == 0) return false;
+    if (class(q[q.len - 1]) == 0 and z < t.len and class(t[z]) == 0) return false;
+    return true;
 }
 
 /// First index at or after `from` holding byte `a` or `b`, 32 bytes at a time.
@@ -537,10 +774,16 @@ fn candidate(t: []const u8, i: usize, stop: usize, q: []const u8, sensitive: boo
 }
 
 fn search(t: []const u8, q: []const u8, from: usize, back: bool) ?usize {
+    return searchWith(t, q, from, back, .{});
+}
+
+/// The match of `q` at or after `from`, or the last one before `from` when
+/// `back`, wrapping around.
+pub fn searchWith(t: []const u8, q: []const u8, from: usize, back: bool, opts: SearchOpts) ?usize {
     if (q.len == 0 or q.len > t.len) return null;
     const end = t.len - q.len + 1;
     const start = @min(from, end);
-    const sensitive = caseSensitive(q);
+    const sensitive = opts.sensitive(q);
     for (0..2) |pass| {
         const prefix = back == (pass == 0);
         var i: usize = if (prefix) 0 else start;
@@ -548,7 +791,7 @@ fn search(t: []const u8, q: []const u8, from: usize, back: bool) ?usize {
         var found: ?usize = null;
         while (i < stop) {
             const p = candidate(t, i, stop, q, sensitive) orelse break;
-            if (matchAt(t, p, q, sensitive)) {
+            if (matches(t, p, q, sensitive, opts.whole_word)) {
                 if (!back) return p;
                 found = p;
             }
@@ -566,14 +809,19 @@ pub const count_cap = 10_000;
 /// Non-overlapping matches ending at or before `before`, and in all the
 /// text, both counted up to `count_cap`.
 pub fn countMatches(t: []const u8, q: []const u8, before: usize) [2]usize {
+    return countMatchesWith(t, q, before, .{});
+}
+
+/// `countMatches` with a case rule and whole-word matching.
+pub fn countMatchesWith(t: []const u8, q: []const u8, before: usize, opts: SearchOpts) [2]usize {
     var n = [2]usize{ 0, 0 };
     if (q.len == 0 or q.len > t.len) return n;
-    const sensitive = caseSensitive(q);
+    const sensitive = opts.sensitive(q);
     const end = t.len - q.len + 1;
     var i: usize = 0;
     while (i < end and n[1] < count_cap) {
         const p = candidate(t, i, end, q, sensitive) orelse break;
-        if (matchAt(t, p, q, sensitive)) {
+        if (matches(t, p, q, sensitive, opts.whole_word)) {
             n[0] += @intFromBool(p + q.len <= before);
             n[1] += 1;
             i = p + q.len;
@@ -654,68 +902,193 @@ pub fn decode(t: []const u8, i: usize) struct { cp: u21, len: usize } {
     return .{ .cp = cp, .len = n };
 }
 
-/// Whether `s` is one user-visible character: a code point followed only by
-/// combining marks, variation selectors, skin tones, tags, ZWJ-joined code
-/// points, or the second half of a flag.
-fn oneCluster(s: []const u8) bool {
-    if (s.len == 0) return false;
-    const first = decode(s, 0);
-    var i = first.len;
-    var flag = first.cp >= 0x1F1E6 and first.cp <= 0x1F1FF;
-    var joined = false;
-    while (i < s.len) {
-        const d = decode(s, i);
-        const ok = joined or (flag and d.cp >= 0x1F1E6 and d.cp <= 0x1F1FF) or switch (d.cp) {
-            0x0300...0x036F, 0x1AB0...0x1AFF, 0x1DC0...0x1DFF, 0x200D, 0x20D0...0x20FF, 0xFE00...0xFE0F, 0xFE20...0xFE2F, 0x1F3FB...0x1F3FF, 0xE0020...0xE007F, 0xE0100...0xE01EF => true,
-            else => false,
-        };
-        if (!ok) return false;
-        flag = false;
-        joined = d.cp == 0x200D;
-        i += d.len;
+/// Whether `cp` is a regional indicator, half of a flag.
+fn isFlag(cp: u21) bool {
+    return cp >= 0x1F1E6 and cp <= 0x1F1FF;
+}
+
+/// Whether `cp` belongs to the character before it, taking no cells of its
+/// own: combining marks, the zero width joiner, variation selectors, skin
+/// tones, tags, and Hangul vowel and final consonant jamo.
+fn isExtend(cp: u21) bool {
+    return switch (cp) {
+        0x0300...0x036F, 0x1160...0x11FF, 0x1AB0...0x1AFF, 0x1DC0...0x1DFF, 0x200D, 0x20D0...0x20FF, 0xD7B0...0xD7FF, 0xFE00...0xFE0F, 0xFE20...0xFE2F, 0x1F3FB...0x1F3FF, 0xE0020...0xE007F, 0xE0100...0xE01EF => true,
+        else => false,
+    };
+}
+
+/// The end of the user-visible character that starts at `i`: a code point
+/// with the extending code points after it, the code points that zero width
+/// joiners join to it, or both halves of a flag. Control characters, line
+/// breaks among them, always stand alone.
+pub fn nextCluster(t: []const u8, i: usize) usize {
+    if (i >= t.len) return t.len;
+    if (t[i] < 0x80 and (t[i] < 0x20 or i + 1 == t.len or t[i + 1] < 0x80)) return i + 1;
+    const first = decode(t, i);
+    var j = i + first.len;
+    if (isFlag(first.cp) and j < t.len) {
+        const d = decode(t, j);
+        if (isFlag(d.cp)) return j + d.len;
     }
-    return true;
+    var joined = first.cp == 0x200D;
+    while (j < t.len) {
+        const d = decode(t, j);
+        if (d.cp < 0x20 or !(joined or isExtend(d.cp))) break;
+        joined = d.cp == 0x200D;
+        j += d.len;
+    }
+    return j;
+}
+
+/// The start of the user-visible character that ends at `i`; the reverse of
+/// `nextCluster`.
+pub fn prevCluster(t: []const u8, i: usize) usize {
+    if (i == 0) return 0;
+    var p = prevChar(t, i);
+    while (p > 0) {
+        const d = decode(t, p);
+        if (d.cp < 0x20) break;
+        const q = prevChar(t, p);
+        const before = decode(t, q).cp;
+        if (before < 0x20) break;
+        if (isExtend(d.cp) or before == 0x200D) {
+            p = q;
+            continue;
+        }
+        if (isFlag(d.cp)) {
+            // Flags pair up from the first of a run, so `p` is a second
+            // half when an odd number of them comes before it.
+            var n: usize = 0;
+            var k = p;
+            while (k > 0) {
+                const s = prevChar(t, k);
+                if (!isFlag(decode(t, s).cp)) break;
+                n += 1;
+                k = s;
+            }
+            if (n % 2 == 1) p = q;
+        }
+        break;
+    }
+    return p;
+}
+
+/// Whether `s` is one user-visible character, by `nextCluster`.
+fn oneCluster(s: []const u8) bool {
+    return s.len > 0 and nextCluster(s, 0) == s.len;
 }
 
 /// How many cells a codepoint takes: 2 for East Asian wide and emoji.
 fn width(cp: u21) usize {
     return switch (cp) {
-        0x1100...0x115F, 0x2E80...0xA4CF, 0xAC00...0xD7A3, 0xF900...0xFAFF, 0xFE30...0xFE4F, 0xFF00...0xFF60, 0xFFE0...0xFFE6, 0x1F300...0x1F64F, 0x1F900...0x1F9FF, 0x20000...0x3FFFD => 2,
+        0x1100...0x115F, 0x2600...0x27BF, 0x2E80...0xA4CF, 0xA960...0xA97F, 0xAC00...0xD7A3, 0xF900...0xFAFF, 0xFE30...0xFE4F, 0xFF00...0xFF60, 0xFFE0...0xFFE6, 0x1F1E6...0x1F1FF, 0x1F300...0x1F64F, 0x1F680...0x1F6FF, 0x1F900...0x1F9FF, 0x1FA70...0x1FAFF, 0x20000...0x3FFFD => 2,
         else => 1,
     };
 }
 
-/// The codepoint, byte length and cells taken at column `col`.
-pub fn cells(l: []const u8, i: usize, col: usize) struct { cp: u21, w: usize, len: usize } {
-    if (l[i] == '\t') return .{ .cp = '\t', .w = tab_width - col % tab_width, .len = 1 };
-    if (l[i] < 0x80) return .{ .cp = l[i], .w = 1, .len = 1 };
+/// One user-visible character on screen: its first codepoint, the cells it
+/// takes and its byte length.
+pub const Cell = struct { cp: u21, w: usize, len: usize };
+
+/// The character at byte `i`, at column `col`, with tab stops every
+/// `default_tab_width` columns.
+pub fn cells(l: []const u8, i: usize, col: usize) Cell {
+    return cellsTab(l, i, col, default_tab_width);
+}
+
+/// `cells` with tab stops every `tw` columns. A character's extending code
+/// points take no cells of their own, and an emoji variation selector makes
+/// it two cells wide.
+pub fn cellsTab(l: []const u8, i: usize, col: usize, tw: usize) Cell {
+    if (l[i] == '\t') return .{ .cp = '\t', .w = tw - col % tw, .len = 1 };
+    if (l[i] < 0x80 and (l[i] < 0x20 or i + 1 == l.len or l[i + 1] < 0x80)) return .{ .cp = l[i], .w = 1, .len = 1 };
     const d = decode(l, i);
-    return .{ .cp = d.cp, .w = width(d.cp), .len = d.len };
+    const end = nextCluster(l, i);
+    var w = width(d.cp);
+    if (w == 1 and std.mem.indexOf(u8, l[i + d.len .. end], "\u{FE0F}") != null) w = 2;
+    return .{ .cp = d.cp, .w = w, .len = end - i };
 }
 
 /// Display column of byte `n`, starting at byte `from` and column `col0`.
 pub fn colOf(l: []const u8, from: usize, col0: usize, n: usize) usize {
+    return colOfTab(l, from, col0, n, default_tab_width);
+}
+
+/// `colOf` with tab stops every `tw` columns.
+pub fn colOfTab(l: []const u8, from: usize, col0: usize, n: usize, tw: usize) usize {
     var col = col0;
     var i = from;
     while (i < n and i < l.len) {
-        const c = cells(l, i, col);
+        const c = cellsTab(l, i, col, tw);
         col += c.w;
         i += c.len;
     }
     return col;
 }
 
-/// The byte in `l` nearest to display column `x`.
+/// The byte in `l` nearest to display column `x`, never inside a character.
 pub fn byteAtCol(l: []const u8, x: f64) usize {
+    return byteAtColTab(l, x, default_tab_width);
+}
+
+/// `byteAtCol` with tab stops every `tw` columns.
+pub fn byteAtColTab(l: []const u8, x: f64, tw: usize) usize {
     var col: usize = 0;
     var i: usize = 0;
     while (i < l.len) {
-        const c = cells(l, i, col);
+        const c = cellsTab(l, i, col, tw);
         if (x < @as(f64, @floatFromInt(col)) + @as(f64, @floatFromInt(c.w)) / 2) return i;
         col += c.w;
         i += c.len;
     }
     return l.len;
+}
+
+/// How far a bracket match looks before giving up, so a stray bracket in a
+/// huge file costs a bounded scan.
+pub const bracket_scan_cap = 1 << 20;
+
+/// The partner of the bracket at byte `pos`, counting nesting of the same
+/// kind. Null when `pos` isn't a bracket or its partner isn't within
+/// `bracket_scan_cap` bytes.
+pub fn matchingBracketAt(t: []const u8, pos: usize) ?usize {
+    if (pos >= t.len) return null;
+    const c = t[pos];
+    const other: u8 = switch (c) {
+        '(' => ')',
+        ')' => '(',
+        '[' => ']',
+        ']' => '[',
+        '{' => '}',
+        '}' => '{',
+        else => return null,
+    };
+    const fwd = c == '(' or c == '[' or c == '{';
+    var depth: usize = 0;
+    var i = pos;
+    for (0..bracket_scan_cap) |_| {
+        if (fwd) {
+            i += 1;
+            if (i >= t.len) return null;
+        } else {
+            if (i == 0) return null;
+            i -= 1;
+        }
+        if (t[i] == c) {
+            depth += 1;
+        } else if (t[i] == other) {
+            if (depth == 0) return i;
+            depth -= 1;
+        }
+    }
+    return null;
+}
+
+/// Where a position in or just past a block of swapped lines goes: `by`
+/// bytes down or up, or to `past` when it was after the block's end `hi`.
+fn mapSwap(p: usize, hi: usize, by: usize, down: bool, past: usize) usize {
+    if (p > hi) return past;
+    return if (down) p + by else p - by;
 }
 
 /// The end of a screen row: its last byte (exclusive) and the line's display
@@ -783,7 +1156,7 @@ test "word and line queries leave selection and motion state alone" {
 test "cells returns the decoded codepoint with its width and byte length" {
     const cases = .{
         .{ "a", 0, @as(u21, 'a'), 1, 1 },
-        .{ "\t", 1, @as(u21, '\t'), tab_width - 1, 1 },
+        .{ "\t", 1, @as(u21, '\t'), default_tab_width - 1, 1 },
         .{ "ü", 0, @as(u21, 'ü'), 1, 2 },
         .{ "漢", 0, @as(u21, '漢'), 2, 3 },
         .{ "😀", 0, @as(u21, 0x1F600), 2, 4 },
@@ -1098,4 +1471,153 @@ test "reload keeps a changed multi-byte character whole for undo and redo" {
     _ = try e.redo(gpa_t);
     try t_.expectEqualStrings("\xC2\xA1", e.text());
     try t_.expectEqual(@as(usize, 2), e.cur);
+}
+
+test "matching bracket prefers the one after the caret and counts nesting" {
+    var e = try Editor.init(gpa_t, "f(a[b]{c})");
+    defer e.deinit(gpa_t);
+    e.moveTo(1, false);
+    try t_.expectEqual(@as(?[2]usize, .{ 1, 9 }), e.matchingBracket());
+    e.moveTo(10, false);
+    try t_.expectEqual(@as(?[2]usize, .{ 9, 1 }), e.matchingBracket());
+    e.moveTo(4, false);
+    try t_.expectEqual(@as(?[2]usize, .{ 3, 5 }), e.matchingBracket());
+    e.moveTo(0, false);
+    try t_.expectEqual(@as(?[2]usize, null), e.matchingBracket());
+    try t_.expectEqual(@as(?usize, null), matchingBracketAt("(()", 0));
+}
+
+test "clusters keep combining marks, joined emoji and flags whole" {
+    const accent = "e\u{0301}x";
+    try t_.expectEqual(@as(usize, 3), nextCluster(accent, 0));
+    try t_.expectEqual(@as(usize, 0), prevCluster(accent, 3));
+    const family = "\u{1F468}\u{200D}\u{1F469}";
+    try t_.expectEqual(@as(usize, family.len), nextCluster(family, 0));
+    try t_.expectEqual(@as(usize, 0), prevCluster(family, family.len));
+    const flags = "\u{1F1EF}\u{1F1F5}\u{1F1EF}\u{1F1F5}";
+    try t_.expectEqual(@as(usize, 8), nextCluster(flags, 0));
+    try t_.expectEqual(@as(usize, 8), prevCluster(flags, 16));
+    try t_.expectEqual(@as(usize, 0), prevCluster(flags, 8));
+    try t_.expectEqual(@as(usize, 2), nextCluster("a\n\u{0301}", 1));
+    const c = cells(accent, 0, 0);
+    try t_.expectEqual(@as(usize, 1), c.w);
+    try t_.expectEqual(@as(usize, 3), c.len);
+    try t_.expectEqual(@as(usize, 2), colOf(accent, 0, 0, accent.len));
+    try t_.expectEqual(@as(usize, 3), byteAtCol(accent, 0.9));
+    try t_.expectEqual(@as(usize, 2), cells("\u{2764}\u{FE0F}", 0, 0).w);
+    try t_.expectEqual(@as(usize, 2), cells("\u{1F680}", 0, 0).w);
+    try t_.expectEqual(@as(usize, 2), cells("\u{1F1EF}\u{1F1F5}", 0, 0).w);
+    try t_.expectEqual(@as(usize, 9), colOfTab("\tx", 0, 0, 2, 8));
+}
+
+test "caret motion and backspace step over a whole emoji with a skin tone" {
+    var e = try Editor.init(gpa_t, "a\u{1F44D}\u{1F3FD}b");
+    defer e.deinit(gpa_t);
+    e.moveTo(1, false);
+    e.move(.right, false);
+    try t_.expectEqual(@as(usize, 9), e.cur);
+    e.move(.left, false);
+    try t_.expectEqual(@as(usize, 1), e.cur);
+    e.moveTo(9, false);
+    try e.deleteBack(gpa_t, .char);
+    try t_.expectEqualStrings("ab", e.text());
+}
+
+test "search options set the case rule and whole-word matching" {
+    const s = "foo food Foo";
+    try t_.expectEqual([2]usize{ 2, 2 }, countMatchesWith(s, "foo", s.len, .{ .whole_word = true }));
+    try t_.expectEqual([2]usize{ 2, 2 }, countMatchesWith(s, "foo", s.len, .{ .case_mode = .sensitive }));
+    try t_.expectEqual([2]usize{ 1, 1 }, countMatchesWith(s, "foo", s.len, .{ .case_mode = .sensitive, .whole_word = true }));
+    try t_.expectEqual([2]usize{ 3, 3 }, countMatchesWith(s, "Foo", s.len, .{ .case_mode = .insensitive }));
+    try t_.expectEqual(@as(?usize, 9), searchWith(s, "foo", 1, false, .{ .whole_word = true }));
+    try t_.expectEqual([2]usize{ 1, 1 }, countMatchesWith("x.foo", ".foo", 5, .{ .whole_word = true }));
+    var e = try Editor.init(gpa_t, "foo food foo");
+    defer e.deinit(gpa_t);
+    try t_.expectEqual(@as(usize, 2), try e.replaceAllWith(gpa_t, "foo", "x", &.{}, .{ .whole_word = true }));
+    try t_.expectEqualStrings("x food x", e.text());
+    try t_.expect(e.findWith("FOOD", 0, false, .{ .case_mode = .insensitive }));
+    try t_.expect(try e.replaceOneWith(gpa_t, "FOOD", "y", .{ .case_mode = .insensitive }));
+    try t_.expectEqualStrings("x y x", e.text());
+}
+
+test "duplicate, move, join and delete lines are one undo step each" {
+    var e = try Editor.init(gpa_t, "a\nb");
+    defer e.deinit(gpa_t);
+    e.moveTo(1, false);
+    try e.duplicateLine(gpa_t);
+    try t_.expectEqualStrings("a\na\nb", e.text());
+    try t_.expectEqual([2]usize{ 3, 3 }, e.sel());
+    _ = try e.undo(gpa_t);
+    try t_.expectEqualStrings("a\nb", e.text());
+
+    var m = try Editor.init(gpa_t, "a\nb\nc");
+    defer m.deinit(gpa_t);
+    try m.moveLinesUp(gpa_t);
+    try t_.expectEqualStrings("a\nb\nc", m.text());
+    try m.moveLinesDown(gpa_t);
+    try t_.expectEqualStrings("b\na\nc", m.text());
+    try t_.expectEqual([2]usize{ 2, 2 }, m.sel());
+    try m.moveLinesUp(gpa_t);
+    try t_.expectEqualStrings("a\nb\nc", m.text());
+    try t_.expectEqual([2]usize{ 0, 0 }, m.sel());
+    m.select(0, 4);
+    try m.moveLinesDown(gpa_t);
+    try t_.expectEqualStrings("c\na\nb", m.text());
+    try t_.expectEqual([2]usize{ 2, 5 }, m.sel());
+    _ = try m.undo(gpa_t);
+    try t_.expectEqualStrings("a\nb\nc", m.text());
+
+    var j = try Editor.init(gpa_t, "a\n  b\n\nc ");
+    defer j.deinit(gpa_t);
+    try j.joinLines(gpa_t);
+    try t_.expectEqualStrings("a b\n\nc ", j.text());
+    try t_.expectEqual([2]usize{ 1, 1 }, j.sel());
+    j.selectAll();
+    try j.joinLines(gpa_t);
+    try t_.expectEqualStrings("a b c ", j.text());
+    try t_.expectEqual([2]usize{ 0, 6 }, j.sel());
+
+    var d = try Editor.init(gpa_t, "a\nbc\nd");
+    defer d.deinit(gpa_t);
+    d.moveTo(3, false);
+    try d.deleteLine(gpa_t);
+    try t_.expectEqualStrings("a\nd", d.text());
+    try t_.expectEqual([2]usize{ 3, 3 }, d.sel());
+    try d.deleteLine(gpa_t);
+    try t_.expectEqualStrings("a", d.text());
+    try t_.expectEqual([2]usize{ 1, 1 }, d.sel());
+}
+
+test "trim trailing whitespace and final newline keep the caret on its character" {
+    var e = try Editor.init(gpa_t, "a  \n b\t\r\nc");
+    defer e.deinit(gpa_t);
+    e.select(2, 9);
+    try e.trimTrailingWhitespace(gpa_t);
+    try t_.expectEqualStrings("a\n b\r\nc", e.text());
+    try t_.expectEqual([2]usize{ 1, 6 }, e.sel());
+    try e.ensureFinalNewline(gpa_t);
+    try t_.expectEqualStrings("a\n b\r\nc\n", e.text());
+    try e.ensureFinalNewline(gpa_t);
+    try t_.expectEqualStrings("a\n b\r\nc\n", e.text());
+    var empty = try Editor.init(gpa_t, "");
+    defer empty.deinit(gpa_t);
+    try empty.ensureFinalNewline(gpa_t);
+    try t_.expectEqualStrings("", empty.text());
+}
+
+test "tab width sets tab stops, indent and outdent" {
+    var e = try Editor.init(gpa_t, "x");
+    defer e.deinit(gpa_t);
+    e.tab_width = 2;
+    e.moveTo(1, false);
+    try e.tab(gpa_t);
+    try t_.expectEqualStrings("x ", e.text());
+    e.select(0, 2);
+    try e.tab(gpa_t);
+    try t_.expectEqualStrings("  x ", e.text());
+    var o = try Editor.init(gpa_t, "    a");
+    defer o.deinit(gpa_t);
+    o.tab_width = 2;
+    try o.outdent(gpa_t);
+    try t_.expectEqualStrings("  a", o.text());
 }

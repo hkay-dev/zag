@@ -37,6 +37,10 @@ pub const Lang = struct {
     /// Tags, attributes and comments, with CSS and JavaScript inside
     /// `<style>` and `<script>`.
     html: bool = false,
+    /// Unified diffs: each line is colored by its first character.
+    diff: bool = false,
+    /// Keywords match in any case (SQL).
+    ignore_case: bool = false,
     keywords: []const []const u8 = &.{},
 };
 
@@ -102,6 +106,12 @@ const swift: Lang = .{ .line_comment = "//", .block_comment = true, .names = tru
 const shell: Lang = .{ .line_comment = "#", .keywords = &.{
     "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac",
     "function", "in", "return", "export", "local", "readonly", "set", "unset", "exit",
+    "select", "declare", "typeset", "source", "alias",
+} };
+
+const fish: Lang = .{ .line_comment = "#", .keywords = &.{
+    "if", "else", "end", "for", "in", "while", "switch", "case", "function", "begin", "return",
+    "break", "continue", "and", "or", "not", "set", "set_color", "status", "source", "exit",
 } };
 
 const ruby: Lang = .{ .line_comment = "#", .names = true, .keywords = &.{
@@ -115,6 +125,38 @@ const lua: Lang = .{ .line_comment = "--", .names = true, .keywords = &.{
     "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
 } };
 
+const sql: Lang = .{ .line_comment = "--", .block_comment = true, .ignore_case = true, .keywords = &.{
+    "select", "from", "where", "and", "or", "not", "in", "is", "null", "as", "on", "join",
+    "left", "right", "inner", "outer", "full", "cross", "group", "by", "order", "having",
+    "limit", "offset", "insert", "into", "values", "update", "set", "delete", "create", "table",
+    "view", "index", "drop", "alter", "add", "column", "primary", "key", "foreign", "references",
+    "unique", "default", "distinct", "union", "all", "case", "when", "then", "else", "end",
+    "exists", "between", "like", "asc", "desc", "with", "returning", "begin", "commit",
+    "rollback", "transaction", "if", "true", "false", "integer", "int", "text", "varchar",
+    "boolean", "real", "blob", "date", "timestamp", "trigger", "constraint", "check",
+} };
+
+const php: Lang = .{ .line_comment = "//", .block_comment = true, .names = true, .keywords = &.{
+    "abstract", "and", "array", "as", "break", "case", "catch", "class", "clone", "const",
+    "continue", "declare", "default", "do", "echo", "else", "elseif", "empty", "enum",
+    "extends", "final", "finally", "fn", "for", "foreach", "function", "global", "if",
+    "implements", "include", "include_once", "instanceof", "interface", "isset", "list",
+    "match", "namespace", "new", "or", "print", "private", "protected", "public", "readonly",
+    "require", "require_once", "return", "static", "switch", "throw", "trait", "try", "unset",
+    "use", "var", "while", "yield", "true", "false", "null", "self", "parent", "this", "php",
+} };
+
+const dart: Lang = .{ .line_comment = "//", .block_comment = true, .triple = true, .names = true, .keywords = &.{
+    "abstract", "as", "assert", "async", "await", "break", "case", "catch", "class", "const",
+    "continue", "covariant", "default", "deferred", "do", "dynamic", "else", "enum", "export",
+    "extends", "extension", "external", "factory", "false", "final", "finally", "for",
+    "Function", "get", "hide", "if", "implements", "import", "in", "interface", "is", "late",
+    "library", "mixin", "new", "null", "on", "operator", "part", "required", "rethrow",
+    "return", "sealed", "set", "show", "static", "super", "switch", "sync", "this", "throw",
+    "true", "try", "typedef", "var", "void", "when", "while", "with", "yield",
+} };
+
+const diff: Lang = .{ .diff = true };
 const data: Lang = .{ .keys = true, .keywords = &.{ "true", "false", "null" } };
 const hash_data: Lang = .{ .line_comment = "#", .keys = true, .keywords = &.{ "true", "false", "null" } };
 const css: Lang = .{ .block_comment = true, .keys = true };
@@ -128,17 +170,88 @@ const by_ext = [_]struct { []const u8, *const Lang }{
     .{ "js", &js },         .{ "mjs", &js },         .{ "cjs", &js },         .{ "jsx", &js },
     .{ "ts", &js },         .{ "tsx", &js },         .{ "py", &python },      .{ "rs", &rust },
     .{ "go", &go },         .{ "swift", &swift },    .{ "sh", &shell },       .{ "bash", &shell },
-    .{ "zsh", &shell },     .{ "fish", &shell },     .{ "rb", &ruby },        .{ "lua", &lua },
+    .{ "zsh", &shell },     .{ "fish", &fish },      .{ "rb", &ruby },        .{ "lua", &lua },
     .{ "json", &data },     .{ "jsonl", &data },     .{ "ndjson", &data },    .{ "toml", &hash_data },
     .{ "yaml", &hash_data }, .{ "yml", &hash_data }, .{ "ini", &hash_data }, .{ "conf", &hash_data },
     .{ "css", &css },       .{ "md", &markdown },    .{ "markdown", &markdown }, .{ "html", &html },
     .{ "htm", &html },      .{ "xhtml", &html },     .{ "xml", &html },       .{ "svg", &html },
-    .{ "plist", &html },
+    .{ "plist", &html },    .{ "sql", &sql },        .{ "php", &php },        .{ "dart", &dart },
+    .{ "diff", &diff },     .{ "patch", &diff },     .{ "gitignore", &hash_data }, .{ "gitattributes", &hash_data },
+    .{ "env", &hash_data }, .{ "zshrc", &shell },    .{ "zshenv", &shell },   .{ "zprofile", &shell },
+    .{ "bashrc", &shell },  .{ "bash_profile", &shell }, .{ "profile", &shell },
 };
+
+/// The languages a user can pick by hand, by name. Several names share a
+/// family's table (C, C++ and Java all lex as C).
+pub const languages = [_]struct { name: []const u8, lang: *const Lang }{
+    .{ .name = "Plain Text", .lang = &plain },  .{ .name = "C", .lang = &c_like },
+    .{ .name = "C++", .lang = &c_like },        .{ .name = "C#", .lang = &c_like },
+    .{ .name = "CSS", .lang = &css },           .{ .name = "Dart", .lang = &dart },
+    .{ .name = "Diff", .lang = &diff },         .{ .name = "Fish", .lang = &fish },
+    .{ .name = "Go", .lang = &go },             .{ .name = "HTML", .lang = &html },
+    .{ .name = "INI", .lang = &hash_data },     .{ .name = "Java", .lang = &c_like },
+    .{ .name = "JavaScript", .lang = &js },     .{ .name = "JSON", .lang = &data },
+    .{ .name = "Kotlin", .lang = &c_like },     .{ .name = "Lua", .lang = &lua },
+    .{ .name = "Markdown", .lang = &markdown }, .{ .name = "Objective-C", .lang = &c_like },
+    .{ .name = "PHP", .lang = &php },           .{ .name = "Python", .lang = &python },
+    .{ .name = "Ruby", .lang = &ruby },         .{ .name = "Rust", .lang = &rust },
+    .{ .name = "Shell", .lang = &shell },       .{ .name = "SQL", .lang = &sql },
+    .{ .name = "Swift", .lang = &swift },       .{ .name = "TOML", .lang = &hash_data },
+    .{ .name = "TypeScript", .lang = &js },     .{ .name = "XML", .lang = &html },
+    .{ .name = "YAML", .lang = &hash_data },    .{ .name = "Zig", .lang = &zig },
+};
+
+/// The language picked by `name` from `languages`, in any case.
+pub fn langByName(name: []const u8) ?*const Lang {
+    for (languages) |l| if (std.ascii.eqlIgnoreCase(l.name, name)) return l.lang;
+    return null;
+}
+
+/// The first name in `languages` for `lang`'s family.
+pub fn nameOf(lang: *const Lang) []const u8 {
+    for (languages) |l| if (l.lang == lang) return l.name;
+    return "Plain Text";
+}
+
+/// The language a file's first line names: a `#!` interpreter (through
+/// `env` too, with versions like `python3.12` dropped) or `<?php`/`<?xml`.
+pub fn forHeader(first_line: []const u8) ?*const Lang {
+    if (std.mem.startsWith(u8, first_line, "<?php")) return &php;
+    if (std.mem.startsWith(u8, first_line, "<?xml")) return &html;
+    if (!std.mem.startsWith(u8, first_line, "#!")) return null;
+    var words = std.mem.tokenizeAny(u8, first_line[2..], " \t\r");
+    var prog = std.fs.path.basename(words.next() orelse return null);
+    if (std.mem.eql(u8, prog, "env")) {
+        while (words.next()) |w| {
+            if (w[0] == '-' or std.mem.indexOfScalar(u8, w, '=') != null) continue;
+            prog = std.fs.path.basename(w);
+            break;
+        } else return null;
+    }
+    var end = prog.len;
+    while (end > 0 and (std.ascii.isDigit(prog[end - 1]) or prog[end - 1] == '.')) end -= 1;
+    const name = prog[0..end];
+    const table = [_]struct { []const u8, *const Lang }{
+        .{ "sh", &shell },   .{ "bash", &shell }, .{ "zsh", &shell },  .{ "dash", &shell },
+        .{ "ksh", &shell },  .{ "fish", &fish },  .{ "python", &python }, .{ "node", &js },
+        .{ "deno", &js },    .{ "bun", &js },     .{ "ruby", &ruby },  .{ "lua", &lua },
+        .{ "php", &php },    .{ "dart", &dart },
+    };
+    for (table) |e| if (std.mem.eql(u8, e[0], name)) return e[1];
+    return null;
+}
+
+/// `forPath`, falling back to `forHeader` for files their name doesn't place.
+pub fn detect(path: []const u8, first_line: []const u8) *const Lang {
+    const by_path = forPath(path);
+    if (by_path != &plain) return by_path;
+    return forHeader(first_line) orelse &plain;
+}
 
 pub fn forPath(path: []const u8) *const Lang {
     const base = std.fs.path.basename(path);
     if (std.mem.eql(u8, base, "Makefile") or std.mem.eql(u8, base, "Dockerfile")) return &hash_data;
+    if (std.mem.startsWith(u8, base, ".env.")) return &hash_data;
     const dot = std.mem.lastIndexOfScalar(u8, base, '.') orelse return &plain;
     const ext = base[dot + 1 ..];
     for (by_ext) |e| if (std.mem.eql(u8, e[0], ext)) return e[1];
@@ -194,6 +307,10 @@ pub fn syncStates(gpa: std.mem.Allocator, lang: *const Lang, b: *Buffer, states:
 pub fn lexLine(lang: *const Lang, s: []const u8, state: State, out: ?[]Kind) State {
     if (lang.markdown) return lexMarkdown(s, state, out);
     if (lang.html) return lexHtml(s, state, out);
+    if (lang.diff) {
+        mark(out, 0, s.len, diffKind(s));
+        return .normal;
+    }
     var st = state;
     var i: usize = if (lang.keys and st == .normal) keyAt(lang, s, out) else 0;
     while (i < s.len) {
@@ -274,8 +391,24 @@ fn mark(out: ?[]Kind, from: usize, to: usize, kind: Kind) void {
 }
 
 fn isKeyword(lang: *const Lang, w: []const u8) bool {
-    for (lang.keywords) |k| if (std.mem.eql(u8, k, w)) return true;
+    for (lang.keywords) |k| if (if (lang.ignore_case) std.ascii.eqlIgnoreCase(k, w) else std.mem.eql(u8, k, w)) return true;
     return false;
+}
+
+/// A diff line's color: file headers as keywords, hunk headers as
+/// functions, added lines as strings, removed ones as numbers and
+/// `\ No newline` notes as comments.
+fn diffKind(s: []const u8) Kind {
+    const headers = [_][]const u8{ "+++ ", "--- ", "diff ", "index ", "new file", "deleted file", "similarity", "rename ", "old mode", "new mode" };
+    for (headers) |h| if (std.mem.startsWith(u8, s, h)) return .keyword;
+    if (std.mem.startsWith(u8, s, "@@")) return .function;
+    if (s.len == 0) return .text;
+    return switch (s[0]) {
+        '+' => .string,
+        '-' => .number,
+        '\\' => .comment,
+        else => .text,
+    };
 }
 
 /// Capitalized words are types and ALL_CAPS ones constants; a word right
@@ -501,6 +634,30 @@ test "rust lifetimes, go raw backslashes and css single quotes" {
 }
 
 const t = std.testing;
+
+test "new languages: sql keywords in any case, diff lines, names and headers" {
+    var k: [32]Kind = undefined;
+    _ = lexLine(&sql, "SELECT a -- x", .normal, &k);
+    try t.expectEqual(Kind.keyword, k[0]);
+    try t.expectEqual(Kind.comment, k[10]);
+    _ = lexLine(&diff, "--- a/x", .normal, &k);
+    try t.expectEqual(Kind.keyword, k[0]);
+    _ = lexLine(&diff, "-old", .normal, &k);
+    try t.expectEqual(Kind.number, k[1]);
+    _ = lexLine(&diff, "+new", .normal, &k);
+    try t.expectEqual(Kind.string, k[1]);
+    try t.expectEqual(&hash_data, forPath("/r/.gitignore"));
+    try t.expectEqual(&hash_data, forPath(".env.local"));
+    try t.expectEqual(&diff, forPath("a.patch"));
+    try t.expectEqual(&python, forHeader("#!/usr/bin/env python3.12").?);
+    try t.expectEqual(&js, forHeader("#!/usr/bin/env -S node --x").?);
+    try t.expectEqual(&shell, forHeader("#!/bin/bash -e").?);
+    try t.expectEqual(@as(?*const Lang, null), forHeader("#!/usr/bin/env"));
+    try t.expectEqual(&ruby, detect("bin/tool", "#!/usr/bin/env ruby"));
+    try t.expectEqual(&rust, detect("a.rs", "#!/bin/sh"));
+    try t.expectEqual(&sql, langByName("sql").?);
+    try t.expectEqualStrings("C", nameOf(&c_like));
+}
 
 test "block comments and template strings carry across lines" {
     var k: [32]Kind = undefined;
