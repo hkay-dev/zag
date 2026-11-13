@@ -798,6 +798,12 @@ const Slot = struct {
     /// Its name's width, springing to a new name's instead of jumping.
     wid: Spring = .{ .k = 420, .c = 34, .eps = 0.05 },
     sized: bool = false,
+    /// Its width as squeezed among the others, springing when the squeeze
+    /// or the active tab changes; at its own width it follows that at once.
+    fit: Spring = .{ .k = 420, .c = 34, .eps = 0.05 },
+    fitted: bool = false,
+    /// Its file is untitled, so its dot is the fainter draft dot.
+    draft: bool = false,
     /// How far it's drawn from where it lays out: it slides into a new
     /// place after the tabs reorder, and follows the mouse while dragged.
     shift: Spring = .{ .k = 420, .c = 30, .eps = 0.05 },
@@ -1069,7 +1075,7 @@ fn scenery(d: *const Doc, now: f64) bool {
     return d.ys.moving(now) or d.xs.moving(now) or d.band.moving(now) or d.band_a.moving(now) or now < d.focus_t0 + focus_time or d.focus_a.moving(now) or d.panel.moving(now) or d.lit.moving(now) or
         d.inked.moving(now) or
         d.gut.moving(now) or
-        d.prompt_t.moving(now) or d.pbar.moving(now) or now < d.shake_t0 + shake_time or now < d.card_shake_t0 + shake_time or d.hint.moving(now) or
+        d.prompt_t.moving(now) or d.pbar.moving(now) or now < d.shake_t0 + shake_time or now < d.card_shake_t0 + shake_time or now < d.ring_t0 + ring_pulse or d.hint.moving(now) or
         d.plus_t.moving(now) or !d.pick_s.settled() or (zen(d.win) < 0.999 and tabsMoving(d, now)) or
         (d.pick_live and (now < d.rows_t0 + row_lag * 5 + row_fade or now < d.pick_t0 + xfade_time)) or
         !d.pop.settled() or now < d.prev_t0 + fade_time or now < d.stag_t0 + stag_cap + fade_time or (d.flash_n > 0 and now >= d.flash_t0 + flash_hold and now < d.flash_t0 + flash_hold + flash_time) or
@@ -1166,24 +1172,49 @@ const Page = struct {
     locked: bool = false,
     /// The file didn't exist when it opened; the header says New until it's saved.
     new_file: bool = false,
+    /// A blank untitled file's number when its card has another: "Untitled 2".
+    num: u32 = 0,
+    num_name: [24]u8 = undefined,
+    num_len: usize = 0,
+    /// Named by hand from its tab, so its text doesn't rename it.
+    hand: bool = false,
 
     fn name(p: *const Page) []const u8 {
-        return if (p.path) |path| std.fs.path.basename(path) else if (p.title_len > 0) p.title[0..p.title_len] else "Untitled";
+        return if (p.path) |path| std.fs.path.basename(path) else if (p.title_len > 0) p.title[0..p.title_len] else if (p.num_len > 0) p.num_name[0..p.num_len] else "Untitled";
     }
 
-    /// Takes the name its text has now; true when it changed.
-    fn rename(p: *Page) bool {
+    /// An untitled file whose text names it differently now.
+    fn stale(p: *const Page) bool {
+        if (p.path != null or p.hand) return false;
+        if (nameRow(&p.ed) == null) return p.title_len > 0;
         var nb: [48]u8 = undefined;
-        const nm = untitledName(&p.ed, &nb);
-        if (std.mem.eql(u8, nm, p.name())) return false;
+        return !std.mem.eql(u8, untitledName(&p.ed, &nb), p.name());
+    }
+
+    /// Takes the name its text has now; true when it changed. With no
+    /// words it goes back to "Untitled", or its number.
+    fn rename(p: *Page) bool {
+        if (!p.stale()) return false;
+        var nb: [48]u8 = undefined;
+        const nm = if (nameRow(&p.ed) == null) "" else untitledName(&p.ed, &nb);
         @memcpy(p.title[0..nm.len], nm);
         p.title_len = nm.len;
         return true;
     }
 
+    fn number(p: *Page, n: u32) void {
+        p.num = n;
+        p.num_len = if (std.fmt.bufPrint(&p.num_name, "Untitled {d}", .{n})) |s| s.len else |_| 0;
+    }
+
     /// Untitled files keep drafts, so only named files show an unsaved dot.
     fn edited(p: *const Page) bool {
         return p.path != null and p.ed.buf.dirty();
+    }
+
+    /// An untitled file with text, which its tab marks with a faint draft dot.
+    fn drafting(p: *const Page) bool {
+        return p.path == null and p.ed.text().len > 0;
     }
 
     /// Closing an untitled file also discards its draft.
@@ -1248,6 +1279,33 @@ const Doc = struct {
     plus_t: Tween = .{ .dur = fade_time },
     /// A click on the +: its fill shows at once and fades after the release.
     plus_down: Tween = .{ .dur = press_time },
+    /// The chevron after the + while the tabs overflow, whose menu lists
+    /// them all: its middle in the pane, the mouse on it, its hover
+    /// highlight, and how far it's shown.
+    chev_x: f64 = -100,
+    chev_on: bool = false,
+    chev_t: Tween = .{ .dur = fade_time },
+    chev_a: Tween = .{ .dur = tab_time },
+    /// The squeezed tabs' width as last drawn, and the width a click on a ×
+    /// holds until the mouse leaves the tab row, so the next × slides under it.
+    cap: f64 = 1e9,
+    held_cap: ?f64 = null,
+    /// Where the tab row starts and stops in the pane, and how far its tabs
+    /// run past the room they have.
+    tabs_l: f64 = 0,
+    tabs_r: f64 = 1e9,
+    tab_over: f64 = 0,
+    /// Where a wheel scrolled the tab row to, kept while tab `tab_user_id` stays on show.
+    tab_user: ?f64 = null,
+    tab_user_id: u32 = 0,
+    /// A tab pulsing because ⌘T found it already blank, and since when.
+    pulse_id: u32 = 0,
+    pulse_t0: f64 = -1,
+    /// When a dropped tab last landed in the card, which pulses its ring.
+    ring_t0: f64 = -1,
+    /// The text the card showed before a tab switch, dissolving away over
+    /// the new tab's text. Retained: see `dropDissolve`.
+    dissolve: Id = null,
     /// The window this card belongs to.
     win: *Win = undefined,
     /// The card's pane in the view: where it is now, its size now, and the
@@ -1499,6 +1557,13 @@ const Win = struct {
     grab_hit: u8 = 0,
     /// Until when the dragged gap eases instead of tracking the mouse.
     grab_ease: f64 = 0,
+    /// How far from the gap's middle the mouse took hold of it, so the gap
+    /// doesn't jump to center under the pointer.
+    grab_off: f64 = 0,
+    /// The split whose gap just snapped to 1/2, 1/3 or 2/3, and when, for
+    /// the guide that flashes along it.
+    guide: ?*Node = null,
+    guide_t0: f64 = -1,
     /// Scroll the sidebar to the focused card's file on the next draw.
     side_find: bool = false,
     /// The open folders pinned under the folder's name, and where each drew.
@@ -1614,6 +1679,10 @@ const Fly = struct {
     card: ?*Doc = null,
     id: u32 = 0,
     row: ?usize = null,
+    /// Going back where it came from, it rides the tabs' spring, 0 to 1,
+    /// instead of easing over `fly_time`.
+    spring: bool = false,
+    sp: Spring = .{ .k = 420, .c = 30 },
 };
 
 const fly_time = 0.3;
@@ -1626,6 +1695,15 @@ const grab_stretch = 24.0;
 const snap_reach = 6.0;
 /// How long the gap eases after entering or leaving a snap point.
 const snap_ease = 0.15;
+/// How long a snapped gap's guide shows.
+const guide_time = 0.45;
+/// A tab that ⌘T found blank pulses this long, and so does a card's ring
+/// when a dropped tab lands in it.
+const pulse_time = 0.5;
+const ring_pulse = 0.4;
+/// A drop zone holds on this many points past its edge, so a pointer on
+/// the border doesn't flicker between zones.
+const zone_slack = 6.0;
 
 /// Where a dragged tab lands: among a card's tabs, on the card itself, or
 /// in a new card split off one of its edges.
@@ -1660,7 +1738,9 @@ const TabDrag = struct {
 };
 
 var wins: std.ArrayList(*Win) = .empty;
-var ghost_shade: Id = null;
+/// The dragged copy's shadow, light and dark: darker on dark cards, where a
+/// faint one doesn't show.
+var ghost_shades: [2]Id = .{ null, null };
 
 /// The cards' layout: a card, or a split of two, side by side or one above
 /// the other, with the first taking `share` of the room. A new card grows in
@@ -1675,6 +1755,8 @@ const Node = struct {
     going: ?u1 = null,
     /// Where it laid out last, for grabbing the gap between its kids.
     r: Rect = .{},
+    /// Its share before Maximize Card took it, to go back to.
+    held: ?f64 = null,
 };
 
 /// A card keeps at least this much room when splitting or dragging a gap.
@@ -1955,22 +2037,125 @@ fn showTab(d: *Doc, j: usize) void {
     swapIn(d, j);
 }
 
+/// `showTab` for a switch the user asked for (a click, ⌃Tab, ⌘1): the text
+/// on show dissolves into the new tab's, which shows at full strength under it.
+fn switchTab(d: *Doc, j: usize) void {
+    if (j == d.at) return;
+    const crossed = dissolveFrom(d);
+    showTab(d, j);
+    if (crossed) d.load.snap(1);
+}
+
+/// Lays a picture of card `d`'s text as it shows now over the card, and
+/// fades it out: what draws under it next shows through. False when the
+/// card isn't on screen to take a picture of.
+fn dissolveFrom(d: *Doc) bool {
+    const w = d.win;
+    if (restoring or d.closing or !d.slots_seen or !msg(bool, w.window, "isVisible", .{})) return false;
+    const r: Rect = .{ .x = d.org.x + gap, .y = d.org.y + top_h, .w = @max(d.size.x - 2 * gap, 0), .h = @max(bottom(d) - top_h, 0) };
+    if (r.w < 1 or r.h < 1) return false;
+    const rep = msg(Id, w.view, "bitmapImageRepForCachingDisplayInRect:", .{r});
+    if (rep == null) return false;
+    msg(void, w.view, "cacheDisplayInRect:toBitmapImageRep:", .{ r, rep });
+    const img = msg(Id, rep, "CGImage", .{});
+    if (img == null) return false;
+    dropDissolve(d);
+    const layer = msg(Id, objc.class("CALayer"), "layer", .{});
+    const t = objc.class("CATransaction");
+    msg(void, t, "begin", .{});
+    msg(void, t, "setDisableActions:", .{true});
+    msg(void, layer, "setFrame:", .{r});
+    msg(void, layer, "setContents:", .{img});
+    msg(void, layer, "setOpacity:", .{@as(f32, 0)});
+    msg(void, msg(Id, w.view, "layer", .{}), "insertSublayer:below:", .{ layer, d.caret });
+    msg(void, t, "commit", .{});
+    const num = objc.class("NSNumber");
+    const a = msg(Id, objc.class("CABasicAnimation"), "animationWithKeyPath:", .{objc.str("opacity")});
+    msg(void, a, "setFromValue:", .{msg(Id, num, "numberWithDouble:", .{@as(f64, 1)})});
+    msg(void, a, "setToValue:", .{msg(Id, num, "numberWithDouble:", .{@as(f64, 0)})});
+    msg(void, a, "setDuration:", .{@as(f64, fade_time)});
+    msg(void, a, "setTimingFunction:", .{msg(Id, objc.class("CAMediaTimingFunction"), "functionWithName:", .{objc.str("easeInEaseOut")})});
+    msg(void, layer, "addAnimation:forKey:", .{ a, objc.str("fade") });
+    d.dissolve = msg(Id, layer, "retain", .{});
+    // `d.caret` stands in for the card: `later` needs a per-card object to cancel by.
+    objc.later(w.view, "endDissolve:", d.caret, fade_time + 0.05);
+    return true;
+}
+
+fn dropDissolve(d: *Doc) void {
+    const l = d.dissolve orelse return;
+    d.dissolve = null;
+    msg(void, l, "removeFromSuperlayer", .{});
+    msg(void, l, "release", .{});
+}
+
+/// A dissolve is over: its picture goes.
+fn endDissolve(_: Id, _: Sel, caret: Id) callconv(.c) void {
+    for (docs.items) |d| if (d.caret == caret) dropDissolve(d);
+}
+
 /// ⌃Tab and ⌃⇧Tab: the next or previous tab, around the ends.
 pub fn stepTab(d: *Doc, by: isize) void {
     const n: isize = @intCast(tabCount(d));
-    showTab(d, @intCast(@mod(@as(isize, @intCast(d.at)) + by, n)));
+    switchTab(d, @intCast(@mod(@as(isize, @intCast(d.at)) + by, n)));
 }
 
-/// ⌘T: an untitled file in a new tab right of the one on show.
+/// ⌘1 to ⌘8 show that tab, when there is one; ⌘9 the last.
+fn jumpTab(d: *Doc, i: usize) void {
+    const n = tabCount(d);
+    if (i == 8) return switchTab(d, n - 1);
+    if (i < n) switchTab(d, i);
+}
+
+/// ⌘T: an untitled file in a new tab right of the one on show, numbered
+/// when the card already has a blank one. When the file on show is blank
+/// already its tab pulses instead.
 fn newTab(d: *Doc) void {
-    if (isBlank(d)) return;
-    putTab(d, blankPage() orelse return, d.at + 1);
+    if (isBlank(d)) {
+        d.pulse_id = d.file.id;
+        d.pulse_t0 = CACurrentMediaTime();
+        return refresh(d);
+    }
+    var pg = blankPage() orelse return;
+    var top: u32 = 0;
+    var blank = false;
+    for (0..tabCount(d)) |j| {
+        const p = tabPage(d, j);
+        if (p.path != null or p.title_len > 0 or p.hand) continue;
+        blank = true;
+        top = @max(top, @max(p.num, 1));
+    }
+    if (blank) pg.number(top + 1);
+    putTab(d, pg, d.at + 1);
+}
+
+/// Files whose tabs closed, the newest last, for Reopen Closed Tab.
+var closed: std.ArrayList([:0]u8) = .empty;
+const max_closed = 20;
+
+fn noteClosed(p: *const Page) void {
+    const path = p.path orelse return;
+    const own = gpa.dupeSentinel(u8, path, 0) catch return;
+    if (closed.items.len >= max_closed) gpa.free(closed.orderedRemove(0));
+    closed.append(gpa, own) catch gpa.free(own);
+}
+
+/// File > Reopen Closed Tab: the last closed file that's still on disk
+/// opens again in the card, or comes forward where a card has it.
+fn reopenTab(d: *Doc) void {
+    while (closed.pop()) |p| {
+        defer gpa.free(p);
+        if (!files.exists(p)) continue;
+        return open(p, d);
+    }
+    d.note = "no closed tabs";
 }
 
 /// Closes tab `j`, asking first when it has unsaved changes. A card's last
 /// tab folds the card away, or closes the window when it's the only card.
 /// The tab to the right takes the active one's place, or the one to the
-/// left at the end.
+/// left at the end. A tab in the background asks from where it is: the tab
+/// on show stays on show, and the one asked about is outlined.
 fn closeTab(d: *Doc, at: usize) void {
     if (tabCount(d) == 1) {
         // The card next to it may still be folding away: finish that first,
@@ -1978,27 +2163,61 @@ fn closeTab(d: *Doc, at: usize) void {
         endSiblingFold(d);
         if (d.win.cards.pane != null) return msg(void, d.win.window, "performClose:", .{@as(Id, null)});
         if (d.file.loses() and !keepOrDrop(d)) return;
+        noteClosed(&d.file);
         return foldCard(d);
     }
     var j = at;
     if (tabPage(d, j).loses()) {
-        showTab(d, j);
-        if (!keepOrDrop(d)) return;
-        // A Save As can close tabs left of it, so take its place after saving.
-        j = d.at;
+        if (j == d.at) {
+            if (!keepOrDrop(d)) return;
+            // A Save As can close tabs left of it, so take its place after saving.
+            j = d.at;
+        } else {
+            const keep = d.file.id;
+            const id = tabPage(d, j).id;
+            switch (askSaveTab(d, j)) {
+                1000 => {
+                    showTab(d, j);
+                    if (d.at != j or !save(d, false)) return;
+                    showTab(d, tabIndex(d, keep) orelse d.at);
+                },
+                1001 => {},
+                else => return,
+            }
+            j = tabIndex(d, id) orelse return;
+        }
         if (tabCount(d) == 1) return closeTab(d, j);
     }
     var pg = takeTab(d, j) orelse return;
+    noteClosed(&pg);
     pg.deinit();
 }
 
 /// Asks whether to save the file on show before it goes. False to keep it.
 fn keepOrDrop(d: *Doc) bool {
-    return switch (askSave(d, 1)) {
+    return switch (askSave(d, d.file.name(), 1)) {
         1000 => save(d, false),
         1001 => true,
         else => false,
     };
+}
+
+/// Asks whether to save card `d`'s tab `j`, which isn't on show, with that
+/// tab outlined while the question is up.
+fn askSaveTab(d: *Doc, j: usize) isize {
+    const w = d.win;
+    const pg = tabPage(d, j);
+    w.menu_row = null;
+    w.menu_card = d;
+    w.menu_tab = pg.id;
+    w.menu_a.snap(0);
+    w.menu_a.aim(1, CACurrentMediaTime());
+    redrawMenuMark(w);
+    defer {
+        w.menu_a.aim(0, CACurrentMediaTime());
+        redrawMenuMark(w);
+    }
+    return askSave(d, pg.name(), 1);
 }
 
 /// Drops the header's lines, and when `d` is its window's focused card,
@@ -2035,9 +2254,10 @@ pub fn keyDoc() ?*Doc {
 /// others to leave behind, else it starts with quick open.
 fn split(d: *Doc, down: bool) void {
     const e = splitOff(d, down, false, false) orelse {
+        // No room: the card shakes and the trackpad taps, without a beep.
         d.card_shake_t0 = CACurrentMediaTime();
-        refresh(d);
-        return msg(void, objc.class("NSSound"), "beep", .{});
+        haptic(.level);
+        return refresh(d);
     };
     if (tabCount(d) > 1) {
         putTab(e, takeTab(d, d.at).?, 0);
@@ -2241,6 +2461,7 @@ fn dropFolded(w: *Win, n: *Node) void {
         };
         gpa.destroy(keep);
         w.grab = null;
+        w.guide = null;
         msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
         return dropFolded(w, n);
     };
@@ -2256,6 +2477,7 @@ fn freeNodes(n: *Node) void {
 /// Lets go of a card that's out of its window's layout, or whose window closed.
 fn closePane(d: *Doc) void {
     rememberPlace(&d.file);
+    dropDissolve(d);
     msg(void, d.caret, "removeFromSuperlayer", .{});
     access.drop(d);
     if (std.mem.indexOfScalar(*Doc, docs.items, d)) |i| _ = docs.orderedRemove(i);
@@ -2284,7 +2506,12 @@ fn inPane(d: *const Doc, p: Point) Point {
 
 /// The gap between two cards, where it splits `n`, in the view.
 fn gapRect(n: *const Node) Rect {
-    const b = divide(n.r, n.share.x, n.down)[1];
+    return gapRectAt(n, n.share.x);
+}
+
+/// The gap of split `n` at share `s`, in the view.
+fn gapRectAt(n: *const Node, s: f64) Rect {
+    const b = divide(n.r, s, n.down)[1];
     if (n.down) return .{ .x = n.r.x + gap, .y = b.y, .w = n.r.w - 2 * gap, .h = gap };
     return .{ .x = b.x, .y = n.r.y + gap, .w = gap, .h = n.r.h - 2 * gap };
 }
@@ -2308,7 +2535,7 @@ fn gapLimits(n: *const Node) struct { len: f64, lo: f64 } {
 fn dragGap(w: *Win, n: *Node, p: Point) void {
     const lim = gapLimits(n);
     const len = lim.len;
-    var at = (if (n.down) p.y - n.r.y else p.x - n.r.x) - 1.5 * gap;
+    var at = (if (n.down) p.y - n.r.y else p.x - n.r.x) - 1.5 * gap - w.grab_off;
     const lo = lim.lo * len;
     const hi = len - lo;
     // Past a limit the gap stretches with resistance; near 1/2, 1/3 or
@@ -2329,6 +2556,11 @@ fn dragGap(w: *Win, n: *Node, p: Point) void {
     }
     if (hit != 0 and hit != w.grab_hit) haptic(.alignment);
     const now = CACurrentMediaTime();
+    // Arriving on 1/2, 1/3 or 2/3 flashes a faint guide along the gap.
+    if (hit >= 3 and hit != w.grab_hit) {
+        w.guide = n;
+        w.guide_t0 = now;
+    }
     // The share eases into and out of a snap point, and tracks the mouse 1:1 otherwise.
     if (hit != w.grab_hit and (hit >= 3 or w.grab_hit >= 3)) w.grab_ease = now + snap_ease;
     w.grab_hit = hit;
@@ -2339,17 +2571,24 @@ fn dragGap(w: *Win, n: *Node, p: Point) void {
     msg(void, w.view, "setNeedsDisplay:", .{true});
 }
 
-/// Lets go of a gap dragged past its limit: the share springs back.
+/// Lets go of a gap dragged past its limit: the share springs back, and
+/// the trackpad taps.
 fn releaseGap(n: *Node, now: f64) void {
     const lim = gapLimits(n);
-    n.share.aim(std.math.clamp(n.share.to, lim.lo, 1 - lim.lo), now);
+    const to = std.math.clamp(n.share.to, lim.lo, 1 - lim.lo);
+    if (to != n.share.to) haptic(.level);
+    n.share.aim(to, now);
 }
 
 /// The gaps' cursors: left-right between cards side by side, up-down
-/// between cards one above the other.
+/// between cards one above the other. Each reaches the same few points
+/// either side as `gapAt`, where the gap is headed.
 fn gapCursors(view: Id, n: *const Node) void {
     if (n.pane != null) return;
-    if (n.going == null) msg(void, view, "addCursorRect:cursor:", .{ gapRect(n), resizeCursor(n.down) });
+    if (n.going == null) {
+        const g = gapRectAt(n, n.share.to);
+        msg(void, view, "addCursorRect:cursor:", .{ Rect{ .x = g.x - 3, .y = g.y - 3, .w = g.w + 6, .h = g.h + 6 }, resizeCursor(n.down) });
+    }
     gapCursors(view, n.kids[0]);
     gapCursors(view, n.kids[1]);
 }
@@ -2375,6 +2614,106 @@ fn stepCard(d: *Doc, by: isize) void {
     const i = std.mem.indexOfScalar(*Doc, list[0..n], d) orelse return;
     const ni: isize = @intCast(n);
     focus(list[@intCast(@mod(@as(isize, @intCast(i)) + by, ni))]);
+}
+
+/// ⌥⌘ and an arrow: typing moves to the nearest card that way, the one
+/// most in line with this one first.
+fn focusToward(d: *Doc, dir: Zone) void {
+    var list: [64]*Doc = undefined;
+    const n = listPanes(d.win.cards, &list, 0);
+    const cx = d.org.x + d.size.x / 2;
+    const cy = d.org.y + d.size.y / 2;
+    var best: ?*Doc = null;
+    var score = std.math.inf(f64);
+    for (list[0..n]) |o| if (o != d) {
+        const dx = o.org.x + o.size.x / 2 - cx;
+        const dy = o.org.y + o.size.y / 2 - cy;
+        const v: [2]f64 = switch (dir) {
+            .left => .{ -dx, dy },
+            .right => .{ dx, dy },
+            .top => .{ -dy, dx },
+            .bottom => .{ dy, dx },
+            .tabs, .whole => return,
+        };
+        if (v[0] < 1) continue;
+        const sc = v[0] + 2 * @abs(v[1]);
+        if (sc < score) {
+            score = sc;
+            best = o;
+        }
+    };
+    if (best) |o| focus(o);
+}
+
+/// Close Card: the card and all its tabs, asking first about unsaved ones.
+/// A window's only card closes the window.
+fn closeCard(d: *Doc) void {
+    endSiblingFold(d);
+    if (d.win.cards.pane != null) return msg(void, d.win.window, "performClose:", .{@as(Id, null)});
+    var n: usize = 0;
+    var one: usize = 0;
+    for (0..tabCount(d)) |j| if (tabPage(d, j).loses()) {
+        n += 1;
+        one = j;
+    };
+    if (n > 0) {
+        if (n == 1) showTab(d, one);
+        switch (askSave(d, d.file.name(), n)) {
+            1000 => if (!saveAll(d, false)) return,
+            1001 => {},
+            else => return,
+        }
+    }
+    for (0..tabCount(d)) |j| noteClosed(tabPage(d, j));
+    foldCard(d);
+}
+
+/// Maximize or Restore Card: the card takes its window's room while the
+/// others shrink away, and again the splits spring back as they were.
+fn maximizeCard(d: *Doc) void {
+    const w = d.win;
+    if (w.cards.pane != null) return;
+    const now = CACurrentMediaTime();
+    if (!restoreShares(w.cards, now)) {
+        var n = nodeOf(w.cards, d) orelse return;
+        while (n.up) |up| {
+            up.held = up.share.to;
+            up.share.aim(if (up.kids[0] == n) 1 else 0, now);
+            n = up;
+        }
+    }
+    msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
+    msg(void, w.view, "setNeedsDisplay:", .{true});
+}
+
+/// Springs every split that Maximize Card took back to its share; false
+/// when none was taken.
+fn restoreShares(n: *Node, now: f64) bool {
+    if (n.pane != null) return false;
+    var any = false;
+    if (n.held) |s| {
+        n.share.aim(s, now);
+        n.held = null;
+        any = true;
+    }
+    const a = restoreShares(n.kids[0], now);
+    const b = restoreShares(n.kids[1], now);
+    return any or a or b;
+}
+
+/// Move Tab to Next or Previous Card: the tab on show joins that card's
+/// tabs, after its active one.
+fn tabToCard(d: *Doc, by: isize) void {
+    var list: [64]*Doc = undefined;
+    const n = listPanes(d.win.cards, &list, 0);
+    if (n < 2) {
+        d.note = "no other card";
+        return;
+    }
+    const i = std.mem.indexOfScalar(*Doc, list[0..n], d) orelse return;
+    const ni: isize = @intCast(n);
+    const to = list[@intCast(@mod(@as(isize, @intCast(i)) + by, ni))];
+    moveTab(d, d.at, .{ .card = to, .zone = .tabs, .k = to.at + 1 });
 }
 
 fn listPanes(n: *const Node, out: []*Doc, at: usize) usize {
@@ -2616,11 +2955,11 @@ fn osError() []const u8 {
     return if (e == 0) "Unknown error" else std.mem.span(strerror(e));
 }
 
-fn askSave(d: *Doc, n: usize) isize {
+fn askSave(d: *Doc, name: []const u8, n: usize) isize {
     front(d);
     var buf: [300]u8 = undefined;
     const title = if (n == 1)
-        std.fmt.bufPrint(&buf, "Save changes to {s}?", .{d.file.name()}) catch "Save changes?"
+        std.fmt.bufPrint(&buf, "Save changes to {s}?", .{name}) catch "Save changes?"
     else
         std.fmt.bufPrint(&buf, "Save changes to {d} files?", .{n}) catch "Save changes?";
     return askAlert(title, "Your changes are lost if you don't save them.", &.{ if (n == 1) "Save" else "Save All", "Don't Save", "Cancel" });
@@ -2643,7 +2982,7 @@ fn settle(w: *Win, quit: bool) bool {
     // One file: show it so the question names it. More: ask from the focused card.
     const ask = if (n == 1) one.?.d else w.focus;
     if (n == 1) showTab(ask, one.?.j);
-    return switch (askSave(ask, n)) {
+    return switch (askSave(ask, ask.file.name(), n)) {
         1000 => for (docs.items) |d| {
             if (d.win == w and !d.closing and !saveAll(d, quit)) break false;
         } else true,
@@ -4035,10 +4374,18 @@ fn keysOf(a: std.mem.Allocator, it: Id) ![]const u8 {
     if (mods & objc.opt_key != 0) try out.appendSlice(a, "⌥");
     if (mods & objc.shift_key != 0) try out.appendSlice(a, "⇧");
     if (mods & objc.cmd_key != 0) try out.appendSlice(a, "⌘");
-    if (std.mem.eql(u8, key, "\t") or std.mem.eql(u8, key, "\x19")) {
-        try out.appendSlice(a, "⇥");
+    if (keyGlyph(key)) |g| {
+        try out.appendSlice(a, g);
     } else for (key) |ch| try out.append(a, std.ascii.toUpper(ch));
     return out.items;
+}
+
+/// How a menu shows a key that isn't a letter: Tab (and ⇧Tab's back tab),
+/// Return and the arrows.
+fn keyGlyph(key: []const u8) ?[]const u8 {
+    const glyphs = [_][2][]const u8{ .{ "\t", "⇥" }, .{ "\x19", "⇥" }, .{ "\r", "↩" }, .{ "\u{F700}", "↑" }, .{ "\u{F701}", "↓" }, .{ "\u{F702}", "←" }, .{ "\u{F703}", "→" } };
+    for (glyphs) |g| if (std.mem.eql(u8, key, g[0])) return g[1];
+    return null;
 }
 
 /// Runs a palette pick after the event that chose it, so a command that
@@ -4448,8 +4795,7 @@ fn untitledChanged(d: *Doc) void {
     // An untitled file is renamed after its first line once typing
     // pauses, or at once when the caret leaves that line, as Return
     // does, so its tab doesn't change width with each letter.
-    var nb: [48]u8 = undefined;
-    if (!std.mem.eql(u8, untitledName(&d.file.ed, &nb), d.file.name())) {
+    if (d.file.stale()) {
         const row = nameRow(&d.file.ed);
         if (row != null and row.? != d.file.ed.buf.lineOf(d.file.ed.cur)) retitle(d) else objc.later(d.win.view, "retitle:", null, 0.6);
     }
@@ -4568,7 +4914,7 @@ pub const ax = struct {
     pub fn pressTab(d: *Doc, id: u32) bool {
         const j = tabIndex(d, id) orelse return false;
         focus(d);
-        showTab(d, j);
+        switchTab(d, j);
         return true;
     }
 
@@ -6108,6 +6454,18 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
         busy = busy or d.busy;
         gliding = gliding or d.cx.moving(now) or d.cy.moving(now);
     };
+    // A gap that just snapped flashes a faint guide down its middle.
+    if (w.guide) |n| {
+        const t = (now - w.guide_t0) / guide_time;
+        if (t >= 0 and t < 1 and n.pane == null) {
+            const g = gapRect(n);
+            const ga = @as(f64, if (contrast) 0.8 else 0.5) * (1 - t) * (1 - t);
+            if (n.down) {
+                pill(ctx, th.caret, ga, g.x + 16, g.y + g.h / 2 - 1, @max(g.w - 32, 0), 2, 1);
+            } else pill(ctx, th.caret, ga, g.x + g.w / 2 - 1, g.y + 16, 2, @max(g.h - 32, 0), 1);
+            busy = true;
+        } else w.guide = null;
+    }
     // The sidebar, and the buttons by the traffic lights, each with a soft
     // highlight under the mouse.
     const hy = headY();
@@ -6149,7 +6507,7 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
         pill(ctx, th.caret, 0.06 * drop_a, dx, gap, r.w - dx - gap, r.h - 2 * gap, card_radius);
         ring(ctx, th.caret, 0.6 * drop_a, dx, gap, r.w - dx - gap, r.h - 2 * gap, card_radius);
     }
-    drawDrag(w, ctx, th, now);
+    drawDrag(w, ctx, th, dark, now);
     const toasting = drawToast(w, ctx, th, r, now);
     busy = busy or w.drop_t.moving(now) or w.tog_dim.moving(now) or toasting;
     const side_busy = w.side_t.moving(now) or foldsBusy(now) or !w.sel.s.settled() or w.sel.a.moving(now) or w.hot_t[1].moving(now) or !w.hov.s.settled() or w.hov.a.moving(now)
@@ -7013,6 +7371,12 @@ fn drawRing(d: *Doc, ctx: Id, th: *const Theme, dark: bool, card: Rect, zt: f64,
         }
         const lit = d.lit.at(now);
         if (lit > 0.01) ring(ctx, th.caret, 0.55 * lit * calm, card.x, card.y, card.w, card.h, card_radius);
+        // A tab dropped into the card pulses its ring once, a little out from the card.
+        const pt = (now - d.ring_t0) / ring_pulse;
+        if (pt >= 0 and pt < 1) {
+            const e = @sin(std.math.pi * pt);
+            ring(ctx, th.caret, 0.7 * e * calm, card.x - 2 * e, card.y - 2 * e, card.w + 4 * e, card.h + 4 * e, card_radius + 2 * e);
+        }
     }
 }
 
@@ -7052,6 +7416,11 @@ fn onTabPlus(d: *const Doc, p: Point) bool {
     return d.tabbed.to == 1 and !offHeadRow(p, 14) and @abs(p.x - d.plus_x) <= 14;
 }
 
+/// Whether `p`, in the card's pane, is on the chevron of the overflowing tabs' menu.
+fn onTabChev(d: *const Doc, p: Point) bool {
+    return d.tabbed.to == 1 and d.chev_x > 0 and !offHeadRow(p, 14) and @abs(p.x - d.chev_x) <= 13;
+}
+
 /// Brings the header's slots in line with the window's tabs: a new tab
 /// pops in right after the tab before it, and a closed one folds away.
 fn syncSlots(d: *Doc, now: f64) void {
@@ -7085,12 +7454,12 @@ fn slotOf(d: *const Doc, id: u32) ?usize {
     return null;
 }
 
-/// True while a tab pops, folds, fades, resizes or the highlight springs,
-/// or the + after the tabs fades from a click.
+/// True while a tab pops, folds, fades, resizes, pulses or the highlight
+/// springs, or the + after the tabs fades from a click.
 fn tabsMoving(d: *const Doc, now: f64) bool {
     if (d.tabbed.moving(now) or d.tab_x.moving(now) or !d.hl[0].settled() or !d.hl[1].settled()) return true;
-    if (!d.opening.settled() or d.plus_down.moving(now)) return true;
-    for (d.slots.items) |s| if (s.gone or !s.grow.settled() or !s.shift.settled() or s.hov.moving(now) or s.xhov.moving(now) or !s.dot.settled() or !s.wid.settled()) return true;
+    if (!d.opening.settled() or d.plus_down.moving(now) or d.chev_a.moving(now) or d.chev_t.moving(now) or now < d.pulse_t0 + pulse_time) return true;
+    for (d.slots.items) |s| if (s.gone or !s.grow.settled() or !s.shift.settled() or s.hov.moving(now) or s.xhov.moving(now) or !s.dot.settled() or !s.wid.settled() or !s.fit.settled()) return true;
     return false;
 }
 
@@ -7105,6 +7474,13 @@ const tab_space = 4.0;
 /// (`Slot.wid`), so a renamed tab eases to its new width.
 fn tabWidth(s: *const Slot, a: f64) f64 {
     return 2 * tab_pad * a + tileSize() + 7 + s.wid.x + tab_shut * a + 14 * (1 - a) * std.math.clamp(s.dot.x, 0, 1);
+}
+
+/// Tab `s`'s cap when the others' is `cap`: the active tab keeps up to half
+/// the row, except while a click on a × holds the widths.
+fn tabCap(d: *const Doc, s: *const Slot, cap: f64, room: f64) f64 {
+    if (s.gone or s.id != d.file.id or d.held_cap != null) return cap;
+    return @max(cap, room / 2);
 }
 
 /// The header's left side, from `x0` to `x1`. With one tab it's the file's
@@ -7135,15 +7511,21 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
         if (s.sized) s.wid.aim(nw, now) else s.wid.snap(nw);
         s.sized = true;
         _ = s.wid.step(now);
-        const dirty = !s.gone and if (tabIndex(d, s.id)) |j| tabPage(d, j).edited() else false;
+        const pg: ?*Page = if (s.gone) null else if (tabIndex(d, s.id)) |j| tabPage(d, j) else null;
+        if (pg) |p| s.draft = p.path == null;
+        const dirty = if (pg) |p| p.edited() or p.drafting() else false;
         s.dot.aim(if (dirty) 1 else 0, now);
         _ = s.dot.step(now);
         _ = s.grow.step(now);
     }
 
+    // The + and, while the tabs overflow, the chevron of their menu stay
+    // pinned at the row's right end, and the tabs stop short of them.
+    const chev = std.math.clamp(d.chev_a.at(now), 0, 1);
+    const room = x1 - x0 - 28 * a - 26 * chev;
     // Squeeze the tabs to a common cap when they don't all fit, down to
-    // enough for the tile and a few letters.
-    const room = x1 - x0 - 28 * a;
+    // enough for the tile and a few letters. The active tab keeps its own
+    // width, up to half the row, before the others give up theirs.
     var cap: f64 = 1e9;
     if (n > 1) {
         var lo: f64 = 2 * pad + ts + tab_shut * a + 36;
@@ -7153,12 +7535,15 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
             var sum: f64 = 0;
             for (d.slots.items) |*s| {
                 const g = std.math.clamp(s.grow.x, 0, 1);
-                sum += (@min(tabWidth(s, a), mid) + tab_space * a) * g;
+                sum += (@min(tabWidth(s, a), tabCap(d, s, mid, room)) + tab_space * a) * g;
             }
             if (sum <= room) lo = mid else hi = mid;
         }
         cap = lo;
     }
+    // A click on a × holds the widths until the mouse leaves the row.
+    if (d.held_cap) |hc| cap = hc;
+    d.cap = cap;
 
     // Where each tab sits, popping ones at their bounce, with a gap opening
     // for a tab dragged over the row.
@@ -7174,7 +7559,12 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
         }
         const g = @max(s.grow.x, 0);
         s.x = x;
-        s.w = @min(tabWidth(s, a), cap) * g;
+        // A squeezed tab springs to its new width; one at its own width follows that at once.
+        const full = tabWidth(s, a);
+        const to = @min(full, tabCap(d, s, cap, room));
+        if (!s.fitted or (to >= full and s.fit.x >= full - 0.5)) s.fit.snap(to) else s.fit.aim(to, now);
+        s.fitted = true;
+        s.w = s.fit.step(now) * g;
         x += s.w + tab_space * a * @min(g, 1);
     }
     if (live <= d.open_at) x += d.open_px;
@@ -7198,7 +7588,24 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
         if (!s.gone and s.id == d.file.id) act = .{ s.x, s.w };
     }
     const span = end + off - (x0 - pad);
-    d.tab_x.aim(std.math.clamp(act[0] + off - (x0 - pad) + act[1] / 2 - room / 2, 0, @max(span - room, 0)), now);
+    const most = @max(span - room, 0);
+    d.tab_over = most;
+    d.tabs_l = x0 - pad;
+    d.tabs_r = x0 - pad + room;
+    // Tabs that run past the row even squeezed bring in the chevron.
+    d.chev_a.aim(if (a > 0.5 and span > x1 - x0 - 28 * a + 0.5) 1 else 0, now);
+    // A wheel scroll holds while its tab stays on show, and a × click's held
+    // widths hold the row still; otherwise it keeps the active tab in view.
+    if (d.tab_user != null and d.tab_user_id != d.file.id) d.tab_user = null;
+    if (d.tab_user) |u| {
+        const c = std.math.clamp(u, 0, most);
+        if (c != u) {
+            d.tab_user = c;
+            d.tab_x.aim(c, now);
+        }
+    } else if (d.held_cap != null) {
+        d.tab_x.aim(std.math.clamp(d.tab_x.to, 0, most), now);
+    } else d.tab_x.aim(std.math.clamp(act[0] + off - (x0 - pad) + act[1] / 2 - room / 2, 0, most), now);
     if (slotOf(d, d.file.id)) |i| act[0] += d.slots.items[i].shift.x;
 
     // The tab being dragged, or springing back into place, draws last on
@@ -7210,9 +7617,10 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
     for (&d.hl, act) |*h, v| if (a < 0.01 or top_id == d.file.id) h.snap(v) else h.aim(v, now);
     const hx = d.hl[0].step(now);
     const hw = d.hl[1].step(now);
-    // The row stops at its ends: tabs scrolled past them are cut there.
+    // The row stops at its ends, short of the + and chevron: tabs scrolled
+    // past them are cut there.
     objc.CGContextSaveGState(ctx);
-    objc.CGContextClipToRect(ctx, .{ .x = x0 - pad, .y = 0, .w = @max(x1 - x0 + pad, 0), .h = gap + head_h });
+    objc.CGContextClipToRect(ctx, .{ .x = x0 - pad, .y = 0, .w = @max(room, 0), .h = gap + head_h });
     if (a > 0.01) {
         tabFill(ctx, th, ka, a, hx, hy - 11, hw);
     }
@@ -7221,20 +7629,22 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
         for (d.slots.items) |*s| {
             if ((s.id == top_id) != (pass == 1)) continue;
             const back = if (d.win.fly) |fl| fl.card == d and fl.id == s.id else false;
-            drawTab(d, s, ctx, th, dark, ka, a, cap, x0, x1, now, back or (dragged != null and dragged.?.out and s.id == dragged.?.id), pass == 1);
+            drawTab(d, s, ctx, th, dark, ka, a, tabCap(d, s, cap, room), x0, x0 - pad + room, now, back or (dragged != null and dragged.?.out and s.id == dragged.?.id), pass == 1);
         }
     }
     // The ends have tabs past them while the row is scrolled.
     tabFade(ctx, th, x0 - pad, 1, off / tab_fade * a);
-    tabFade(ctx, th, x1, -1, (span - room - off) / tab_fade * a);
+    tabFade(ctx, th, x0 - pad + room, -1, (span - room - off) / tab_fade * a);
     objc.CGContextRestoreGState(ctx);
 
     // With one tab, the folder after the name; with more, the + after the
     // tabs. One goes before the other comes, so they never overlap.
     const folder_a = std.math.clamp(1 - 2 * a, 0, 1);
     const plus_a = std.math.clamp(2 * a - 1, 0, 1);
-    // Badges go after the + when there are tabs.
-    var nx = end + 8 + 28 * plus_a;
+    // The + and chevron sit after the last tab, or at the row's end when
+    // the tabs run past it. Badges go after them when there are tabs.
+    const pe = @min(end, x0 - pad + room);
+    var nx = pe + 8 + (28 + 26 * chev) * plus_a;
     // A file this user can't write has a lock after it, and one that isn't
     // on disk yet says New until it's saved.
     if (d.file.locked) {
@@ -7268,16 +7678,24 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
         if (d.head.lw > 0) nx += d.head.lw + 2 * cw;
         objc.CGContextRestoreGState(ctx);
     }
-    d.plus_x = if (a > 0.5) end + 14 else -100;
+    d.plus_x = if (a > 0.5) pe + 14 else -100;
+    d.chev_x = if (a > 0.5 and chev > 0.5) pe + 41 else -100;
     if (plus_a > 0.01) {
         objc.CGContextSaveGState(ctx);
         objc.CGContextSetAlpha(ctx, plus_a);
         d.plus_t.aim(if (d.plus_on) 1 else 0, now);
-        const px = end + 4 - 8 * (1 - plus_a);
+        const px = pe + 4 - 8 * (1 - plus_a);
         hoverPill(ctx, th, d.plus_t.at(now), d.plus_down.at(now), px + 10, hy);
         drawIcon(icon(.plus, dark, th), px, hy - 10, 20);
+        if (chev > 0.01) {
+            d.chev_t.aim(if (d.chev_on) 1 else 0, now);
+            objc.CGContextSetAlpha(ctx, plus_a * chev);
+            const vx = pe + 41 - 4 * (1 - chev);
+            hoverPill(ctx, th, d.chev_t.at(now), 0, vx, hy);
+            drawIcon(icon(.parents, dark, th), vx - 6, hy - 6, 12);
+        }
         objc.CGContextRestoreGState(ctx);
-        nx = @max(nx, end + 36);
+        nx = @max(nx, pe + 36 + 26 * chev);
     }
     if (d.note.len > 0) _ = k.text(d.note, null, th, th.muted, nx, mono_y, 0, 200);
     k.flush();
@@ -7349,6 +7767,11 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, ka: f64, a:
         const ma = d.win.menu_a.at(now);
         if (ma > 0.01) menuMark(ctx, th, ma, sx, hy - 11, s.w, 22, 7);
     }
+    // ⌘T on a blank tab pulses it, to point at the blank tab already there.
+    if (s.id == d.pulse_id) {
+        const pt = (now - d.pulse_t0) / pulse_time;
+        if (pt >= 0 and pt < 1) menuMark(ctx, th, @sin(std.math.pi * pt), sx, hy - 11, s.w, 22, 7);
+    }
     // The icon, name, dot and × grow from 0.92 on the tab's spring.
     const sc = 0.92 + 0.08 * std.math.clamp(s.grow.x, 0, 1.2);
     if (@abs(sc - 1) > 0.001) {
@@ -7377,7 +7800,10 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, ka: f64, a:
     // have different widths, so drawing both at once smears the name.
     objc.CGContextSetAlpha(ctx, alpha * ink_a);
     const name = if (s.gone) s.name[which].full else sideFit(&s.name[which], if (which == 0) tab_bold else side_font, room_w + 1);
-    paintLine(ctx, name, ink, 1, nx, by);
+    // A dim tab's regular name sits centered where its medium name would,
+    // so the label holds its place as the weight changes.
+    const dim_x = if (which == 1 and name != null) @max((@min(s.wid.x, fit) - lineW(name)) / 2, 0) else 0;
+    paintLine(ctx, name, ink, 1, nx + dim_x, by);
     objc.CGContextRestoreGState(ctx);
     // The unsaved dot sits after the name with one tab and slides into
     // the close button's place with more; hovering trades it for the ×.
@@ -7387,8 +7813,10 @@ fn drawTab(d: *Doc, s: *Slot, ctx: Id, th: *const Theme, dark: bool, ka: f64, a:
     const cross = a * @max(hv, if (on) 1 - @min(dv, 1) else 0);
     if (dv > 0.01 and cross < 0.5) {
         const dx = nx + s.wid.x + 9 + (cx - nx - s.wid.x - 9) * a;
-        const r = 3 * dv;
-        pill(ctx, th.caret, (1 - 2 * cross) * @min(dv, 1), dx - r, hy - r, 2 * r, 2 * r, r);
+        // An untitled file's draft dot is smaller and fainter: its text is safe in a draft.
+        const r = @as(f64, if (s.draft) 2.5 else 3) * dv;
+        const da = (1 - 2 * cross) * @min(dv, 1) * @as(f64, if (s.draft) 0.6 else 1);
+        pill(ctx, if (s.draft) th.muted else th.caret, da, dx - r, hy - r, 2 * r, 2 * r, r);
     }
     if (cross > 0.01) {
         const xv = s.xhov.at(now) * a;
@@ -7407,14 +7835,16 @@ fn draggedTab(d: *const Doc) ?*TabDrag {
 
 const TabHit = struct { j: usize, id: u32, close: bool };
 
-/// The tab under `p`, and whether it's over the tab's close button. Only
-/// with two tabs or more; one is the window's title.
+/// The tab under `p`, and whether it's over the tab's close button: the ×'s
+/// 16-point square, as its hover shows. Only with two tabs or more; one is
+/// the window's title. Tabs cut at the row's ends don't count there.
 fn tabAt(d: *Doc, p: Point) ?TabHit {
-    if (d.tabbed.to != 1 or offHeadRow(p, 12)) return null;
+    if (d.tabbed.to != 1 or offHeadRow(p, 12) or p.x < d.tabs_l or p.x >= d.tabs_r) return null;
     for (d.slots.items) |s| {
         if (s.gone or p.x < s.x or p.x >= s.x + s.w) continue;
         const j = tabIndex(d, s.id) orelse return null;
-        return .{ .j = j, .id = s.id, .close = p.x >= s.x + s.w - tab_pad - tab_shut };
+        const cx = s.x + s.w - tab_pad - tab_shut / 2;
+        return .{ .j = j, .id = s.id, .close = @abs(p.x - cx) <= 8 and @abs(p.y - headY()) <= 8 };
     }
     return null;
 }
@@ -7463,12 +7893,16 @@ fn dragTab(w: *Win, p: Point) void {
         const nw = lineW(t.name);
         t.w = 2 * tab_pad + tileSize() + 7 + nw;
     }
-    const was: ?Zone = if (t.drop) |x| x.zone else null;
+    const prev = t.drop;
+    const was: ?Zone = if (prev) |x| x.zone else null;
     t.drop = null;
     t.out = true;
     if (t.from) |d| {
         const lp = inPane(d, p);
-        t.out = tabCount(d) == 1 or lp.x < 0 or lp.x >= d.size.x or lp.y < 0 or lp.y >= top_h + 8;
+        // It tears off 8 points past its card's tab row on every side, and
+        // comes back into the row at the same line.
+        const tear = 8.0;
+        t.out = tabCount(d) == 1 or lp.x < -tear or lp.x >= d.size.x + tear or lp.y < -tear or lp.y >= top_h + tear;
         if (!t.out) if (tabIndex(d, t.id)) |j| {
             // It trades places with a tab once its middle passes that tab's.
             const s = d.slots.items[slotOf(d, t.id).?];
@@ -7478,7 +7912,7 @@ fn dragTab(w: *Win, p: Point) void {
             reorderTab(d, j, k);
         };
     }
-    if (t.out) t.drop = dropAt(w, t, p);
+    if (t.out) t.drop = dropAt(w, t, p, prev);
     const now_zone: ?Zone = if (t.drop) |x| x.zone else null;
     if (was != now_zone) haptic(.level);
     aimPreview(w, CACurrentMediaTime());
@@ -7514,11 +7948,13 @@ fn freeDrag(t: TabDrag) void {
 }
 
 /// Where a tab or sidebar file dragged to `p` would land: among another
-/// card's tabs, or from anywhere over a card's text in a new card off its
-/// nearest edge that has room to split, or on that card when none has.
-/// Null over the sidebar, the gaps, its own card's tab row, and its own
-/// card's text when it's that card's only tab or the card can't split.
-fn dropAt(w: *Win, t: *const TabDrag, p: Point) ?Drop {
+/// card's tabs, on another card's middle as a tab, or from anywhere else
+/// over a card's text in a new card off its nearest edge that has room to
+/// split, or on that card when none has. Null over the sidebar, the gaps,
+/// its own card's tab row and middle, and its own card's text when it's
+/// that card's only tab or the card can't split. The zone of `prev` holds
+/// on `zone_slack` points past its edge.
+fn dropAt(w: *Win, t: *const TabDrag, p: Point, prev: ?Drop) ?Drop {
     if (overSide(w, p)) return null;
     const c = paneAt(w, p) orelse return null;
     const own = if (t.from) |x| x == c else false;
@@ -7527,10 +7963,20 @@ fn dropAt(w: *Win, t: *const TabDrag, p: Point) ?Drop {
         if (own) return null;
         return .{ .card = c, .zone = .tabs, .k = tabsLeftOf(c, lp.x, 0) };
     }
-    const u = (lp.x - gap) / @max(c.size.x - 2 * gap, 1);
-    const v = (lp.y - gap) / @max(c.size.y - 2 * gap, 1);
-    const near = [4]f64{ u, 1 - u, v, 1 - v };
+    const cw_ = @max(c.size.x - 2 * gap, 1);
+    const ch = @max(c.size.y - 2 * gap, 1);
+    const u = (lp.x - gap) / cw_;
+    const v = (lp.y - gap) / ch;
+    const held: ?Zone = if (prev) |x| (if (x.card == c) x.zone else null) else null;
+    // The middle 40% of the card, each way, adds the tab to it.
+    const mu = if (held != null and held.? == .whole) zone_slack / cw_ else 0;
+    const mv = if (held != null and held.? == .whole) zone_slack / ch else 0;
+    if (@abs(u - 0.5) <= 0.2 + mu and @abs(v - 0.5) <= 0.2 + mv) return if (own) null else .{ .card = c, .zone = .whole, .k = c.at + 1 };
     const edges = [4]Zone{ .left, .right, .top, .bottom };
+    var near = [4]f64{ u, 1 - u, v, 1 - v };
+    for (&near, edges, [4]f64{ cw_, cw_, ch, ch }) |*x, e, len| if (held != null and held.? == e) {
+        x.* -= zone_slack / len;
+    };
     var best: ?usize = null;
     if (!own or tabCount(c) > 1) for (near, 0..) |x, i| if (roomFor(c, i >= 2) and (best == null or x < near[best.?])) {
         best = i;
@@ -7661,6 +8107,7 @@ fn moveTab(from: *Doc, j: usize, dr: Drop) void {
     putTab(to, pg, dr.k);
     if (last) foldCard(from);
     focus(to);
+    to.ring_t0 = CACurrentMediaTime();
 }
 
 /// Shows file `path` in window `w` where `dr` says: as a new tab, or in a
@@ -7680,11 +8127,12 @@ fn placeFile(w: *Win, path: [:0]const u8, dr: Drop) void {
     putTab(to, pg, dr.k);
     noteRecent(path);
     focus(to);
+    to.ring_t0 = CACurrentMediaTime();
 }
 
 /// The drop preview, the dragged tab's copy under the mouse, and a copy
 /// finishing its trip after the mouse let go.
-fn drawDrag(w: *Win, ctx: Id, th: *const Theme, now: f64) void {
+fn drawDrag(w: *Win, ctx: Id, th: *const Theme, dark: bool, now: f64) void {
     var r: [4]f64 = undefined;
     // Picked up, the copy lifts to 1.04; once it lets go it settles to 1.
     w.lift.aim(if (dragHeld(w)) 1.04 else 1, now);
@@ -7696,21 +8144,30 @@ fn drawDrag(w: *Win, ctx: Id, th: *const Theme, now: f64) void {
         pill(ctx, th.caret, 0.12 * pa, r[0], r[1], r[2], r[3], rad);
         ring(ctx, th.caret, 0.6 * pa, r[0], r[1], r[2], r[3], rad);
     }
-    if (w.fly) |fl| {
-        const p = flyDone(fl, now);
-        if (p >= 1) return endFly(w);
-        const e = 1 - (1 - p) * (1 - p) * (1 - p);
+    if (w.fly) |*fl| {
+        // Going back, it rides the tabs' spring; elsewhere it eases out.
+        var p: f64 = undefined;
+        var e: f64 = undefined;
+        if (fl.spring) {
+            e = fl.sp.step(now);
+            if (fl.sp.settled()) return endFly(w);
+            p = std.math.clamp(e, 0, 1);
+        } else {
+            p = flyDone(fl.*, now);
+            if (p >= 1) return endFly(w);
+            e = 1 - (1 - p) * (1 - p) * (1 - p);
+        }
         // Back on its tab it just settles; into a gap or back to the
         // sidebar it fades as it arrives; on a card it fades where it is.
         const alpha = if (fl.fade) 1 - e else if (fl.card != null) 1 else std.math.clamp((1 - p) / 0.4, 0, 1);
-        ghost(ctx, th, fl.icon, fl.line, fl.w, fl.from.x + (fl.to.x - fl.from.x) * e, fl.from.y + (fl.to.y - fl.from.y) * e, alpha, lift);
+        ghost(ctx, th, dark, fl.icon, fl.line, fl.w, fl.from.x + (fl.to.x - fl.from.x) * e, fl.from.y + (fl.to.y - fl.from.y) * e, alpha, lift);
     }
     const t = w.tdrag orelse return;
     if (!t.live) return;
     const ga = w.ghost_a.at(now);
     if (ga < 0.01) return;
     const at = ghostAt(t, t.at);
-    ghost(ctx, th, t.icon, t.name, t.w, at.x, at.y, ga, lift);
+    ghost(ctx, th, dark, t.icon, t.name, t.w, at.x, at.y, ga, lift);
 }
 
 fn ghostAt(t: TabDrag, p: Point) Point {
@@ -7719,7 +8176,7 @@ fn ghostAt(t: TabDrag, p: Point) Point {
 
 /// A tab's copy lifted off the page, `gw` wide with its top left at `x`, `y`,
 /// grown by `lift` about its middle.
-fn ghost(ctx: Id, th: *const Theme, img: Id, line: Id, gw: f64, x: f64, y: f64, alpha: f64, lift: f64) void {
+fn ghost(ctx: Id, th: *const Theme, dark: bool, img: Id, line: Id, gw: f64, x: f64, y: f64, alpha: f64, lift: f64) void {
     const ts = tileSize();
     objc.CGContextSaveGState(ctx);
     objc.CGContextSetAlpha(ctx, alpha);
@@ -7728,8 +8185,9 @@ fn ghost(ctx: Id, th: *const Theme, img: Id, line: Id, gw: f64, x: f64, y: f64, 
     objc.CGContextTranslateCTM(ctx, -(x + gw / 2), -(y + 11));
     // A real shadow under it, so it reads as lifted off the page.
     objc.CGContextSaveGState(ctx);
-    if (ghost_shade == null) ghost_shade = objc.CGColorCreateGenericGray(0, 0.22);
-    objc.CGContextSetShadowWithColor(ctx, .{ .w = 0, .h = -4 }, 12, ghost_shade);
+    const shade = &ghost_shades[@intFromBool(dark)];
+    if (shade.* == null) shade.* = objc.CGColorCreateGenericGray(0, if (dark) 0.55 else 0.22);
+    objc.CGContextSetShadowWithColor(ctx, .{ .w = 0, .h = -4 }, 12, shade.*);
     pill(ctx, th.header, 1, x, y, gw, 22, 7);
     objc.CGContextRestoreGState(ctx);
     ring(ctx, th.fg, 0.3, x, y, gw, 22, 7);
@@ -7761,8 +8219,13 @@ fn startFly(w: *Win, t: TabDrag) void {
             fl.to = .{ .x = d.org.x + s.x + s.shift.x, .y = d.org.y + headY() - 11 };
             fl.card = d;
             fl.id = t.id;
+            fl.spring = true;
         } else fl.fade = true;
-    } else fl.to = ghostAt(t, t.down);
+    } else {
+        fl.to = ghostAt(t, t.down);
+        fl.spring = true;
+    }
+    if (fl.spring) fl.sp.aim(1, fl.t0);
     w.fly = fl;
 }
 
@@ -7775,6 +8238,7 @@ fn endFly(w: *Win) void {
 
 /// How far along its trip `fl` is, 0 to 1.
 fn flyDone(fl: Fly, now: f64) f64 {
+    if (fl.spring) return std.math.clamp(fl.sp.x, 0, 1);
     const dur: f64 = if (fl.fade) fade_time * 1.5 else fly_time;
     return std.math.clamp((now - fl.t0) / dur, 0, 1);
 }
@@ -8043,9 +8507,17 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
         return sideClick(w, p, msg(usize, ev, "modifierFlags", .{}));
     }
     if (gapAt(w.cards, p)) |n| {
+        n.held = null;
+        // A double-click on a gap evens its split.
+        if (msg(isize, ev, "clickCount", .{}) == 2) {
+            n.share.aim(0.5, CACurrentMediaTime());
+            msg(void, w.view, "setNeedsDisplay:", .{true});
+            return msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
+        }
         w.grab = n;
         w.grab_hit = 0;
         w.grab_ease = 0;
+        w.grab_off = (if (n.down) p.y - n.r.y else p.x - n.r.x) - 1.5 * gap - n.share.x * gapLimits(n).len;
         return;
     }
     const d = paneAt(w, p) orelse return titleStrip(w, ev);
@@ -8058,8 +8530,8 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     cardDown(d, inPane(d, p), ev);
 }
 
-/// A click in card `d`, at `p` in its pane: its tabs and +, the quick open
-/// list, or the text.
+/// A click in card `d`, at `p` in its pane: its tabs, + and chevron, the
+/// quick open list, or the text.
 fn cardDown(d: *Doc, p: Point, ev: Id) void {
     const by = bottom(d);
     d.note = "";
@@ -8068,9 +8540,20 @@ fn cardDown(d: *Doc, p: Point, ev: Id) void {
             d.plus_down.snap(1);
             return newTab(d);
         }
-        const hit = tabAt(d, p) orelse loneTab(d, p) orelse return titleStrip(d.win, ev);
-        if (hit.close) return closeTab(d, hit.j);
-        showTab(d, hit.j);
+        if (onTabChev(d, p)) return tabsMenu(d);
+        const clicks = msg(isize, ev, "clickCount", .{});
+        const hit = tabAt(d, p) orelse loneTab(d, p) orelse {
+            // A double-click on the tab row's empty room opens a new tab.
+            if (clicks == 2 and d.tabbed.to == 1 and !offHeadRow(p, 12) and p.x >= d.tabs_l) return newTab(d);
+            return titleStrip(d.win, ev);
+        };
+        if (hit.close) {
+            d.held_cap = d.cap;
+            return closeTab(d, hit.j);
+        }
+        // A double-click on an untitled tab names it.
+        if (clicks == 2 and tabPage(d, hit.j).path == null) return nameDraft(d, hit.j);
+        switchTab(d, hit.j);
         // Held, the tab can be dragged along its row or to another card.
         const s = d.slots.items[slotOf(d, hit.id) orelse return];
         const at: Point = .{ .x = p.x + d.org.x, .y = p.y + d.org.y };
@@ -8104,6 +8587,67 @@ fn cardDown(d: *Doc, p: Point, ev: Id) void {
         d.file.ed.select(d.drag_from[0], d.drag_from[1]);
     }
     refresh(d);
+}
+
+/// Double-click on an untitled tab: asks for a name the tab keeps, which
+/// its text no longer changes, until it's saved.
+fn nameDraft(d: *Doc, j: usize) void {
+    const id = tabPage(d, j).id;
+    const nm = askName("Name Draft", "The tab keeps this name until you save the draft.", tabPage(d, j).name(), "Rename") orelse return;
+    if (!ax.alive(d)) return;
+    const k = tabIndex(d, id) orelse return;
+    const pg = tabPage(d, k);
+    var n = @min(nm.len, pg.title.len);
+    while (n < nm.len and n > 0 and nm[n] & 0xC0 == 0x80) n -= 1;
+    @memcpy(pg.title[0..n], nm[0..n]);
+    pg.title_len = n;
+    pg.hand = true;
+    if (slotOf(d, id)) |i| d.slots.items[i].drop();
+    if (k == d.at) named(d);
+    refresh(d);
+}
+
+/// The overflowing tabs' chevron: a menu of every tab in the card, the one
+/// on show checked.
+fn tabsMenu(d: *Doc) void {
+    const m = objc.new("NSMenu");
+    defer msg(void, m, "release", .{});
+    msg(void, m, "setAutoenablesItems:", .{false});
+    for (0..tabCount(d)) |j| {
+        const pg = tabPage(d, j);
+        const it = menuItem(m, pg.name(), "pickTab:", "", 0);
+        msg(void, it, "setTag:", .{@as(isize, @intCast(j))});
+        if (j == d.at) msg(void, it, "setState:", .{@as(isize, 1)});
+        if (pg.path) |path| msg(void, it, "setToolTip:", .{objc.str(path)});
+    }
+    pick_card = d;
+    _ = msg(bool, m, "popUpMenuPositioningItem:atLocation:inView:", .{ @as(Id, null), Point{ .x = d.org.x + d.chev_x - 12, .y = d.org.y + headY() + 14 }, d.win.view });
+}
+
+/// The card whose chevron menu is open.
+var pick_card: ?*Doc = null;
+
+fn pickTab(_: Id, _: Sel, item: Id) callconv(.c) void {
+    const d = pick_card orelse return;
+    pick_card = null;
+    if (!ax.alive(d)) return;
+    const j: usize = @intCast(msg(isize, item, "tag", .{}));
+    if (j < tabCount(d)) switchTab(d, j);
+    focus(d);
+}
+
+/// A middle-click on a tab closes it, holding the tabs' widths like a
+/// click on its ×.
+fn otherMouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
+    const w = winOf(self) orelse return;
+    if (msg(isize, ev, "buttonNumber", .{}) != 2) return;
+    const p = local(self, ev);
+    if (overSide(w, p)) return;
+    const d = paneAt(w, p) orelse return;
+    const hit = tabAt(d, inPane(d, p)) orelse return;
+    d.held_cap = d.cap;
+    closeTab(d, hit.j);
+    if (ax.alive(d)) refresh(d);
 }
 
 fn endSideDrag(w: *Win) void {
@@ -8178,7 +8722,12 @@ fn hoverAt(w: *Win, p: Point) void {
     for (docs.items) |d| if (d.win == w) {
         const lp = inPane(d, p);
         const hit = if (d == over and lp.y < top_h) tabAt(d, lp) else null;
-        setHover(d, if (hit) |h| h.id else 0, if (hit) |h| h.close else false, d == over and onTabPlus(d, lp));
+        setHover(d, if (hit) |h| h.id else 0, if (hit) |h| h.close else false, d == over and onTabPlus(d, lp), d == over and onTabChev(d, lp));
+        // Widths held by a click on a × let go once the mouse leaves the row.
+        if (d.held_cap != null and (d != over or offHeadRow(lp, 14))) {
+            d.held_cap = null;
+            msg(void, w.view, "setNeedsDisplay:", .{true});
+        }
         const hint = if (d == over and d.hint_n > 0 and w.tdrag == null) hintAt(d, lp) else null;
         if (hint != d.hint_hot) {
             d.hint_hot = hint;
@@ -8223,12 +8772,17 @@ fn sideHover(w: *Win, p: Point) void {
     msg(void, w.window, "invalidateCursorRectsForView:", .{w.view});
 }
 
-fn setHover(d: *Doc, id: u32, shut: bool, plus: bool) void {
-    if (id == d.hover and shut == d.hover_x and plus == d.plus_on) return;
+/// Points the card's hover at tab `id` (0 for none), its × (`shut`), the +
+/// or the chevron. A new tab, ×, or + under the mouse gets its tooltip.
+fn setHover(d: *Doc, id: u32, shut: bool, plus: bool, chev: bool) void {
+    if (id == d.hover and shut == d.hover_x and plus == d.plus_on and chev == d.chev_on) return;
+    const tips = id != d.hover or shut != d.hover_x or plus != d.plus_on;
     d.hover = id;
     d.hover_x = shut;
     d.plus_on = plus;
+    d.chev_on = chev;
     msg(void, d.win.view, "setNeedsDisplay:", .{true});
+    if (tips) msg(void, d.win.window, "invalidateCursorRectsForView:", .{d.win.view});
 }
 
 /// The mouse left the view: everything it lit goes out.
@@ -8384,9 +8938,22 @@ fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const d = paneAt(w, at) orelse return;
     var dx = msg(f64, ev, "scrollingDeltaX", .{});
     var dy = msg(f64, ev, "scrollingDeltaY", .{});
-    if (!msg(bool, ev, "hasPreciseScrollingDeltas", .{})) {
+    const precise = msg(bool, ev, "hasPreciseScrollingDeltas", .{});
+    if (!precise) {
         dx *= lh;
         dy *= lh;
+    }
+    // Over a tab row that runs past its end, a sideways scroll, or a mouse
+    // wheel's, scrolls the tabs.
+    const lp = inPane(d, at);
+    if (lp.y < top_h and d.tabbed.to == 1 and d.tab_over > 0 and !offHeadRow(lp, 14) and (@abs(dx) > @abs(dy) or !precise)) {
+        const by = if (@abs(dx) > @abs(dy)) dx else dy;
+        const to = std.math.clamp((d.tab_user orelse d.tab_x.to) - by, 0, d.tab_over);
+        d.tab_user = to;
+        d.tab_user_id = d.file.id;
+        if (precise) d.tab_x.snap(to) else d.tab_x.aim(to, CACurrentMediaTime());
+        hoverAt(w, at);
+        return msg(void, w.view, "setNeedsDisplay:", .{true});
     }
     d.file.sx -= dx;
     d.file.sy -= dy;
@@ -8410,7 +8977,8 @@ fn resetCursorRects(self: Id, _: Sel) callconv(.c) void {
     }
     // The two buttons by the traffic lights get their menu items' names;
     // `toolTip` answers nil where zen hides them. The folder's name and the
-    // row under the mouse get their full paths.
+    // row under the mouse get their full paths, and so do the tab under the
+    // mouse; its × and the tabs' + get their commands.
     msg(void, self, "removeAllToolTips", .{});
     if (root != null) {
         _ = msg(isize, self, "addToolTipRect:owner:userData:", .{ toolRect(.sidebar), self, @as(?*anyopaque, null) });
@@ -8423,19 +8991,40 @@ fn resetCursorRects(self: Id, _: Sel) callconv(.c) void {
             if (y >= listTop()) _ = msg(isize, self, "addToolTipRect:owner:userData:", .{ Rect{ .y = y, .w = side_w - edge_grab, .h = side_h }, self, @as(?*anyopaque, null) });
         };
     }
+    if (!conf.zen) for (docs.items) |d| if (d.win == w and !d.closing and d.tabbed.to == 1) {
+        const hy = d.org.y + headY();
+        if (d.hover != 0) if (slotOf(d, d.hover)) |i| {
+            const s = d.slots.items[i];
+            const sx = d.org.x + s.x;
+            const cx = sx + s.w - tab_pad - tab_shut / 2;
+            _ = msg(isize, self, "addToolTipRect:owner:userData:", .{ Rect{ .x = sx, .y = hy - 11, .w = @max(cx - 8 - sx, 0), .h = 22 }, self, @as(?*anyopaque, null) });
+            _ = msg(isize, self, "addToolTipRect:owner:userData:", .{ Rect{ .x = cx - 8, .y = hy - 8, .w = 16, .h = 16 }, self, @as(?*anyopaque, null) });
+        };
+        if (d.plus_x > 0) _ = msg(isize, self, "addToolTipRect:owner:userData:", .{ Rect{ .x = d.org.x + d.plus_x - 14, .y = hy - 14, .w = 28, .h = 28 }, self, @as(?*anyopaque, null) });
+    };
 }
 
-/// The tooltip under `p`: a button's menu item title (or why the sidebar
-/// doesn't show), or the full path of the folder or the row.
+/// The tooltip under `p`: a button's menu item title and keys (or why the
+/// sidebar doesn't show), a tab's full path, or the full path of the
+/// folder or the row.
 fn toolTip(self: Id, _: Sel, _: Id, _: isize, p: Point, _: ?*anyopaque) callconv(.c) Id {
     const w = winOf(self) orelse return null;
     if (toolAt(w, p)) |t| {
-        if (t != .sidebar) return objc.str("New Tab");
+        if (t != .sidebar) return objc.str("New Tab " ++ comptime menuKeys("newTab:"));
         return objc.str(if (conf.sidebar and !sideShown(w)) "Widen the window to show the sidebar" else sidebar_title);
     }
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (!overSide(w, p)) if (paneAt(w, p)) |d| {
+        const lp = inPane(d, p);
+        if (lp.y >= top_h) return null;
+        if (onTabPlus(d, lp)) return objc.str("New Tab " ++ comptime menuKeys("newTab:"));
+        const hit = tabAt(d, lp) orelse return null;
+        if (hit.close) return objc.str("Close Tab " ++ comptime menuKeys("closeTab:"));
+        const pg = tabPage(d, hit.j);
+        return objc.str(if (pg.path) |path| tilde(&buf, path) else pg.name());
+    };
     if (!sideShown(w) or p.x >= side_w) return null;
     const r = root orelse return null;
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
     if (p.y < listTop()) return if (p.y >= top_h) objc.str(tilde(&buf, r)) else null;
     const i = pinnedAt(w, p.y) orelse listRow(w, p.y) orelse return null;
     var full: [std.fs.max_path_bytes]u8 = undefined;
@@ -8520,7 +9109,9 @@ var side_items: [3]Id = @splat(null);
 var row_items: [5]Id = @splat(null);
 var hidden_item: Id = null;
 var tab_menu: Id = null;
-var tab_items: [6]Id = @splat(null);
+var tab_items: [9]Id = @splat(null);
+/// The menu of a card's header away from its tabs.
+var card_menu: Id = null;
 /// The file of the sidebar row or tab the menu was opened on and its window.
 var menu_path: [std.fs.max_path_bytes:0]u8 = undefined;
 var menu_len: usize = 0;
@@ -8688,7 +9279,7 @@ fn menuForEvent(self: Id, _: Sel, ev: Id) callconv(.c) Id {
     if (!overSide(w, p)) {
         const d = paneAt(w, p) orelse return null;
         const lp = inPane(d, p);
-        if (lp.y < top_h) return tabMenu(self, w, d, lp);
+        if (lp.y < top_h) return tabMenu(self, w, d, lp) orelse cardMenu(d);
         if (lp.y >= bottom(d)) return null;
         focus(d);
         if (text_menu == null) {
@@ -8743,7 +9334,8 @@ fn menuForEvent(self: Id, _: Sel, ev: Id) callconv(.c) Id {
     return markMenu(self, w, side_menu, same);
 }
 
-/// The menu for card `d`'s tab (or lone file name) under `lp`, in its pane.
+/// The menu for card `d`'s tab (or lone file name) under `lp`, in its pane,
+/// showing the keys of the commands the menu bar has too.
 fn tabMenu(self: Id, w: *Win, d: *Doc, lp: Point) Id {
     const hit = tabAt(d, lp) orelse titleTab(d, lp) orelse return null;
     const n = tabCount(d);
@@ -8752,24 +9344,45 @@ fn tabMenu(self: Id, w: *Win, d: *Doc, lp: Point) Id {
     if (tab_menu == null) {
         const m = objc.new("NSMenu");
         msg(void, m, "setAutoenablesItems:", .{false});
-        _ = menuItem(m, "Close Tab", "tabClose:", "", 0);
+        _ = menuItem(m, "Close Tab", "tabClose:", "w", objc.cmd_key);
         tab_items[0] = menuItem(m, "Close Other Tabs", "tabCloseOthers:", "", 0);
-        tab_items[1] = menuItem(m, "Close Tabs to the Right", "tabCloseRight:", "", 0);
+        tab_items[1] = menuItem(m, "Close Tabs to the Left", "tabCloseLeft:", "", 0);
+        tab_items[2] = menuItem(m, "Close Tabs to the Right", "tabCloseRight:", "", 0);
         separator(m);
-        tab_items[2] = menuItem(m, "Split Right", "tabSplitRight:", "", 0);
-        tab_items[3] = menuItem(m, "Split Down", "tabSplitDown:", "", 0);
+        tab_items[3] = menuItem(m, "Duplicate Tab", "tabDuplicate:", "", 0);
+        tab_items[4] = menuItem(m, "Move to New Window", "tabNewWindow:", "", 0);
         separator(m);
-        tab_items[4] = menuItem(m, "Reveal in Finder", "revealInFinder:", "", 0);
-        tab_items[5] = menuItem(m, "Copy Path", "copyPath:", "", 0);
+        tab_items[5] = menuItem(m, "Split Right", "tabSplitRight:", "d", objc.cmd_key);
+        tab_items[6] = menuItem(m, "Split Down", "tabSplitDown:", "d", objc.cmd_key | objc.shift_key);
+        separator(m);
+        tab_items[7] = menuItem(m, "Reveal in Finder", "revealInFinder:", "", 0);
+        tab_items[8] = menuItem(m, "Copy Path", "copyPath:", "", 0);
         tab_menu = m;
     }
-    const on = [6]bool{ n > 1, hit.j + 1 < n, n > 1 and roomFor(d, false), n > 1 and roomFor(d, true), has_path, has_path };
+    const on = [9]bool{ n > 1, hit.j > 0, hit.j + 1 < n, true, n > 1 or d.win.cards.pane == null, n > 1 and roomFor(d, false), n > 1 and roomFor(d, true), has_path, has_path };
     for (tab_items, on) |it, x| msg(void, it, "setEnabled:", .{x});
     const same = w.menu_card == d and w.menu_tab == hit.id;
     w.menu_row = null;
     w.menu_card = d;
     w.menu_tab = hit.id;
     return markMenu(self, w, tab_menu, same);
+}
+
+/// The menu of card `d`'s header away from its tabs: its own commands,
+/// which reach it as the focused card.
+fn cardMenu(d: *Doc) Id {
+    focus(d);
+    if (card_menu == null) {
+        const m = objc.new("NSMenu");
+        _ = menuItem(m, "New Tab", "newTab:", "t", objc.cmd_key);
+        separator(m);
+        _ = menuItem(m, "Split Right", "splitRight:", "d", objc.cmd_key);
+        _ = menuItem(m, "Split Down", "splitDown:", "d", objc.cmd_key | objc.shift_key);
+        separator(m);
+        _ = menuItem(m, "Close Card", "closeCard:", "", 0);
+        card_menu = m;
+    }
+    return card_menu;
 }
 
 /// The card and tab index the tab menu was opened on, while both are there.
@@ -8793,12 +9406,13 @@ fn splitTab(d: *Doc, j: usize, zone: Zone) void {
     moveTab(d, j, .{ .card = d, .zone = zone });
 }
 
-/// Closes card `d`'s tabs right of tab `at`, and with `left` the ones left
-/// of it too, then shows it. Each one with something to lose asks first,
-/// and Cancel stops there.
-fn closeAround(d: *Doc, at: usize, left: bool) void {
+/// Closes card `d`'s tabs right of tab `at` and, with `left`, the ones left
+/// of it, then shows it. Each one with something to lose asks first, and
+/// Cancel stops there.
+fn closeAround(d: *Doc, at: usize, right: bool, left: bool) void {
     const id = tabPage(d, at).id;
-    while (tabIndex(d, id)) |j| {
+    while (right) {
+        const j = tabIndex(d, id) orelse return;
         if (j + 1 >= tabCount(d)) break;
         const n = tabCount(d);
         closeTab(d, j + 1);
@@ -8812,6 +9426,16 @@ fn closeAround(d: *Doc, at: usize, left: bool) void {
         if (tabCount(d) == n) return;
     }
     showTab(d, tabIndex(d, id) orelse return);
+}
+
+/// A tab's Duplicate Tab: an untitled copy of its text right after it.
+fn duplicateTab(d: *Doc, j: usize) void {
+    const src = tabPage(d, j);
+    var ed = Editor.init(gpa, src.ed.text()) catch return;
+    styleEditor(&ed);
+    var pg: Page = .{ .ed = ed, .id = newId(), .lang = src.lang };
+    _ = pg.rename();
+    putTab(d, pg, j + 1);
 }
 
 fn openFromMenu(zone: Zone) void {
@@ -9239,9 +9863,14 @@ fn mergeWindows(d: *Doc) void {
 /// Window > Move Tab to New Window: the tab on show leaves for a window of
 /// its own. A window's only tab stays where it is.
 fn tabToNewWindow(d: *Doc) void {
+    tabOut(d, d.at);
+}
+
+/// Moves card `d`'s tab `j` to a window of its own.
+fn tabOut(d: *Doc, j: usize) void {
     const last = tabCount(d) == 1;
     if (last and d.win.cards.pane != null) return;
-    const pg = takeTab(d, d.at) orelse return;
+    const pg = takeTab(d, j) orelse return;
     const nd = newDoc() orelse {
         var p = pg;
         return p.deinitKeepDraft();
@@ -9342,6 +9971,7 @@ const menu_bar = .{
         .{ .title = "Quick Open…", .sel = "quickOpen:", .key = "p", .mods = objc.cmd_key, .to = .view, .run = startPrompt, .args = .{Mode.open} },
         .{ .sep = true },
         .{ .title = "Close Tab", .sel = "closeTab:", .key = "w", .mods = objc.cmd_key, .to = .view, .run = closeActive },
+        .{ .title = "Reopen Closed Tab", .sel = "reopenTab:", .to = .view, .run = reopenTab },
         .{ .title = "Close Window", .sel = "performClose:", .key = "w", .mods = objc.cmd_key | objc.shift_key },
         .{ .title = "Save", .sel = "saveDocument:", .key = "s", .mods = objc.cmd_key, .to = .view, .run = save, .args = .{false} },
         .{ .title = "Save As…", .sel = "saveDocumentAs:", .key = "s", .mods = objc.cmd_key | objc.shift_key, .to = .view, .run = save, .args = .{true} },
@@ -9388,6 +10018,20 @@ const menu_bar = .{
         .{ .title = "Show Next Tab", .sel = "nextTab:", .key = "\t", .mods = objc.ctrl_key, .to = .view, .run = stepTab, .args = .{1} },
         // ⇧Tab arrives as back tab, so that's the key to match.
         .{ .title = "Show Previous Tab", .sel = "previousTab:", .key = "\x19", .mods = objc.ctrl_key | objc.shift_key, .to = .view, .run = stepTab, .args = .{-1} },
+        // ⇧⌘] and ⇧⌘[ arrive as ⌘} and ⌘{, so those are the keys to match.
+        .{ .title = "Show Next Tab", .sel = "nextTab:", .key = "}", .mods = objc.cmd_key, .hidden = true },
+        .{ .title = "Show Previous Tab", .sel = "previousTab:", .key = "{", .mods = objc.cmd_key, .hidden = true },
+        .{ .menu = "Go to Tab", .items = .{
+            .{ .title = "Tab 1", .sel = "showTab1:", .key = "1", .mods = objc.cmd_key, .to = .view, .run = jumpTab, .args = .{0} },
+            .{ .title = "Tab 2", .sel = "showTab2:", .key = "2", .mods = objc.cmd_key, .to = .view, .run = jumpTab, .args = .{1} },
+            .{ .title = "Tab 3", .sel = "showTab3:", .key = "3", .mods = objc.cmd_key, .to = .view, .run = jumpTab, .args = .{2} },
+            .{ .title = "Tab 4", .sel = "showTab4:", .key = "4", .mods = objc.cmd_key, .to = .view, .run = jumpTab, .args = .{3} },
+            .{ .title = "Tab 5", .sel = "showTab5:", .key = "5", .mods = objc.cmd_key, .to = .view, .run = jumpTab, .args = .{4} },
+            .{ .title = "Tab 6", .sel = "showTab6:", .key = "6", .mods = objc.cmd_key, .to = .view, .run = jumpTab, .args = .{5} },
+            .{ .title = "Tab 7", .sel = "showTab7:", .key = "7", .mods = objc.cmd_key, .to = .view, .run = jumpTab, .args = .{6} },
+            .{ .title = "Tab 8", .sel = "showTab8:", .key = "8", .mods = objc.cmd_key, .to = .view, .run = jumpTab, .args = .{7} },
+            .{ .title = "Last Tab", .sel = "showLastTab:", .key = "9", .mods = objc.cmd_key, .to = .view, .run = jumpTab, .args = .{8} },
+        } },
         .{ .title = "Typewriter Scrolling", .sel = "toggleTypewriter:", .to = .app, .run = toggleTypewriter, .check = .typewriter, .grey = true },
         .{ .menu = "Focus", .items = .{
             .{ .titles = .{ "Off", "Line", "Sentence", "Paragraph" }, .sel = "pickFocus:", .to = .app, .run = pickFocus, .check = .focus, .grey = true },
@@ -9397,6 +10041,14 @@ const menu_bar = .{
         .{ .title = "Split Down", .sel = "splitDown:", .key = "d", .mods = objc.cmd_key | objc.shift_key, .to = .view, .run = split, .args = .{true} },
         .{ .title = "Next Card", .sel = "nextCard:", .key = "]", .mods = objc.cmd_key, .to = .view, .run = stepCard, .args = .{1} },
         .{ .title = "Previous Card", .sel = "previousCard:", .key = "[", .mods = objc.cmd_key, .to = .view, .run = stepCard, .args = .{-1} },
+        .{ .title = "Card Left", .sel = "focusCardLeft:", .key = "\u{F702}", .mods = objc.cmd_key | objc.opt_key, .to = .view, .run = focusToward, .args = .{Zone.left} },
+        .{ .title = "Card Right", .sel = "focusCardRight:", .key = "\u{F703}", .mods = objc.cmd_key | objc.opt_key, .to = .view, .run = focusToward, .args = .{Zone.right} },
+        .{ .title = "Card Above", .sel = "focusCardAbove:", .key = "\u{F700}", .mods = objc.cmd_key | objc.opt_key, .to = .view, .run = focusToward, .args = .{Zone.top} },
+        .{ .title = "Card Below", .sel = "focusCardBelow:", .key = "\u{F701}", .mods = objc.cmd_key | objc.opt_key, .to = .view, .run = focusToward, .args = .{Zone.bottom} },
+        .{ .title = "Maximize or Restore Card", .sel = "maximizeCard:", .key = "\r", .mods = objc.cmd_key | objc.shift_key, .to = .view, .run = maximizeCard },
+        .{ .title = "Move Tab to Next Card", .sel = "tabToNextCard:", .key = "]", .mods = objc.cmd_key | objc.opt_key, .to = .view, .run = tabToCard, .args = .{1} },
+        .{ .title = "Move Tab to Previous Card", .sel = "tabToPreviousCard:", .key = "[", .mods = objc.cmd_key | objc.opt_key, .to = .view, .run = tabToCard, .args = .{-1} },
+        .{ .title = "Close Card", .sel = "closeCard:", .to = .view, .run = closeCard },
         .{ .menu = "Theme", .items = .{
             .{ .heading = "Appearance" },
             .{ .titles = .{ "Auto", "Light", "Dark" }, .indent = 1, .sel = "pickAppearance:", .to = .app, .run = pickLook, .check = .look, .grey = true },
@@ -9627,10 +10279,16 @@ pub fn setup() void {
     c.method("openInNewTab:", @ptrCast(&openInNewTab), "v@:@");
     c.method("openInNewSplit:", @ptrCast(&openInNewSplit), "v@:@");
     c.method("tabClose:", tabAction(closeTab, .{}), "v@:@");
-    c.method("tabCloseOthers:", tabAction(closeAround, .{true}), "v@:@");
-    c.method("tabCloseRight:", tabAction(closeAround, .{false}), "v@:@");
+    c.method("tabCloseOthers:", tabAction(closeAround, .{ true, true }), "v@:@");
+    c.method("tabCloseLeft:", tabAction(closeAround, .{ false, true }), "v@:@");
+    c.method("tabCloseRight:", tabAction(closeAround, .{ true, false }), "v@:@");
+    c.method("tabDuplicate:", tabAction(duplicateTab, .{}), "v@:@");
+    c.method("tabNewWindow:", tabAction(tabOut, .{}), "v@:@");
     c.method("tabSplitRight:", tabAction(splitTab, .{Zone.right}), "v@:@");
     c.method("tabSplitDown:", tabAction(splitTab, .{Zone.bottom}), "v@:@");
+    c.method("otherMouseDown:", @ptrCast(&otherMouseDown), "v@:@");
+    c.method("endDissolve:", @ptrCast(&endDissolve), "v@:@");
+    c.method("pickTab:", @ptrCast(&pickTab), "v@:@");
     c.method("menuDidClose:", @ptrCast(&menuDidClose), "v@:@");
     c.method("revealInFinder:", @ptrCast(&revealInFinder), "v@:@");
     c.method("sideParent:", @ptrCast(&sideParent), "v@:@");
