@@ -4748,6 +4748,15 @@ fn center(d: *Doc) void {
     reveal(d);
 }
 
+const sentence_ends = [_][]const u8{ ".", "!", "?", "…" };
+const sentence_closers = sentence_ends ++ [_][]const u8{ "\"", "'", ")", "]", "”", "’", "»" };
+
+/// The byte length of the mark from `marks` that starts `s`, or 0.
+fn markLen(s: []const u8, marks: []const []const u8) usize {
+    for (marks) |m| if (std.mem.startsWith(u8, s, m)) return m.len;
+    return 0;
+}
+
 fn trackFocus(d: *Doc) void {
     if (conf.focus != .off) {
         const b = &d.file.ed.buf;
@@ -4761,14 +4770,30 @@ fn trackFocus(d: *Doc) void {
         var start = b.lineStart(lo);
         var end = b.lineStart(hi) + b.line(hi).len;
         if (conf.focus == .sentence) {
+            // A sentence ends after a run of `.`, `!`, `?` or `…` and any
+            // closing quotes, and only where whitespace or the span's end
+            // follows, so the caret right after a period still lights the
+            // sentence it finished.
             var i = start;
-            while (i < end) : (i += 1) {
-                if (std.mem.indexOfScalar(u8, ".!?", text[i]) == null) continue;
-                if (i >= d.file.ed.cur) {
-                    end = i + 1;
+            while (i < end) {
+                const n = markLen(text[i..end], &sentence_ends);
+                if (n == 0) {
+                    i += 1;
+                    continue;
+                }
+                var j = i + n;
+                while (j < end) {
+                    const m = markLen(text[j..end], &sentence_closers);
+                    if (m == 0) break;
+                    j += m;
+                }
+                i = j;
+                if (j < end and !std.ascii.isWhitespace(text[j])) continue;
+                if (d.file.ed.cur <= j) {
+                    end = j;
                     break;
                 }
-                start = i + 1;
+                start = j;
             }
             while (start < end and std.ascii.isWhitespace(text[start])) start += 1;
         }
