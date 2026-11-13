@@ -266,6 +266,15 @@ fn bottom(d: *const Doc) f64 {
     return d.size.y - gap - if (d.mode == .edit) stripH(d) else barH();
 }
 
+/// Where the text ends right now, for drawing: `bottom` eased with the
+/// prompt band as it slides in and out, so what sits on the band's edge
+/// (the quick open list, the sideways scroll bar) rides it. Layout keeps
+/// using `bottom`, where the band ends up.
+fn edgeAt(d: *const Doc, now: f64) f64 {
+    const s = stripH(d);
+    return d.size.y - gap - (s + (barH() - s) * std.math.clamp(d.pbar.at(now), 0, 1));
+}
+
 /// The status strip along the card's bottom, easing away with Zen.
 const strip_h = 22.0;
 fn stripH(d: *const Doc) f64 {
@@ -957,7 +966,7 @@ fn moveCaret(d: *Doc, now: f64) void {
         a = std.math.clamp((x - (gap + padL(d) - 2) + cw) / cw, 0, 1) *
             std.math.clamp((rightEdge(d) - x) / cw, 0, 1) *
             std.math.clamp((y - (top_h - 2) + ramp) / ramp, 0, 1) *
-            std.math.clamp((bottom(d) - (y + lh - 4) + ramp) / ramp, 0, 1);
+            std.math.clamp((edgeAt(d, now) - (y + lh - 4) + ramp) / ramp, 0, 1);
         a = @round(a * 16) / 16;
     }
     const visible = d.shown and a > 0;
@@ -1183,7 +1192,9 @@ fn scenery(d: *const Doc, now: f64) bool {
         !d.pop.settled() or now < d.prev_t0 + fade_time or now < d.stag_t0 + stag_cap + fade_time or (d.flash_n > 0 and now >= d.flash_t0 + flash_hold and now < d.flash_t0 + flash_hold + flash_time) or
         d.load.moving(now) or (d.had_sel and d.sel_in.moving(now)) or d.bar.moving(now) or
         d.sel_out.moving(now) or
-        now < d.fresh_t0 + fade_time or d.hint_hot_t.moving(now);
+        now < d.pband_t0 + fade_time or d.hint_hot_t.moving(now) or
+        d.tog_t[0].moving(now) or d.tog_t[1].moving(now) or now < d.wrap_t0 + wrap_time or
+        d.plist.moving(now) or d.phov_t.moving(now) or now < d.stat_t0 + fade_time;
 }
 
 /// Redraws the window's sidebar strip alone.
@@ -1468,7 +1479,7 @@ const Doc = struct {
     /// When the list opened (its first rows stagger in), the picks shown
     /// before the last typing, and when the picks last changed.
     rows_t0: f64 = 0,
-    prev_picks: [10]usize = undefined,
+    prev_picks: [max_picks]usize = undefined,
     prev_n: usize = 0,
     /// Whether those last picks were none, so "No matches" was on show.
     prev_none: bool = false,
@@ -1491,9 +1502,21 @@ const Doc = struct {
     /// The status strip's line, made again when what it shows changes; it's
     /// cut with an ellipsis to the room.
     stat: Id = null,
-    /// What `stat` was made for (caret, anchor, changes, doc, length, room).
-    stat_at: [6]u64 = @splat(std.math.maxInt(u64)),
+    /// What `stat` was made for (caret, anchor, changes, doc, length, room,
+    /// and the language, indent and line endings).
+    stat_at: [7]u64 = @splat(std.math.maxInt(u64)),
     stat_w: f64 = 0,
+    /// The line `stat` replaced when what the strip says changed in kind
+    /// (another tab, a selection, a language), fading out from `stat_t0`,
+    /// and how wide it was; `stat_kind` is the kind the strip says now.
+    stat_old: Id = null,
+    stat_old_w: f64 = 0,
+    stat_t0: f64 = -1e9,
+    stat_kind: u64 = 0,
+    /// Where "Ln, Col" starts in the pane (-1 while the strip is hidden) and
+    /// how wide it is: a click there opens Go to Line.
+    stat_x: f64 = -1,
+    stat_ln_w: f64 = 0,
     /// Find has no matches, and when its words last shook for it.
     nomatch: bool = false,
     shake_t0: f64 = -1,
@@ -1534,17 +1557,52 @@ const Doc = struct {
     /// Find and replace: the replacement, and which field takes typing.
     with: std.ArrayList(u8) = .empty,
     which: u1 = 0,
-    /// The prompt still shows its starting text; typing replaces it.
-    fresh: bool = false,
-    /// That selection's band as last drawn, for fading out: its width, whether
-    /// it was showing, and when it began to fade.
-    fresh_w: f64 = 0,
-    fresh_shown: bool = false,
-    fresh_t0: f64 = 0,
+    /// Each prompt field's caret and anchor in bytes ([0] the search, line,
+    /// path or command, [1] the replacement), and how far it's scrolled
+    /// sideways, in columns.
+    pcur: [2]usize = .{ 0, 0 },
+    panc: [2]usize = .{ 0, 0 },
+    pscroll: [2]usize = .{ 0, 0 },
+    /// Where each field's text starts in the pane, as last drawn, for clicks.
+    pfx: [2]f64 = .{ 0, 0 },
+    /// The mouse went down in a field and is selecting, by words after a
+    /// double-click, from the word it went down on.
+    pdrag: bool = false,
+    pdrag_word: bool = false,
+    pdrag_from: [2]usize = .{ 0, 0 },
+    /// The fields' undo and redo steps, and whether the last edit was
+    /// typing, which the next letter joins.
+    pundo: std.ArrayList(PromptStep) = .empty,
+    predo: std.ArrayList(PromptStep) = .empty,
+    ptyping: bool = false,
+    /// Recent-query browsing with ↑ and ↓: how far back (an index into the
+    /// field's history), and what was typed before it began.
+    hist_at: ?usize = null,
+    hist_draft: std.ArrayList(u8) = .empty,
+    /// The field's selection band as last drawn, for fading out: its left
+    /// edge and width, whether it was showing, and when it began to fade.
+    pband_x: f64 = 0,
+    pband_w: f64 = 0,
+    pband_shown: bool = false,
+    pband_t0: f64 = -1e9,
     /// The last find, for find next and previous.
     query: std.ArrayList(u8) = .empty,
-    /// Where the caret was when find opened.
+    /// Where the caret was when find opened, and the selection and scroll
+    /// then, which Escape goes back to unless Return or ⌘G stepped to a match.
     origin: usize = 0,
+    origin_sel: [2]usize = .{ 0, 0 },
+    origin_sy: f64 = 0,
+    stepped: bool = false,
+    /// When find last wrapped past the file's end or its start.
+    wrap_t0: f64 = -1e9,
+    /// Find's match-case and whole-word pills: where each drew (x and
+    /// width, in the pane) and how lit it is.
+    tog_x: [2][2]f64 = @splat(.{ 0, 0 }),
+    tog_t: [2]Tween = @splat(.{ .dur = fade_time }),
+    /// Find's ticks along the card's right edge: the screen row of each
+    /// match, and what they were found for.
+    ticks: std.ArrayList(u32) = .empty,
+    ticks_key: u64 = 0,
     /// The find indicator: the current match's span as last drawn, the span
     /// it is fading out of and when that began, and a find jump just made.
     cur_m: ?[2]usize = null,
@@ -1561,13 +1619,22 @@ const Doc = struct {
     flash_n: usize = 0,
     flash_t0: f64 = 0,
     found: [2]usize = .{ 0, 0 },
-    picks: [10]usize = undefined,
+    picks: [max_picks]usize = undefined,
     npicks: usize = 0,
     pick: usize = 0,
+    /// How many names match the typing in all, of which `picks` are the best.
+    pmatches: usize = 0,
+    /// How far the list is scrolled, in points, gliding as the pick moves
+    /// past its ends; and where its first row's top drew in the pane.
+    plist: Tween = .{ .dur = scroll_time },
+    plist_top: f64 = 0,
+    /// The list row under the mouse, the row its highlight is on, and how
+    /// far that has faded in.
+    phover: ?usize = null,
+    phov_row: usize = 0,
+    phov_t: Tween = .{ .dur = fade_time },
     /// The list shows menu commands (⌘K) rather than files.
     palette: bool = false,
-    /// A word for the status bar, cleared by the next key or click.
-    note: []const u8 = "",
     drag: Drag = .char,
     drag_from: [2]usize = .{ 0, 0 },
     /// Syntax state at the start of each line, known for this many lines.
@@ -1632,6 +1699,12 @@ const Doc = struct {
         d.held.deinit(gpa);
         d.held_with.deinit(gpa);
         d.query.deinit(gpa);
+        d.hist_draft.deinit(gpa);
+        d.ticks.deinit(gpa);
+        dropSteps(&d.pundo);
+        dropSteps(&d.predo);
+        d.pundo.deinit(gpa);
+        d.predo.deinit(gpa);
         d.states.deinit(gpa);
         for (&d.lex) |*x| x.deinit();
         d.vfirst.deinit(gpa);
@@ -2088,7 +2161,6 @@ fn install(d: *Doc, pg: Page) void {
     clearSyntax(d);
     d.vfirst.clearRetainingCapacity();
     d.mode = .edit;
-    d.note = "";
     d.ys.snap(d.file.sy);
     d.xs.snap(d.file.sx);
     d.band_on = false;
@@ -2290,7 +2362,7 @@ fn reopenTab(d: *Doc) void {
         if (!files.exists(p)) continue;
         return open(p, d);
     }
-    d.note = "no closed tabs";
+    toast(d.win, "no closed tabs");
 }
 
 /// Closes tab `j`, asking first when it has unsaved changes. A card's last
@@ -2849,7 +2921,7 @@ fn tabToCard(d: *Doc, by: isize) void {
     var list: [64]*Doc = undefined;
     const n = listPanes(d.win.cards, &list, 0);
     if (n < 2) {
-        d.note = "no other card";
+        toast(d.win, "no other card");
         return;
     }
     const i = std.mem.indexOfScalar(*Doc, list[0..n], d) orelse return;
@@ -3242,7 +3314,7 @@ fn save(d: *Doc, as: bool) bool {
     d.file.stamp = files.stamp(d.file.path.?);
     d.file.new_file = false;
     d.file.locked = !files.writable(d.file.path.?);
-    d.note = "saved";
+    toast(d.win, "saved");
     noteRecent(d.file.path.?);
     if (isConf(d.file.path)) {
         // Saving the settings file names its problems again, even ones shown before.
@@ -3862,7 +3934,7 @@ fn checkOutside(d: *Doc) void {
     if (now == null) {
         d.file.stamp = now;
         d.file.ed.buf.markUnsaved();
-        d.note = "deleted on disk";
+        toast(d.win, "deleted on disk");
         return refresh(d);
     }
     const bytes = files.read(gpa, p) catch return;
@@ -3874,7 +3946,7 @@ fn checkOutside(d: *Doc) void {
     if (looksBinary(bytes)) {
         d.file.stamp = now;
         d.file.ed.buf.markUnsaved();
-        d.note = "binary on disk";
+        toast(d.win, "binary on disk");
         return refresh(d);
     }
     d.file.ed.reload(gpa, bytes) catch return;
@@ -3886,7 +3958,7 @@ fn checkOutside(d: *Doc) void {
     }
     d.file.stamp = now;
     d.file.new_file = false;
-    d.note = "reloaded";
+    toast(d.win, "reloaded");
     refresh(d);
 }
 
@@ -4373,6 +4445,29 @@ pub fn pickLook(i: usize) void {
 
 // ---- prompt ----
 
+/// Quick open and the palette keep this many best picks; their list shows
+/// `list_rows` at a time and scrolls through the rest.
+const max_picks = 32;
+const list_rows = 10;
+
+/// Find's match-case and whole-word rules, shared by every card and kept
+/// from one find to the next.
+var find_opts: editor.SearchOpts = .{};
+
+/// One undo step of a prompt field: which field, its text and its selection.
+const PromptStep = struct { which: u1, text: []u8, anc: usize, cur: usize };
+const max_steps = 100;
+
+/// Recent queries, oldest first: find's searches, replace's replacements
+/// and go to line's lines.
+const max_hist = 50;
+var hists: [3]std.ArrayList([]u8) = @splat(.empty);
+
+/// How long find's "wrapped" cue shows, fading in and out.
+const wrap_time = 1.2;
+/// Find's ticks along the card's edge stop at this many rows.
+const max_ticks = 2000;
+
 fn startPrompt(d: *Doc, m: Mode) void {
     // A prompt takes the keys back from the sidebar.
     if (d.win.side_key) {
@@ -4381,20 +4476,42 @@ fn startPrompt(d: *Doc, m: Mode) void {
     }
     d.mode = m;
     d.prompt.clearRetainingCapacity();
-    d.fresh = false;
-    d.fresh_shown = false;
-    d.fresh_w = 0;
-    d.note = "";
+    d.pband_shown = false;
+    d.pband_w = 0;
+    d.pscroll = .{ 0, 0 };
+    d.pcur = .{ 0, 0 };
+    d.panc = .{ 0, 0 };
+    d.hist_at = null;
+    d.ptyping = false;
+    d.pdrag = false;
+    d.phover = null;
+    dropSteps(&d.pundo);
+    dropSteps(&d.predo);
     const was_palette = d.palette;
     switch (m) {
         .find, .replace => {
             d.which = 0;
-            const s = d.file.ed.sel();
-            const picked = d.file.ed.text()[s[0]..s[1]];
-            const seed = if (picked.len > 0 and std.mem.indexOfScalar(u8, picked, '\n') == null) picked else d.query.items;
+            const e = &d.file.ed;
+            const s = e.sel();
+            d.origin_sel = .{ e.anchor, e.cur };
+            d.origin_sy = d.file.sy;
+            d.stepped = false;
+            // The selection on one line, else the word at the caret, which
+            // becomes the current match, else the last search.
+            var seed: []const u8 = d.query.items;
+            var from = s[0];
+            if (s[0] != s[1]) {
+                const picked = e.text()[s[0]..s[1]];
+                if (std.mem.indexOfAny(u8, picked, "\r\n") == null) seed = picked;
+            } else if (caretWord(e)) |w| {
+                seed = e.text()[w[0]..w[1]];
+                from = w[0];
+                e.select(w[0], w[1]);
+            }
             d.prompt.appendSlice(gpa, seed) catch {};
-            d.fresh = true;
-            d.origin = s[0];
+            // Both fields start selected, so typing replaces them.
+            d.pcur = .{ d.prompt.items.len, d.with.items.len };
+            d.origin = from;
             countFound(d);
         },
         .open => {
@@ -4403,7 +4520,7 @@ fn startPrompt(d: *Doc, m: Mode) void {
             const r = root orelse blk: {
                 const p = d.file.path orelse {
                     d.mode = .edit;
-                    d.note = "open a folder first (⌘O)";
+                    toast(d.win, "open a folder first (⌘O)");
                     return refresh(d);
                 };
                 setRoot(gpa.dupe(u8, std.fs.path.dirname(p) orelse "/") catch return);
@@ -4418,7 +4535,25 @@ fn startPrompt(d: *Doc, m: Mode) void {
         },
         else => {},
     }
+    // Find's pills get their tooltips.
+    msg(void, d.win.window, "invalidateCursorRectsForView:", .{d.win.view});
     refresh(d);
+}
+
+/// A byte that's part of a word, for find's prefill and a field's word moves.
+fn wordByte(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_' or c >= 0x80;
+}
+
+/// The word the caret is in or just after, for find's prefill.
+fn caretWord(e: *const Editor) ?[2]usize {
+    const t = e.text();
+    for ([_]usize{ e.cur, e.cur -| 1 }) |p| {
+        if (p >= t.len or !wordByte(t[p])) continue;
+        const w = e.wordAt(p) orelse continue;
+        if (w[0] < w[1]) return w;
+    }
+    return null;
 }
 
 /// The names quick open or the palette picks from, while it's open.
@@ -4438,14 +4573,56 @@ fn pickFiles(d: *Doc, fresh: bool) void {
     d.prev_n = if (live) d.npicks else 0;
     d.prev_none = live and d.npicks == 0;
     d.pick_t0 = CACurrentMediaTime();
-    d.npicks = finder.best(names, d.prompt.items, &d.picks);
+    const q = d.prompt.items;
+    if (d.mode == .open) {
+        var boosts: [32]finder.Boost = undefined;
+        d.npicks = finder.bestWithBoost(names, q, &d.picks, quickBoosts(d, &boosts, q));
+    } else d.npicks = finder.best(names, q, &d.picks);
+    if (std.mem.trim(u8, q, " ").len == 0) {
+        d.pmatches = names.len;
+    } else {
+        d.pmatches = 0;
+        for (names) |p| d.pmatches += @intFromBool(finder.score(p, q) != null);
+    }
     d.pick = 0;
+    d.plist.snap(0);
+}
+
+/// Quick open's boosts: the recent files, newest first, and the cards'
+/// open tabs, leaving out the file on show. An empty search lists them
+/// first; typing still favors them a little.
+fn quickBoosts(d: *const Doc, out: []finder.Boost, q: []const u8) []const finder.Boost {
+    const empty = std.mem.trim(u8, q, " ").len == 0;
+    const here = d.file.path orelse "";
+    var n: usize = 0;
+    const recent = recentFiles();
+    for (0..msg(usize, recent, "count", .{})) |i| {
+        if (n == out.len) return out[0..n];
+        const p = objc.utf8(msg(Id, recent, "objectAtIndex:", .{i}));
+        if (std.mem.eql(u8, p, here)) continue;
+        const rel = relOf(p) orelse continue;
+        out[n] = .{ .path = rel, .amount = if (empty) 4000 - @as(i32, @intCast(@min(i, 30))) * 100 else 256 };
+        n += 1;
+    }
+    for (docs.items) |o| {
+        if (o.closing) continue;
+        for (0..tabCount(o)) |j| {
+            if (n == out.len) return out[0..n];
+            const p = tabPage(o, j).path orelse continue;
+            if (std.mem.eql(u8, p, here)) continue;
+            const rel = relOf(p) orelse continue;
+            out[n] = .{ .path = rel, .amount = if (empty) 5000 else 384 };
+            n += 1;
+        }
+    }
+    return out[0..n];
 }
 
 // ---- command palette ----
 
-/// A menu item the palette lists, with its shortcut and whether it's checked.
-const Command = struct { item: Id, keys: []const u8, on: bool };
+/// A menu item the palette lists, with its shortcut, whether it's checked,
+/// and whether Late-Night has set it, which dims it.
+const Command = struct { item: Id, keys: []const u8, on: bool, grey: bool };
 var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
 var cmd_names: std.ArrayList([]const u8) = .empty;
 var cmds: std.ArrayList(Command) = .empty;
@@ -4481,6 +4658,8 @@ fn addCommands(menu: Id, prefix: []const u8) void {
     const scheme_sel = objc.sel_registerName("pickScheme:");
     // AppKit's own entries for each open window in the Window menu.
     const window_sel = objc.sel_registerName("makeKeyAndOrderFront:");
+    // Help > Keyboard Shortcuts opens this palette.
+    const shortcuts_sel = objc.sel_registerName("showShortcuts:");
     const services = msg(Id, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "servicesMenu", .{});
     for (0..n) |i| {
         const it = msg(Id, menu, "itemAtIndex:", .{@as(isize, @intCast(i))});
@@ -4501,7 +4680,8 @@ fn addCommands(menu: Id, prefix: []const u8) void {
             section = title;
             continue;
         }
-        if (act == palette_sel or act == window_sel or greyed(it)) continue;
+        // The same command in two menus, or under a second key, is listed once.
+        if (act == palette_sel or act == window_sel or act == shortcuts_sel or listedAlready(act, msg(isize, it, "tag", .{}))) continue;
         // Each built-in theme is a command of its own: "Theme: Paper (Light)".
         const name = (if (act == scheme_sel)
             std.fmt.allocPrint(a, "Theme: {s} ({s})", .{ title, if (settings.schemes[@intCast(msg(isize, it, "tag", .{}))].dark) "Dark" else "Light" })
@@ -4510,11 +4690,19 @@ fn addCommands(menu: Id, prefix: []const u8) void {
         else
             a.dupe(u8, title)) catch return;
         cmd_names.append(a, name) catch return;
-        cmds.append(a, .{ .item = msg(Id, it, "retain", .{}), .keys = keysOf(a, it) catch "", .on = isChecked(it) }) catch {
+        cmds.append(a, .{ .item = msg(Id, it, "retain", .{}), .keys = keysOf(a, it) catch "", .on = isChecked(it), .grey = greyed(it) }) catch {
             msg(void, it, "release", .{});
             return;
         };
     }
+}
+
+/// Whether the palette already lists a command that runs `act` with `tag`.
+fn listedAlready(act: Sel, tag: isize) bool {
+    for (cmds.items) |c| {
+        if (msg(Sel, c.item, "action", .{}) == act and msg(isize, c.item, "tag", .{}) == tag) return true;
+    }
+    return false;
 }
 
 /// A menu item's shortcut as the menu shows it, like ⇧⌘S.
@@ -4534,9 +4722,27 @@ fn keysOf(a: std.mem.Allocator, it: Id) ![]const u8 {
 }
 
 /// How a menu shows a key that isn't a letter: Tab (and ⇧Tab's back tab),
-/// Return and the arrows.
+/// Return and Enter, the deletes, Escape, Space, the arrows and the page keys.
 fn keyGlyph(key: []const u8) ?[]const u8 {
-    const glyphs = [_][2][]const u8{ .{ "\t", "⇥" }, .{ "\x19", "⇥" }, .{ "\r", "↩" }, .{ "\u{F700}", "↑" }, .{ "\u{F701}", "↓" }, .{ "\u{F702}", "←" }, .{ "\u{F703}", "→" } };
+    const glyphs = [_][2][]const u8{
+        .{ "\t", "⇥" },
+        .{ "\x19", "⇥" },
+        .{ "\r", "↩" },
+        .{ "\x03", "⌤" },
+        .{ "\x08", "⌫" },
+        .{ "\x7f", "⌫" },
+        .{ "\u{F728}", "⌦" },
+        .{ "\x1b", "⎋" },
+        .{ " ", "␣" },
+        .{ "\u{F700}", "↑" },
+        .{ "\u{F701}", "↓" },
+        .{ "\u{F702}", "←" },
+        .{ "\u{F703}", "→" },
+        .{ "\u{F729}", "↖" },
+        .{ "\u{F72B}", "↘" },
+        .{ "\u{F72C}", "⇞" },
+        .{ "\u{F72D}", "⇟" },
+    };
     for (glyphs) |g| if (std.mem.eql(u8, key, g[0])) return g[1];
     return null;
 }
@@ -4553,7 +4759,7 @@ fn runCommand(_: Id, _: Sel, it: Id) callconv(.c) void {
 fn countFound(d: *Doc) void {
     const t = d.file.ed.text();
     const q = d.prompt.items;
-    d.found = editor.countMatches(t, q, d.file.ed.sel()[0]);
+    d.found = editor.countMatchesWith(t, q, d.file.ed.sel()[0], find_opts);
     d.found[0] += 1;
 }
 
@@ -4569,23 +4775,116 @@ fn foundTally(buf: []u8, found: [2]usize) []const u8 {
 
 /// The prompt field that takes typing: the replacement, or the search.
 fn field(d: *Doc) *std.ArrayList(u8) {
-    return if (d.mode == .replace and d.which == 1) &d.with else &d.prompt;
+    return fieldAt(d, fieldIndex(d));
 }
 
-fn promptType(d: *Doc, s: []const u8) void {
-    const into = field(d);
-    if (d.fresh) into.clearRetainingCapacity();
-    d.fresh = false;
-    if (d.mode == .line) {
-        for (s) |c| if (std.ascii.isDigit(c)) into.append(gpa, c) catch {};
-    } else into.appendSlice(gpa, s) catch {};
+/// Which field takes typing: 1 for replace's replacement, else 0.
+fn fieldIndex(d: *const Doc) u1 {
+    return if (d.mode == .replace and d.which == 1) 1 else 0;
+}
+
+fn fieldAt(d: *Doc, i: u1) *std.ArrayList(u8) {
+    return if (i == 1) &d.with else &d.prompt;
+}
+
+/// The typing field's selection, low end first.
+fn fieldSel(d: *const Doc) [2]usize {
+    const i = fieldIndex(d);
+    return .{ @min(d.panc[i], d.pcur[i]), @max(d.panc[i], d.pcur[i]) };
+}
+
+/// Moves the typing field's caret to `pos`; `extend` keeps the anchor.
+fn fieldTo(d: *Doc, pos: usize, extend: bool) void {
+    const i = fieldIndex(d);
+    d.pcur[i] = @min(pos, fieldAt(d, i).items.len);
+    if (!extend) d.panc[i] = d.pcur[i];
+    d.ptyping = false;
+}
+
+fn dropSteps(list: *std.ArrayList(PromptStep)) void {
+    for (list.items) |s| gpa.free(s.text);
+    list.clearRetainingCapacity();
+}
+
+/// The typing field as it is now, as an undo or redo step.
+fn stepNow(d: *Doc) ?PromptStep {
+    const i = fieldIndex(d);
+    return .{ .which = i, .text = gpa.dupe(u8, fieldAt(d, i).items) catch return null, .anc = d.panc[i], .cur = d.pcur[i] };
+}
+
+fn pushStep(list: *std.ArrayList(PromptStep), s: PromptStep) void {
+    if (list.items.len >= max_steps) gpa.free(list.orderedRemove(0).text);
+    list.append(gpa, s) catch gpa.free(s.text);
+}
+
+/// Replaces the typing field's selection with `s` and runs the prompt's
+/// search again. A letter typed right after another joins its undo step.
+fn fieldPut(d: *Doc, s: []const u8, typing: bool) void {
+    const i = fieldIndex(d);
+    const into = fieldAt(d, i);
+    const r = fieldSel(d);
+    if (!(typing and d.ptyping and r[0] == r[1])) {
+        if (stepNow(d)) |st| pushStep(&d.pundo, st);
+        dropSteps(&d.predo);
+    }
+    into.replaceRange(gpa, r[0], r[1] - r[0], s) catch return;
+    d.pcur[i] = r[0] + s.len;
+    d.panc[i] = d.pcur[i];
+    d.ptyping = typing;
+    d.hist_at = null;
     promptChanged(d);
+}
+
+/// Sets the typing field to `s` with the caret at its end, as one undo step.
+fn fieldSet(d: *Doc, s: []const u8) void {
+    const i = fieldIndex(d);
+    d.panc[i] = 0;
+    d.pcur[i] = fieldAt(d, i).items.len;
+    const keep = d.hist_at;
+    fieldPut(d, s, false);
+    d.hist_at = keep;
+}
+
+/// ⌘Z (and ⇧⌘Z, `redo`) while a prompt is open steps its fields' typing
+/// back (and forth).
+fn promptUndo(d: *Doc, redo: bool) void {
+    const from = if (redo) &d.predo else &d.pundo;
+    const to = if (redo) &d.pundo else &d.predo;
+    const st = from.pop() orelse return;
+    defer gpa.free(st.text);
+    if (d.mode == .replace) d.which = st.which;
+    if (stepNow(d)) |now_st| pushStep(to, now_st);
+    const into = fieldAt(d, st.which);
+    into.clearRetainingCapacity();
+    into.appendSlice(gpa, st.text) catch {};
+    d.panc[st.which] = @min(st.anc, into.items.len);
+    d.pcur[st.which] = @min(st.cur, into.items.len);
+    d.ptyping = false;
+    d.hist_at = null;
+    promptChanged(d);
+}
+
+/// Typing in the prompt (`typing`), or a paste. Go to line takes a line,
+/// `line:column`, or `+N` and `-N` lines from the caret's.
+fn promptType(d: *Doc, s: []const u8, typing: bool) void {
+    if (d.mode != .line) return fieldPut(d, s, typing);
+    var buf: [64]u8 = undefined;
+    var n: usize = 0;
+    for (s) |c| {
+        if (n < buf.len and (std.ascii.isDigit(c) or c == ':' or c == '+' or c == '-')) {
+            buf[n] = c;
+            n += 1;
+        }
+    }
+    if (n > 0) fieldPut(d, buf[0..n], typing);
 }
 
 fn promptChanged(d: *Doc) void {
     switch (d.mode) {
-        .find, .replace => if (d.which == 0) {
-            if (!d.file.ed.find(d.prompt.items, d.origin, false)) d.file.ed.select(d.origin, d.origin);
+        .find, .replace => if (fieldIndex(d) == 0) {
+            d.stepped = false;
+            const e = &d.file.ed;
+            if (!e.findWith(d.prompt.items, d.origin, false, find_opts)) e.select(d.origin, d.origin);
             remember(d);
             countFound(d);
             center(d);
@@ -4601,44 +4900,127 @@ fn remember(d: *Doc) void {
     d.query.appendSlice(gpa, d.prompt.items) catch {};
 }
 
+/// The history the typing field steps through: find's searches (0),
+/// replacements (1) or lines (2); none for quick open and the palette.
+fn histOf(d: *const Doc) ?usize {
+    return switch (d.mode) {
+        .find => 0,
+        .replace => @as(usize, fieldIndex(d)),
+        .line => 2,
+        else => null,
+    };
+}
+
+/// Adds `s` to history `h` as its newest, dropping an older copy.
+fn noteQuery(h: usize, s: []const u8) void {
+    if (s.len == 0) return;
+    const list = &hists[h];
+    for (list.items, 0..) |x, i| {
+        if (!std.mem.eql(u8, x, s)) continue;
+        gpa.free(list.orderedRemove(i));
+        break;
+    }
+    if (list.items.len >= max_hist) gpa.free(list.orderedRemove(0));
+    const own = gpa.dupe(u8, s) catch return;
+    list.append(gpa, own) catch gpa.free(own);
+}
+
+/// Keeps what the prompt's fields hold in their histories, as it runs or closes.
+fn noteQueries(d: *Doc) void {
+    d.hist_at = null;
+    switch (d.mode) {
+        .find => noteQuery(0, d.prompt.items),
+        .replace => {
+            noteQuery(0, d.prompt.items);
+            noteQuery(1, d.with.items);
+        },
+        .line => noteQuery(2, d.prompt.items),
+        else => {},
+    }
+}
+
+/// ↑ (`older`) and ↓ in find, replace and go to line: the field steps
+/// through its recent queries, and past the newest back to what was typed.
+fn stepQuery(d: *Doc, older: bool) void {
+    const h = &hists[histOf(d) orelse return];
+    const n = h.items.len;
+    if (n == 0) return;
+    var at: usize = undefined;
+    if (d.hist_at) |i| {
+        if (older) {
+            if (i == 0) return;
+            at = i - 1;
+        } else if (i + 1 < n) {
+            at = i + 1;
+        } else {
+            d.hist_at = null;
+            return fieldSet(d, d.hist_draft.items);
+        }
+    } else {
+        if (!older) return;
+        d.hist_draft.clearRetainingCapacity();
+        d.hist_draft.appendSlice(gpa, field(d).items) catch {};
+        at = n - 1;
+        // The newest is skipped when the field already holds it.
+        if (std.mem.eql(u8, h.items[at], field(d).items)) {
+            if (at == 0) return;
+            at -= 1;
+        }
+    }
+    d.hist_at = at;
+    fieldSet(d, h.items[at]);
+}
+
 /// Enter in the prompt.
 fn accept(d: *Doc) void {
     const q = d.prompt.items;
+    noteQueries(d);
     switch (d.mode) {
         .find => {
             remember(d);
-            d.fresh = false;
             findAgain(d, shiftHeld());
         },
         .line => {
+            if (std.mem.trim(u8, q, " ").len == 0) {
+                d.mode = .edit;
+                return;
+            }
+            // A line it can't read shakes the prompt, which stays open.
+            const to = lineTarget(d, q) orelse {
+                d.shake_t0 = CACurrentMediaTime();
+                return;
+            };
             d.mode = .edit;
-            const n = std.fmt.parseInt(usize, q, 10) catch return;
-            const row = @min(@max(n, 1), d.file.ed.buf.lines()) - 1;
-            d.file.ed.moveTo(d.file.ed.buf.lineStart(row), false);
+            const e = &d.file.ed;
+            e.moveTo(to, false);
+            // The line it lands on flashes.
+            const row = e.buf.lineOf(to);
+            flashStart(d);
+            flashAdd(d, e.buf.lineStart(row), e.buf.lineStop(row));
             center(d);
         },
-        .open => {
-            if (d.npicks == 0) return;
-            d.mode = .edit;
-            const paths = (quick orelse return).paths.items;
-            if (d.picks[d.pick] >= paths.len) return;
-            const rel = paths[d.picks[d.pick]];
-            var buf: [std.c.PATH_MAX]u8 = undefined;
-            const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ root.?, rel }) catch return;
-            open(path, d);
-        },
+        .open => openPick(d, .here),
         .command => {
             if (d.npicks == 0) return;
+            const c = cmds.items[d.picks[d.pick]];
+            // A command Late-Night set stays put and says why.
+            if (c.grey) return toast(d.win, late_night_why);
             d.mode = .edit;
-            const it = cmds.items[d.picks[d.pick]].item;
-            objc.later(d.win.view, "runCommand:", it, 0);
+            objc.later(d.win.view, "runCommand:", c.item, 0);
         },
         .replace => {
             remember(d);
-            d.fresh = false;
-            const s = d.file.ed.sel();
-            const replaced = d.file.ed.replaceOne(gpa, q, d.with.items) catch false;
-            if (d.file.ed.find(q, if (replaced) d.file.ed.cur else s[0], false)) d.jumped = true;
+            d.stepped = true;
+            const e = &d.file.ed;
+            const s = e.sel();
+            const with = d.with.items;
+            const replaced = e.replaceOneWith(gpa, q, with, find_opts) catch false;
+            // Each replacement flashes where it went in.
+            if (replaced) {
+                flashStart(d);
+                flashAdd(d, s[0], s[0] + with.len);
+            }
+            _ = findStep(d, q, if (replaced) e.cur else s[0], false);
             countFound(d);
             center(d);
         },
@@ -4646,21 +5028,65 @@ fn accept(d: *Doc) void {
     }
 }
 
-var note_buf: [40]u8 = undefined;
+/// Where go to line's `q` points: `line`, `line:column`, `:column` on the
+/// caret's line, or `+N` and `-N` lines from the caret's, each with an
+/// optional `:column`. Lines and columns count from 1 and stop at the ends.
+fn lineTarget(d: *Doc, q: []const u8) ?usize {
+    const b = &d.file.ed.buf;
+    var it = std.mem.splitScalar(u8, std.mem.trim(u8, q, " "), ':');
+    const row_s = it.next() orelse return null;
+    const col_s = it.next();
+    if (it.next() != null) return null;
+    const lines = b.lines();
+    const here = b.lineOf(d.file.ed.cur);
+    var row = here;
+    if (row_s.len > 0 and (row_s[0] == '+' or row_s[0] == '-')) {
+        const n = std.fmt.parseInt(usize, row_s[1..], 10) catch return null;
+        row = if (row_s[0] == '+') @min(here +| n, lines - 1) else here -| n;
+    } else if (row_s.len > 0 or col_s == null) {
+        const n = std.fmt.parseInt(usize, row_s, 10) catch return null;
+        row = @min(@max(n, 1), lines) - 1;
+    }
+    var col: usize = 0;
+    if (col_s) |c| if (c.len > 0) {
+        col = (std.fmt.parseInt(usize, c, 10) catch return null) -| 1;
+    };
+    const l = b.line(row);
+    var i: usize = 0;
+    while (col > 0 and i < l.len) : (col -= 1) i = editor.nextChar(l, i);
+    return b.lineStart(row) + i;
+}
 
 /// ⌥Return in find and replace.
 fn replaceAll(d: *Doc) void {
+    noteQueries(d);
     remember(d);
     var spots: [max_flash][2]usize = undefined;
     const q = d.prompt.items;
-    const n = d.file.ed.replaceAll(gpa, q, d.with.items, &spots) catch 0;
+    const n = d.file.ed.replaceAllWith(gpa, q, d.with.items, &spots, find_opts) catch 0;
     if (n > 0) {
         flashStart(d);
         for (spots[0..@min(n, spots.len)]) |sp| flashAdd(d, sp[0], sp[1]);
     }
     d.mode = .edit;
-    d.note = std.fmt.bufPrint(&note_buf, "replaced {d}", .{n}) catch "";
+    var buf: [64]u8 = undefined;
+    toast(d.win, if (n == 0) "no matches to replace" else std.fmt.bufPrint(&buf, "replaced {d} · ⌘Z to undo", .{n}) catch "");
     center(d);
+}
+
+/// Selects the match of `q` from `from` on (or the last before it, `back`),
+/// noting a wrap past the file's end or start: the prompt shows "wrapped",
+/// and with it closed a note says where to. False when there's none.
+fn findStep(d: *Doc, q: []const u8, from: usize, back: bool) bool {
+    const e = &d.file.ed;
+    if (!e.findWith(q, from, back, find_opts)) return false;
+    d.jumped = true;
+    const p = e.sel()[0];
+    if (if (back) p >= from else p < from) {
+        d.wrap_t0 = CACurrentMediaTime();
+        if (d.mode == .edit) toast(d.win, if (back) "wrapped to the end" else "wrapped to the top");
+    }
+    return true;
 }
 
 fn findAgain(d: *Doc, back: bool) void {
@@ -4668,7 +5094,11 @@ fn findAgain(d: *Doc, back: bool) void {
     const q = if (finding) d.prompt.items else d.query.items;
     if (q.len == 0) return startPrompt(d, .find);
     const s = d.file.ed.sel();
-    if (d.file.ed.find(q, if (back) s[0] else s[0] + 1, back)) d.jumped = true else d.note = "no matches";
+    if (findStep(d, q, if (back) s[0] else s[0] + 1, back)) {
+        d.stepped = true;
+    } else if (finding) {
+        d.shake_t0 = CACurrentMediaTime();
+    } else toast(d.win, "no matches");
     if (finding) countFound(d);
     center(d);
 }
@@ -4678,34 +5108,216 @@ fn shiftHeld() bool {
     return msg(usize, ev, "modifierFlags", .{}) & objc.shift_key != 0;
 }
 
-/// Key commands while the prompt is open.
-fn promptCommand(d: *Doc, name: []const u8) void {
-    if (is(name, "insertNewline")) return accept(d);
-    if (is(name, "insertNewlineIgnoringFieldEditor")) return if (d.mode == .replace) replaceAll(d) else accept(d);
-    if (is(name, "cancelOperation")) {
-        d.mode = .edit;
+/// Escape: the prompt closes. Find and replace put the selection and
+/// scroll back as they were, unless Return or ⌘G stepped to a match.
+fn cancelPrompt(d: *Doc) void {
+    noteQueries(d);
+    const finding = d.mode == .find or d.mode == .replace;
+    d.mode = .edit;
+    if (!finding or d.stepped) return;
+    const n = d.file.ed.text().len;
+    d.file.ed.select(@min(d.origin_sel[0], n), @min(d.origin_sel[1], n));
+    d.file.sy = d.origin_sy;
+    clampScroll(d);
+}
+
+const OpenHow = enum { here, tab, split };
+
+/// Opens quick open's pick: Return the usual way, ⌘Return in a new tab
+/// of this card, ⌥Return in a new card split off this one.
+fn openPick(d: *Doc, how: OpenHow) void {
+    if (d.mode != .open or d.npicks == 0) return;
+    const paths = (quick orelse return).paths.items;
+    if (d.picks[d.pick] >= paths.len) return;
+    var buf: [std.c.PATH_MAX]u8 = undefined;
+    const path = joinPath(&buf, root orelse return, paths[d.picks[d.pick]]) orelse return;
+    d.mode = .edit;
+    switch (how) {
+        .here => open(path, d),
+        .tab => placeFile(d.win, path, .{ .card = d, .zone = .tabs, .k = d.at + 1 }),
+        .split => placeFile(d.win, path, .{ .card = d, .zone = if (roomFor(d, false)) .right else if (roomFor(d, true)) .bottom else .tabs, .k = d.at + 1 }),
+    }
+}
+
+/// Flips find's match case (0) or whole word (1) for every find, and
+/// searches each open find again from where it began.
+fn toggleFind(d: *Doc, which: u1) void {
+    if (which == 0) {
+        find_opts.case_mode = if (find_opts.case_mode == .sensitive) .smart else .sensitive;
+    } else find_opts.whole_word = !find_opts.whole_word;
+    for (docs.items) |o| {
+        if (o.mode != .find and o.mode != .replace) continue;
+        const e = &o.file.ed;
+        if (o.prompt.items.len > 0 and !e.findWith(o.prompt.items, o.origin, false, find_opts)) e.select(o.origin, o.origin);
+        countFound(o);
+        if (o == d) center(o);
+        refresh(o);
+    }
+}
+
+/// Moves the list's pick by `by` rows, stopping at its ends.
+fn pickStep(d: *Doc, by: isize) void {
+    if (d.npicks == 0) return;
+    const to = @as(isize, @intCast(d.pick)) + by;
+    d.pick = @intCast(std.math.clamp(to, 0, @as(isize, @intCast(d.npicks - 1))));
+    showPick(d);
+}
+
+/// Glides the list so the pick is in view.
+fn showPick(d: *Doc) void {
+    const y = f(d.pick) * prow;
+    var to = d.plist.to;
+    if (y < to) to = y;
+    if (y + prow > to + f(list_rows) * prow) to = y + prow - f(list_rows) * prow;
+    d.plist.aim(to, CACurrentMediaTime());
+}
+
+/// Past the word after byte `from` of a prompt field, skipping what's before it.
+fn wordEnd(t: []const u8, from: usize) usize {
+    var i = from;
+    while (i < t.len and !wordByte(t[i])) i += 1;
+    while (i < t.len and wordByte(t[i])) i += 1;
+    return i;
+}
+
+/// The word around byte `at` of a prompt field, or the character there
+/// when it isn't in one, for a double-click.
+fn fieldWord(t: []const u8, at: usize) [2]usize {
+    var a = @min(at, t.len);
+    if (!(a < t.len and wordByte(t[a])) and !(a > 0 and wordByte(t[a - 1]))) return .{ a, editor.nextCluster(t, a) };
+    var z = a;
+    while (a > 0 and wordByte(t[a - 1])) a -= 1;
+    while (z < t.len and wordByte(t[z])) z += 1;
+    return .{ a, z };
+}
+
+/// The byte of field `i` nearest `x` in the pane, as the field last drew.
+fn fieldByte(d: *const Doc, i: u1, x: f64) usize {
+    const t = if (i == 1) d.with.items else d.prompt.items;
+    return editor.byteAtCol(t, @max(0, f(d.pscroll[i]) + (x - d.pfx[i]) / cw));
+}
+
+/// A click on the prompt line: on a find pill it flips it; in a field it
+/// places the caret (⇧ extends), a double-click takes a word and a triple
+/// the whole field. A drag from there selects (`promptDrag`).
+fn promptDown(d: *Doc, p: Point, ev: Id) void {
+    if (d.mode == .find or d.mode == .replace) for (d.tog_x, 0..) |t, k| {
+        if (t[1] > 0 and p.x >= t[0] - 2 and p.x < t[0] + t[1] + 2) return toggleFind(d, @intCast(k));
+    };
+    if (d.mode == .replace) d.which = if (p.x >= d.pfx[1] - 3 * cw) 1 else 0;
+    const i = fieldIndex(d);
+    const t = fieldAt(d, i).items;
+    const at = fieldByte(d, i, p.x);
+    d.pdrag = true;
+    d.pdrag_word = false;
+    d.hist_at = null;
+    switch (msg(isize, ev, "clickCount", .{})) {
+        0, 1 => fieldTo(d, at, msg(usize, ev, "modifierFlags", .{}) & objc.shift_key != 0),
+        2 => {
+            const w = fieldWord(t, at);
+            d.pdrag_word = true;
+            d.pdrag_from = w;
+            d.panc[i] = w[0];
+            d.pcur[i] = w[1];
+        },
+        else => {
+            d.panc[i] = 0;
+            d.pcur[i] = t.len;
+            d.pdrag = false;
+        },
+    }
+    d.ptyping = false;
+    refresh(d);
+}
+
+/// A drag from a click in a field moves its selection's far end, by words
+/// after a double-click; past the field's ends it scrolls on.
+fn promptDrag(d: *Doc, p: Point) void {
+    if (d.mode == .edit) {
+        d.pdrag = false;
         return;
     }
+    const i = fieldIndex(d);
+    const t = fieldAt(d, i).items;
+    const at = fieldByte(d, i, p.x);
+    if (d.pdrag_word) {
+        const w = fieldWord(t, at);
+        if (w[0] < d.pdrag_from[0]) {
+            d.panc[i] = d.pdrag_from[1];
+            d.pcur[i] = w[0];
+        } else {
+            d.panc[i] = d.pdrag_from[0];
+            d.pcur[i] = @max(w[1], d.pdrag_from[1]);
+        }
+    } else d.pcur[i] = at;
+    refresh(d);
+}
+
+fn oneOf(name: []const u8, comptime list: []const []const u8) bool {
+    inline for (list) |x| if (std.mem.eql(u8, name, x)) return true;
+    return false;
+}
+
+/// Key commands while the prompt is open: the field's caret, selection and
+/// deletes, ↑ and ↓ through the list's picks or the field's history, Tab
+/// between replace's fields, Return, ⌥Return and Escape.
+fn promptCommand(d: *Doc, full: []const u8) void {
+    var name = full;
+    var extend = false;
+    if (std.mem.indexOf(u8, name, "AndModifySelection")) |at| {
+        extend = true;
+        name = name[0..at];
+    }
+    if (is(name, "insertNewline") or is(name, "insertLineBreak")) return accept(d);
+    if (is(name, "insertNewlineIgnoringFieldEditor")) return switch (d.mode) {
+        .replace => replaceAll(d),
+        .open => openPick(d, .split),
+        else => accept(d),
+    };
+    if (is(name, "cancelOperation")) return cancelPrompt(d);
     if (d.mode == .replace and (is(name, "insertTab") or is(name, "insertBacktab"))) {
         d.which ^= 1;
-        d.fresh = false;
+        d.ptyping = false;
+        d.hist_at = null;
         return;
     }
-    const into = field(d);
-    if (is(name, "deleteBackward") or is(name, "deleteWordBackward")) {
-        // A fresh prefill is selected, so it goes whole.
-        into.items.len = if (d.fresh) 0 else if (is(name, "deleteBackward"))
-            editor.prevChar(into.items, into.items.len)
-        else
-            editor.wordLeft(into.items, into.items.len);
-        d.fresh = false;
-    } else if (is(name, "deleteToBeginningOfLine")) {
-        into.clearRetainingCapacity();
-    } else if (listing(d) != null and (is(name, "moveUp") or is(name, "moveDown"))) {
-        if (is(name, "moveUp")) d.pick -|= 1 else d.pick = @min(d.pick + 1, d.npicks -| 1);
-        return;
-    } else return;
-    promptChanged(d);
+    if (listing(d) != null) {
+        const by: ?isize = if (is(name, "moveUp")) -1 else if (is(name, "moveDown")) 1 else if (is(name, "pageUp") or is(name, "scrollPageUp")) -list_rows else if (is(name, "pageDown") or is(name, "scrollPageDown")) list_rows else null;
+        if (by) |n| return pickStep(d, n);
+    } else if (is(name, "moveUp") or is(name, "moveDown")) return stepQuery(d, is(name, "moveUp"));
+    const i = fieldIndex(d);
+    const t = fieldAt(d, i).items;
+    const cur = d.pcur[i];
+    const r = fieldSel(d);
+    // An arrow without ⇧ collapses a selection to its side.
+    if (oneOf(name, &.{ "moveLeft", "moveBackward" })) return fieldTo(d, if (r[0] != r[1] and !extend) r[0] else editor.prevCluster(t, cur), extend);
+    if (oneOf(name, &.{ "moveRight", "moveForward" })) return fieldTo(d, if (r[0] != r[1] and !extend) r[1] else editor.nextCluster(t, cur), extend);
+    if (oneOf(name, &.{ "moveWordLeft", "moveWordBackward" })) return fieldTo(d, editor.wordLeft(t, cur), extend);
+    if (oneOf(name, &.{ "moveWordRight", "moveWordForward" })) return fieldTo(d, wordEnd(t, cur), extend);
+    if (oneOf(name, &.{ "moveToBeginningOfLine", "moveToLeftEndOfLine", "moveToBeginningOfParagraph", "moveParagraphBackward", "moveToBeginningOfDocument", "scrollToBeginningOfDocument" })) return fieldTo(d, 0, extend);
+    if (oneOf(name, &.{ "moveToEndOfLine", "moveToRightEndOfLine", "moveToEndOfParagraph", "moveParagraphForward", "moveToEndOfDocument", "scrollToEndOfDocument" })) return fieldTo(d, t.len, extend);
+    // A delete takes the selection when there is one, else what its key reaches.
+    if (!std.mem.startsWith(u8, name, "delete")) return;
+    var span = r;
+    if (r[0] == r[1]) {
+        if (oneOf(name, &.{ "deleteBackward", "deleteBackwardByDecomposingPreviousCharacter" })) {
+            span[0] = editor.prevCluster(t, cur);
+        } else if (is(name, "deleteWordBackward")) {
+            span[0] = editor.wordLeft(t, cur);
+        } else if (oneOf(name, &.{ "deleteToBeginningOfLine", "deleteToBeginningOfParagraph" })) {
+            span[0] = 0;
+        } else if (is(name, "deleteForward")) {
+            span[1] = editor.nextCluster(t, cur);
+        } else if (is(name, "deleteWordForward")) {
+            span[1] = wordEnd(t, cur);
+        } else if (oneOf(name, &.{ "deleteToEndOfLine", "deleteToEndOfParagraph" })) {
+            span[1] = t.len;
+        } else return;
+    }
+    if (span[0] == span[1]) return;
+    d.panc[i] = span[0];
+    d.pcur[i] = span[1];
+    fieldPut(d, "", false);
 }
 
 fn is(name: []const u8, comptime want: []const u8) bool {
@@ -5561,9 +6173,10 @@ var panel_font: Id = null;
 var panel_small: Id = null;
 var panel_base: f64 = 0;
 var panel_small_base: f64 = 0;
-/// How many rows the panel's height holds: the picks, or the one "No matches".
+/// How many rows the panel's height holds: the picks up to `list_rows`, or
+/// the one "No matches".
 fn panelRows(d: *const Doc) usize {
-    return @max(d.npicks, 1);
+    return std.math.clamp(d.npicks, 1, list_rows);
 }
 
 /// The fixed-size row fonts, made once at launch.
@@ -5588,7 +6201,7 @@ fn midOff(fnt: Id) f64 {
 /// centered in a row whose top is `y`. Returns its width.
 fn rowText(ctx: Id, s: []const u8, fnt: Id, c: Rgb, x: f64, y: f64, room: f64) f64 {
     if (room < 4 or s.len == 0) return 0;
-    const line = rowLine(s, fnt, room);
+    const line = rowLine(s, fnt, room, false);
     const base = if (fnt == panel_small) panel_small_base else panel_base;
     paintLine(ctx, line.line, c, 1, x, y + base);
     return line.w;
@@ -5602,18 +6215,20 @@ const RowLine = struct { key: u64 = 0, line: Id = null, w: f64 = 0 };
 var row_lines: [128]RowLine = @splat(.{});
 var row_next: usize = 0;
 
-/// `uiLine(s, fnt, room)` from `row_lines`, made on a miss. The cache owns it.
-fn rowLine(s: []const u8, fnt: Id, room: f64) *const RowLine {
+/// `uiLine(s, fnt, room)` from `row_lines`, made on a miss, cut in its
+/// middle with `mid`. The cache owns it.
+fn rowLine(s: []const u8, fnt: Id, room: f64, mid: bool) *const RowLine {
     var h = std.hash.Fnv1a_64.init();
     h.update(std.mem.asBytes(&fnt));
     h.update(std.mem.asBytes(&room));
+    h.update(&.{@as(u8, @intFromBool(mid))});
     h.update(s);
     const key = h.final() | 1;
     for (&row_lines) |*e| if (e.key == key) return e;
     const e = &row_lines[row_next];
     row_next = (row_next + 1) % row_lines.len;
     if (e.line) |l| objc.CFRelease(l);
-    e.* = .{ .key = key, .line = uiLine(s, fnt, room) };
+    e.* = .{ .key = key, .line = uiLineCut(s, fnt, room, if (mid) 2 else 1) };
     e.w = lineW(e.line);
     return e;
 }
@@ -5636,6 +6251,9 @@ fn panelRow(ctx: Id, d: *const Doc, th: *const Theme, dark: bool, p: usize, left
     if (d.palette) {
         if (p >= cmds.items.len) return;
         const c = cmds.items[p];
+        // A command Late-Night set shows dimmed; picking it says why.
+        const name_ink = if (c.grey) mixRgb(th.panel, th.muted, a * 0.6) else ink;
+        const lead_ink = if (c.grey) mixRgb(th.panel, th.muted, a * 0.45) else dim;
         const x = left + check_col;
         if (c.on) drawIconIn(icon(.check, dark, th), left, y, check_col, prow, a);
         // Shortcuts: one glyph to a cell, flush right like a menu's.
@@ -5644,23 +6262,88 @@ fn panelRow(ctx: Id, d: *const Doc, th: *const Theme, dark: bool, p: usize, left
         var at = right - keys_w;
         var it = (std.unicode.Utf8View.init(c.keys) catch return).iterator();
         while (it.nextCodepointSlice()) |g| : (at += key_cell) {
-            const line = rowLine(g, panel_small, 1e5);
-            paintLine(ctx, line.line, dim, 1, at + (key_cell - line.w) / 2, y + panel_small_base);
+            const line = rowLine(g, panel_small, 1e5, false);
+            paintLine(ctx, line.line, lead_ink, 1, at + (key_cell - line.w) / 2, y + panel_small_base);
         }
         const room = right - keys_w - (if (cells > 0) @as(f64, 12) else 0) - x;
         const name = cmd_names.items[p];
+        // The section leads in quietly, with no colon after it.
         if (std.mem.indexOf(u8, name, ": ")) |j| {
-            const pw = rowText(ctx, name[0 .. j + 1], panel_font, dim, x, y, room);
-            _ = rowText(ctx, name[j + 2 ..], panel_font, ink, x + pw + 4, y, room - pw - 4);
-        } else _ = rowText(ctx, name, panel_font, ink, x, y, room);
+            const pw = rowText(ctx, name[0..j], panel_font, lead_ink, x, y, room);
+            _ = rowText(ctx, name[j + 2 ..], panel_font, name_ink, x + pw + 6, y, room - pw - 6);
+        } else _ = rowText(ctx, name, panel_font, name_ink, x, y, room);
         return;
     }
     const paths = (quick orelse return).paths.items;
     if (p >= paths.len) return;
     const path = paths[p];
     const slash = if (std.mem.lastIndexOfScalar(u8, path, '/')) |j| j + 1 else 0;
-    const nw = rowText(ctx, path[slash..], panel_font, ink, left, y, right - left);
-    _ = rowText(ctx, path[0..slash], panel_small, dim, left + nw + 8, y, right - left - nw - 8);
+    // The file's Finder icon, its name, then its folder cut in the middle;
+    // the letters the search matched draw in the accent.
+    const s = 16.0;
+    const img = iconFor(path[slash..]);
+    if (img != null) msg(void, img, "drawInRect:fromRect:operation:fraction:respectFlipped:hints:", .{ Rect{ .x = left, .y = @round(y + (prow - s) / 2), .w = s, .h = s }, Rect{}, @as(usize, 2), a, true, @as(Id, null) });
+    const x = left + s + 8;
+    if (right - x < 4) return;
+    const bits = matchBits(path, d.prompt.items);
+    const hi = mixRgb(th.panel, th.caret, a);
+    const nl = rowLine(path[slash..], panel_font, right - x, false);
+    paintLine(ctx, nl.line, ink, 1, x, y + panel_base);
+    markMatches(ctx, nl, path[slash..], &bits, slash, hi, x, y + panel_base);
+    const dx = x + nl.w + 8;
+    if (slash == 0 or right - dx < 8) return;
+    const dl = rowLine(path[0..slash], panel_small, right - dx, true);
+    paintLine(ctx, dl.line, dim, 1, dx, y + panel_small_base);
+    markMatches(ctx, dl, path[0..slash], &bits, 0, hi, dx, y + panel_small_base);
+}
+
+const MatchBits = std.bit_set.Static(512);
+
+/// The bytes of `path` that quick open's match of `q` lands on: each word
+/// of `q` taken left to right, as `finder.score` matches it.
+fn matchBits(path: []const u8, q: []const u8) MatchBits {
+    var bits: MatchBits = .empty;
+    var words = std.mem.tokenizeScalar(u8, q, ' ');
+    while (words.next()) |w| {
+        var qi: usize = 0;
+        for (path, 0..) |ch, i| {
+            if (qi == w.len or i >= MatchBits.bit_length) break;
+            if (std.ascii.toLower(ch) != std.ascii.toLower(w[qi])) continue;
+            bits.set(i);
+            qi += 1;
+        }
+    }
+    return bits;
+}
+
+/// Draws again, in `c`, the letters of row line `rl` (which shows `s`)
+/// whose bytes, counted from `off`, are set in `bits`: the same glyphs,
+/// clipped to their own cells.
+fn markMatches(ctx: Id, rl: *const RowLine, s: []const u8, bits: *const MatchBits, off: usize, c: Rgb, x: f64, base: f64) void {
+    if (rl.line == null) return;
+    var rects: [64]Rect = undefined;
+    var n: usize = 0;
+    var u: isize = 0;
+    var i: usize = 0;
+    while (i < s.len and n < rects.len) {
+        const len: usize = @min(std.unicode.utf8ByteSequenceLength(s[i]) catch 1, s.len - i);
+        const units: isize = if (len == 4) 2 else 1;
+        if (off + i < MatchBits.bit_length and bits.isSet(off + i)) {
+            const x0 = CTLineGetOffsetForStringIndex(rl.line, u, null);
+            const x1 = CTLineGetOffsetForStringIndex(rl.line, u + units, null);
+            if (x1 > x0) {
+                rects[n] = .{ .x = x + x0, .y = base - 18, .w = x1 - x0, .h = 24 };
+                n += 1;
+            }
+        }
+        u += units;
+        i += len;
+    }
+    if (n == 0) return;
+    objc.CGContextSaveGState(ctx);
+    CGContextClipToRects(ctx, &rects, n);
+    paintLine(ctx, rl.line, c, 1, x, base);
+    objc.CGContextRestoreGState(ctx);
 }
 
 // ---- sidebar ----
@@ -6426,6 +7109,8 @@ fn dropHead(d: *Doc) void {
     if (d.stat) |l| objc.CFRelease(l);
     d.stat = null;
     d.stat_at[0] = std.math.maxInt(u64);
+    if (d.stat_old) |l| objc.CFRelease(l);
+    d.stat_old = null;
 }
 
 /// Code points in `s`: the bytes that don't continue a character.
@@ -6457,21 +7142,34 @@ fn put(buf: []u8, n: *usize, comptime fmt: []const u8, args: anytype) void {
 }
 
 /// The status strip's line: the caret's line and column, the selection's
-/// size, and for text and Markdown the words. Made again only when the caret,
-/// the selection or the text changed; the buffer keeps the word count exact.
-fn statusLine(d: *Doc, room: f64) void {
-    const b = &d.file.ed.buf;
-    const t = d.file.ed.text();
+/// size, for text and Markdown the words, then the language, the indent and
+/// the line endings. Made again only when one of those changed; the buffer
+/// keeps the word count exact. A change in kind (another tab, a selection
+/// coming or going, a new language, indent or line ending) keeps the old
+/// line to crossfade from.
+fn statusLine(d: *Doc, room: f64, now: f64) void {
+    const e = &d.file.ed;
+    const b = &e.buf;
+    const t = e.text();
     const avail = @max(room, 0);
-    const at = [6]u64{ d.file.ed.cur, d.file.ed.anchor, b.changes, d.file.id, t.len, @intFromFloat(avail) };
+    const tabs = e.indent.len > 0 and e.indent[0] == '\t';
+    const lang: []const u8 = if (d.file.lang_i) |i| syntax.languages[i].name else syntax.nameOf(d.file.lang);
+    var lh_ = std.hash.Fnv1a_64.init();
+    lh_.update(lang);
+    lh_.update(e.indent);
+    lh_.update(e.eol);
+    lh_.update(&.{e.tab_width});
+    const look = lh_.final();
+    const at = [7]u64{ e.cur, e.anchor, b.changes, d.file.id, t.len, @intFromFloat(avail), look };
     if (d.stat != null and std.mem.eql(u64, &at, &d.stat_at)) return;
     d.stat_at = at;
-    var buf: [160]u8 = undefined;
+    var buf: [240]u8 = undefined;
     var n: usize = 0;
     var g: [32]u8 = undefined;
-    const li = b.lineOf(d.file.ed.cur);
-    put(&buf, &n, "Ln {d}, Col {d}", .{ li + 1, codepoints(t[b.lineStart(li)..d.file.ed.cur]) + 1 });
-    const s = d.file.ed.sel();
+    const li = b.lineOf(e.cur);
+    put(&buf, &n, "Ln {d}, Col {d}", .{ li + 1, codepoints(t[b.lineStart(li)..e.cur]) + 1 });
+    const ln_end = n;
+    const s = e.sel();
     if (s[0] != s[1]) {
         const l1 = b.lineOf(s[1]);
         var lines = l1 - b.lineOf(s[0]) + 1;
@@ -6488,20 +7186,37 @@ fn statusLine(d: *Doc, room: f64) void {
         const words = b.wordCount();
         put(&buf, &n, "  ·  {s} word{s}", .{ grouped(&g, words), if (words == 1) "" else "s" });
     }
-    if (d.stat) |l| objc.CFRelease(l);
+    const width: usize = if (tabs) e.tab_width else e.indent.len;
+    put(&buf, &n, "  ·  {s}  ·  {s}: {d}  ·  {s}", .{ lang, if (tabs) "Tabs" else "Spaces", width, if (e.eol.len == 2) "CRLF" else "LF" });
+    const kind = look ^ (@as(u64, d.file.id) << 2) ^ @as(u64, @intFromBool(s[0] != s[1])) ^ (@as(u64, @intFromBool(words_on)) << 1);
+    if (d.stat) |l| {
+        if (kind != d.stat_kind) {
+            if (d.stat_old) |o| objc.CFRelease(o);
+            d.stat_old = l;
+            d.stat_old_w = d.stat_w;
+            d.stat_t0 = now;
+        } else objc.CFRelease(l);
+    }
+    d.stat_kind = kind;
     d.stat = uiLine(buf[0..n], path_font, avail);
     d.stat_w = lineW(d.stat);
+    d.stat_ln_w = textW(buf[0..ln_end], path_font);
 }
 
 /// `s` as a line in `fnt` that takes the context's fill color, cut with an
 /// ellipsis past `width`. Owned: CFRelease it.
 fn uiLine(s: []const u8, fnt: Id, width: f64) Id {
+    return uiLineCut(s, fnt, width, 1);
+}
+
+/// `uiLine` cut at its end (`at` 1) or in its middle (2).
+fn uiLineCut(s: []const u8, fnt: Id, width: f64, at: u32) Id {
     const attrs = uiAttrs(fnt);
     const text = attributed(s, attrs);
     defer msg(void, text, "release", .{});
     const line = objc.CTLineCreateWithAttributedString(text);
     if (line == null or lineW(line) <= width) return line;
-    const short = objc.CTLineCreateTruncatedLine(line, width, 1, uiDots(fnt));
+    const short = objc.CTLineCreateTruncatedLine(line, width, at, uiDots(fnt));
     if (short == null) return line;
     objc.CFRelease(line.?);
     return short;
@@ -6775,7 +7490,7 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
 }
 
 /// How long a note holds before it fades out.
-const toast_hold = 2.4;
+const toast_hold = 2.0;
 /// A note for a window that doesn't exist yet, shown by the first one drawn.
 var pending_toast: [160]u8 = undefined;
 var pending_len: usize = 0;
@@ -6836,7 +7551,7 @@ fn findMarks(d: *Doc, s: [2]usize, finding: bool, now: f64) FindMarks {
     var cur_m: ?[2]usize = null;
     if (finding) {
         const want = d.prompt.items;
-        if (s[1] - s[0] == want.len and editor.matchAt(d.file.ed.text(), s[0], want, editor.caseSensitive(want))) cur_m = s;
+        if (s[1] - s[0] == want.len and editor.matches(d.file.ed.text(), s[0], want, find_opts.sensitive(want), find_opts.whole_word)) cur_m = s;
     } else if (d.mode == .edit and s[0] != s[1]) {
         const kept = if (d.cur_m) |h| h[0] == s[0] and h[1] == s[1] else false;
         if (d.jumped or kept) cur_m = s;
@@ -6865,12 +7580,12 @@ fn findMarks(d: *Doc, s: [2]usize, finding: bool, now: f64) FindMarks {
         d.find_seen = false;
     } else if (!d.find_seen) {
         d.find_seen = true;
-        if (d.fresh) d.stag_t0 = now;
+        if (d.pundo.items.len == 0) d.stag_t0 = now;
     }
     // The other matches' pills stay while the find bar slides away, fading with it.
     const closing_find = d.mode == .edit and d.held_id == d.file.id and (d.held_mode == .find or d.held_mode == .replace) and d.pbar.at(now) > 0.002;
     const pills: []const u8 = if (finding) d.prompt.items else if (closing_find) d.held.items else "";
-    return .{ .cur = cur_m, .pop = pop, .prev_a = prev_a, .pills = pills, .sensitive = editor.caseSensitive(pills), .pills_a = if (finding) 1 else d.pbar.at(now) };
+    return .{ .cur = cur_m, .pop = pop, .prev_a = prev_a, .pills = pills, .sensitive = find_opts.sensitive(pills), .pills_a = if (finding) 1 else d.pbar.at(now) };
 }
 
 /// Draws a card in its pane's coordinates: the text, the prompt line and
@@ -6897,6 +7612,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     }
     d.inked.aim(if (key) 1 else 0, now);
     const ka = d.inked.at(now);
+    aimBand(d, now);
     const b = &d.file.ed.buf;
     d.gut.aim(gutCols(d), now);
     d.gw = d.gut.at(now) * cw * zen_k;
@@ -7090,7 +7806,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             var at = sg.start;
             var col = sg.col;
             var j = sg.start -| (fm.pills.len - 1);
-            while (j < sg.end and j + fm.pills.len <= l.len) : (j += 1) if (editor.matchAt(l, j, fm.pills, fm.sensitive)) {
+            while (j < sg.end and j + fm.pills.len <= l.len) : (j += 1) if (editor.matches(l, j, fm.pills, fm.sensitive, find_opts.whole_word)) {
                 const lo = @max(j, sg.start);
                 const hi = @min(j + fm.pills.len, sg.end);
                 const c0 = editor.colOfTab(l, at, col, lo, tw);
@@ -7192,7 +7908,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // the line numbers (or the card's edge).
     if (d.vx > 0.5) {
         const sa = std.math.clamp(d.vx / cw, 0, 1);
-        const h = bottom(d) - top_h;
+        const h = edgeAt(d, now) - top_h;
         for (0..4) |i| fillA(ctx, th.bg, sa * (0.8 - 0.2 * f(i)), clip_l + f(i) * cw / 4, top_h, cw / 4, h);
         fillA(ctx, th.muted, sa * @as(f64, if (contrast) 0.5 else 0.3), snapPx(clip_l), top_h, hair(), h);
     }
@@ -7201,6 +7917,8 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     objc.CGContextRestoreGState(ctx);
 
     drawBar(d, ctx, th, card, now);
+    // Find's matches tick the card's right edge, fading with its band.
+    drawTicks(d, ctx, th, card, fm.pills, fm.cur, fm.pills_a);
 
     if (d.mode == .edit) {
         const spot: [3]usize = .{ 0, here.row, here.col };
@@ -7224,13 +7942,26 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
 
     // The status strip along the card's bottom, in the header's small folder
     // ink, dimmer in a card that isn't key. It fades out under the prompt band
-    // as it rises and back as it sinks, and away with Zen.
+    // as it rises and back as it sinks, and away with Zen. A change in what
+    // it says crossfades from the old line.
     const stat_a = zen_k * (1 - d.pbar.at(now));
     if (stat_a > 0.01) {
-        statusLine(d, card.w - 2 * pad_x);
-        const sy = card.y + card.h - strip_h / 2 + path_off;
-        paintLine(ctx, d.stat, th.muted, stat_a * (0.62 + 0.38 * ka), @round(card.x + card.w - pad_x - d.stat_w), @round(sy));
-    }
+        statusLine(d, card.w - 2 * pad_x, now);
+        const sy = @round(card.y + card.h - strip_h / 2 + path_off);
+        const sr = card.x + card.w - pad_x;
+        const sa = stat_a * (0.62 + 0.38 * ka);
+        const xf = std.math.clamp((now - d.stat_t0) / fade_time, 0, 1);
+        if (d.stat_old) |l| {
+            if (xf < 1) {
+                paintLine(ctx, l, th.muted, sa * (1 - xf), @round(sr - d.stat_old_w), sy);
+            } else {
+                objc.CFRelease(l);
+                d.stat_old = null;
+            }
+        }
+        d.stat_x = @round(sr - d.stat_w);
+        paintLine(ctx, d.stat, th.muted, sa * xf, d.stat_x, sy);
+    } else d.stat_x = -1;
 
     drawPrompt(d, ctx, th, &k, card, ka, key, finding, now);
 
@@ -7361,7 +8092,7 @@ fn drawBar(d: *Doc, ctx: Id, th: *const Theme, card: Rect, now: f64) void {
         const track = @max(x1 - x0, 0);
         const knob = @min(@max(@round(track * textw / (textw + d.hmax)), 24), track);
         const at_x = @round((track - knob) * std.math.clamp(d.vx / d.hmax, 0, 1));
-        const y = bottom(d) - bar_w - 3;
+        const y = edgeAt(d, now) - bar_w - 3;
         d.htrack = .{ .x = x0, .y = y, .w = track, .h = bar_w };
         d.hknob = .{ .x = x0 + at_x, .y = y, .w = knob, .h = bar_w };
         const press: f64 = if (d.bar_drag == .h) 1.4 else 1;
@@ -7370,7 +8101,8 @@ fn drawBar(d: *Doc, ctx: Id, th: *const Theme, card: Rect, now: f64) void {
 }
 
 fn drawPanel(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, card: Rect, now: f64) void {
-    const by = bottom(d);
+    // The list rides the prompt band's top edge as it slides.
+    const by = edgeAt(d, now);
     const want_ph: f64 = if (listing(d) != null) f(panelRows(d)) * prow + 2 * ppad else 0;
     d.panel.aim(want_ph, now);
     const ph = d.panel.at(now);
@@ -7379,6 +8111,7 @@ fn drawPanel(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, card
     if (closing and ph <= 0.5) {
         d.pick_live = false;
         d.pick_s.snap(d.pick_s.to);
+        d.phover = null;
     }
     if (ph > 0.5 and (d.palette or quick != null)) {
         const px = card.x + 6;
@@ -7394,6 +8127,10 @@ fn drawPanel(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, card
         objc.CGContextClipToRect(ctx, .{ .x = px, .y = by - ph, .w = pw, .h = ph });
         clipRound(ctx, px, by - ph, pw, ph + 8, 8);
         fill(ctx, th.panel, px, by - ph, pw, ph);
+        const top = by - ph + ppad;
+        d.plist_top = top;
+        // Past `list_rows` picks the list scrolls, gliding to keep the pick in view.
+        const scroll = d.plist.at(now);
         // The picked row's highlight springs from row to row.
         if (!closing) {
             const pick_y = f(d.pick) * prow;
@@ -7401,6 +8138,11 @@ fn drawPanel(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, card
             if (!d.pick_live) d.rows_t0 = now;
             d.pick_live = true;
         }
+        // The row under the mouse lights faintly, fading in and out.
+        if (d.phover) |h| d.phov_row = h;
+        d.phov_t.aim(if (d.phover != null and !closing) 1 else 0, now);
+        const hov_a = d.phov_t.at(now);
+        if (hov_a > 0.01 and d.phov_row < d.npicks and d.phov_row != d.pick) pill(ctx, th.fg, (if (contrast) @as(f64, 0.1) else 0.05) * hov_a, px + 6, top + f(d.phov_row) * prow - scroll, pw - 12, prow, 6);
         // The first rows fade in a step apart; rows that changed under the
         // typing crossfade from what was there, and rows that came or went
         // fade in or out in place. A fresh open starts its rows after the
@@ -7409,12 +8151,15 @@ fn drawPanel(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, card
         const crossing = swap < 1 and d.rows_t0 < d.pick_t0;
         if (d.npicks > 0 or (crossing and d.prev_n > 0)) {
             const keep: f64 = if (d.npicks > 0) 1 else 1 - swap;
-            selFill(ctx, th, dark, win_key, keep, px + 6, by - ph + ppad + d.pick_s.step(now), pw - 12, prow, 6);
+            selFill(ctx, th, dark, win_key, keep, px + 6, top + d.pick_s.step(now) - scroll, pw - 12, prow, 6);
         } else d.pick_s.snap(d.pick_s.to);
         const shown = if (crossing) @max(d.npicks, d.prev_n) else d.npicks;
-        for (0..shown) |i| {
-            const y = by - ph + ppad + f(i) * prow;
-            const lag = row_lag * f(@min(i, 5));
+        // Only the rows the scroll shows draw, and one more while it glides.
+        const first = @min(@as(usize, @intFromFloat(@max(@floor(scroll / prow), 0))), shown);
+        const upto = @min(shown, first + list_rows + 1);
+        for (first..upto) |i| {
+            const y = top + f(i) * prow - scroll;
+            const lag = row_lag * f(@min(i - first, 5));
             const t = std.math.clamp((now - d.rows_t0 - lag) / row_fade, 0, 1);
             const a = t * t * (3 - 2 * t);
             const rise = (1 - a) * 2;
@@ -7436,9 +8181,28 @@ fn drawPanel(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, card
             const lone: f64 = if (d.npicks > 0) 1 - swap else if (crossing and !d.prev_none) swap else 1;
             const t = std.math.clamp((now - d.rows_t0) / row_fade, 0, 1);
             const a = t * t * (3 - 2 * t);
-            panelNone(ctx, th, px + 14, by - ph + ppad, a * lone, (1 - a) * 2);
+            panelNone(ctx, th, px + 14, top, a * lone, (1 - a) * 2);
         }
         objc.CGContextRestoreGState(ctx);
+    }
+}
+
+/// Slides the prompt band for this frame: up from the card's bottom as the
+/// prompt opens, its words rising in a beat behind it, and back down as it
+/// closes, its words fading out. Runs before anything reads `edgeAt`.
+fn aimBand(d: *Doc, now: f64) void {
+    if (d.mode != .edit) {
+        if (!d.prompt_on) {
+            d.prompt_t.snap(0);
+            d.pbar_t0 = now;
+        }
+        d.prompt_on = true;
+        d.pbar.aimOver(1, panel_time, now);
+        if (now >= d.pbar_t0 + words_lag) d.prompt_t.aimOver(1, panel_time, now);
+    } else {
+        if (d.prompt_on) d.prompt_t.aimOver(0, band_out, now);
+        d.prompt_on = false;
+        d.pbar.aimOver(0, band_out, now);
     }
 }
 
@@ -7447,98 +8211,234 @@ fn drawPrompt(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, ka: f64, 
     const ty = band_y + 6 + baseline;
     const tx = gap + padL(d);
     // The prompt line: find, replace, go to line, quick open and the palette.
-    // Its band slides up from the card's bottom as it opens and back down as
-    // it closes, drawing what it last showed until it's gone. The text above
-    // already uses the final `bottom()`.
+    // Its band slides with `aimBand`, drawing what it last showed until it's
+    // gone. The text above already uses the final `bottom()`.
     var buf: [64]u8 = undefined;
     // A window that isn't key dims its header and prompt a step.
     const ink = mixRgb(th.muted, th.fg, ka);
     const prompting = d.mode != .edit;
     const nomatch = prompting and finding and d.found[1] == 0;
-    if (nomatch and !d.nomatch) d.shake_t0 = now;
+    if (nomatch and !d.nomatch) {
+        d.shake_t0 = now;
+        haptic(.level);
+    }
     d.nomatch = nomatch;
-    // "No matches" shakes the words sideways, settling over `shake_time`.
+    // "No matches" shakes the words and the tally sideways, settling over `shake_time`.
     const shake_p = (now - d.shake_t0) / shake_time;
     const shake = if (shake_p >= 0 and shake_p < 1) 6 * @sin(2 * std.math.pi * 3 * shake_p) * (1 - shake_p) else 0;
     if (prompting) {
-        if (!d.prompt_on) {
-            d.prompt_t.snap(0);
-            d.pbar_t0 = now;
-        }
-        d.prompt_on = true;
-        d.pbar.aimOver(1, panel_time, now);
-        // The words rise a beat after the band starts.
-        if (now >= d.pbar_t0 + words_lag) d.prompt_t.aim(1, now);
-        var tally: []const u8 = "";
-        if (finding) tally = foundTally(&buf, d.found);
-        if (d.mode == .open and quick != null) tally = std.fmt.bufPrint(&buf, "{d} files", .{quick.?.paths.items.len}) catch "";
-        if (d.mode == .command) tally = std.fmt.bufPrint(&buf, "{d} commands", .{cmds.items.len}) catch "";
+        var g: [32]u8 = undefined;
+        const lines = d.file.ed.buf.lines();
+        const tally: []const u8 = switch (d.mode) {
+            .find, .replace => if (finding) foundTally(&buf, d.found) else "",
+            .line => std.fmt.bufPrint(&buf, "of {s} line{s}", .{ grouped(&g, lines), if (lines == 1) "" else "s" }) catch "",
+            .open, .command => listTally(d, &buf),
+            .edit => "",
+        };
         d.held_n = @min(tally.len, d.held_tally.len);
         @memcpy(d.held_tally[0..d.held_n], tally[0..d.held_n]);
         d.held_mode = d.mode;
         d.held_id = d.file.id;
-        d.held_which = d.which;
+        d.held_which = fieldIndex(d);
         d.held.clearRetainingCapacity();
         d.held.appendSlice(gpa, d.prompt.items) catch {};
         d.held_with.clearRetainingCapacity();
         d.held_with.appendSlice(gpa, d.with.items) catch {};
-    } else {
-        d.prompt_on = false;
-        d.pbar.aimOver(0, band_out, now);
     }
     const slide = d.pbar.at(now);
-    if (prompting or slide > 0.002) {
-        const drop = (1 - slide) * barH();
-        objc.CGContextSaveGState(ctx);
-        objc.CGContextTranslateCTM(ctx, 0, drop);
-        fill(ctx, th.bg, card.x, band_y, card.w, barH());
-        fill(ctx, th.rule, card.x, band_y, card.w, hair());
-        // The prompt's words rise into place as it opens.
-        const rise = d.prompt_t.at(now);
-        if (rise < 1) {
-            objc.CGContextSetAlpha(ctx, rise);
-            objc.CGContextTranslateCTM(ctx, 0, (1 - rise) * 6);
+    if (!prompting and slide <= 0.002) {
+        d.pband_shown = false;
+        return;
+    }
+    const drop = (1 - slide) * barH();
+    objc.CGContextSaveGState(ctx);
+    defer objc.CGContextRestoreGState(ctx);
+    objc.CGContextTranslateCTM(ctx, 0, drop);
+    fill(ctx, th.bg, card.x, band_y, card.w, barH());
+    fill(ctx, th.rule, card.x, band_y, card.w, hair());
+    // The words rise into place as the prompt opens, and fade as it closes.
+    const words = d.prompt_t.at(now);
+    if (words < 1) {
+        objc.CGContextSetAlpha(ctx, words);
+        if (prompting) objc.CGContextTranslateCTM(ctx, 0, (1 - words) * 6);
+    }
+    const mode = d.held_mode;
+    const which = d.held_which;
+    const findish = mode == .find or mode == .replace;
+    var right = card.x + card.w - pad_x;
+    // Find's pills sit at the right end: match case, then whole word.
+    if (findish) {
+        var moved = false;
+        var px = right;
+        for ([_]u1{ 1, 0 }) |t| {
+            const on = if (t == 0) find_opts.case_mode == .sensitive else find_opts.whole_word;
+            d.tog_t[t].aim(if (on) 1 else 0, now);
+            const lit = std.math.clamp(d.tog_t[t].at(now), 0, 1);
+            const w = 2 * cw + 10;
+            px -= w;
+            const h = lh - 2;
+            const y = band_y + (barH() - h) / 2;
+            pill(ctx, th.caret, (if (contrast) @as(f64, 0.3) else 0.18) * lit, px, y, w, h, 5);
+            ring(ctx, th.muted, (if (contrast) @as(f64, 0.7) else 0.4) * (1 - lit), px, y, w, h, 5);
+            _ = k.text(if (t == 0) "Aa" else "\\b", null, th, mixRgb(th.muted, th.caret, lit), px + 5, ty, 0, 2);
+            if (prompting and (d.tog_x[t][0] != px or d.tog_x[t][1] != w)) {
+                d.tog_x[t] = .{ px, w };
+                moved = true;
+            }
+            px -= 4;
         }
-        var x: f64 = tx + shake;
-        const label = switch (d.held_mode) {
-            .find, .replace => "find",
-            .line => "line",
-            .command => "run",
-            else => "open",
-        };
-        x += f(k.text(label, null, th, th.caret, x, ty, 0, 8) + 1) * cw;
-        // A prefilled selection fades out over `fade_time` once typing or a
-        // click ends it, at the width it had.
-        if (prompting and d.fresh) {
-            d.fresh_w = f(editor.colOf(d.held.items, 0, 0, d.held.items.len)) * cw;
-            d.fresh_shown = true;
-        } else if (d.fresh_shown) {
-            d.fresh_shown = false;
-            d.fresh_t0 = now;
+        right = px - 2 * cw;
+        if (moved) msg(void, d.win.window, "invalidateCursorRectsForView:", .{d.win.view});
+    } else if (prompting) d.tog_x = @splat(.{ 0, 0 });
+    // The tally, tinted when nothing matches. For a moment after find wraps,
+    // "wrapped" crossfades in over it.
+    const tally = d.held_tally[0..d.held_n];
+    const tally_cols = codepoints(tally);
+    const wa = if (findish) wrapAlpha(d, now) else 0;
+    const tally_ink = if (d.nomatch) mixRgb(th.muted, th.caret, 0.8) else th.muted;
+    if (wa < 1) _ = k.text(tally, null, th, mixRgb(th.bg, tally_ink, 1 - wa), right - f(tally_cols) * cw + shake, ty, 0, 64);
+    if (wa > 0) _ = k.text("wrapped", null, th, mixRgb(th.bg, th.caret, wa), right - 7 * cw, ty, 0, 8);
+    const kept_cols = if (wa > 0) @max(tally_cols, 7) else tally_cols;
+    if (kept_cols > 0) right -= f(kept_cols + 2) * cw;
+    // Replace says what its keys do, while there's room for them.
+    if (mode == .replace) {
+        const hl = rowLine("⇥ switch    ↩ replace    ⌥↩ all", panel_small, 1e5, false);
+        if (right - hl.w - tx > 48 * cw) {
+            right -= hl.w;
+            paintLine(ctx, hl.line, th.muted, if (contrast) 0.9 else 0.6, right, ty);
+            right -= 2 * cw;
         }
-        const band_a = if (d.fresh_shown) 1 else 1 - std.math.clamp((now - d.fresh_t0) / fade_time, 0, 1);
-        if (band_a > 0 and d.fresh_w > 0) {
-            k.flush();
-            fillA(ctx, th.sel, band_a, x, band_y + 6, d.fresh_w, lh);
+    }
+    const label = switch (mode) {
+        .find, .replace => "find",
+        .line => "line",
+        .command => "run",
+        else => "open",
+    };
+    // In replace only the label of the field taking typing is lit.
+    _ = k.text(label, null, th, if (mode == .replace and which == 1) th.muted else th.caret, tx + shake, ty, 0, 8);
+    const fx0 = tx + f(codepoints(label) + 1) * cw;
+    const room: usize = @intFromFloat(@max(@floor((right - fx0) / cw), 1));
+    var cols = [2]usize{ room, 0 };
+    var fx = [2]f64{ fx0, 0 };
+    if (mode == .replace) {
+        // Each field gets what it needs while both fit, else they share the room.
+        const avail = room -| 7;
+        const need0 = editor.colOf(d.held.items, 0, 0, d.held.items.len) + 1;
+        const need1 = editor.colOf(d.held_with.items, 0, 0, d.held_with.items.len) + 1;
+        cols[0] = @min(if (need0 + need1 <= avail or need0 <= avail / 2) need0 else if (need1 <= avail / 2) avail - need1 else avail / 2, avail);
+        cols[1] = avail - cols[0];
+        fx[1] = fx0 + f(cols[0] + 7) * cw;
+    }
+    // A field scrolls sideways to keep its caret in view.
+    if (prompting) {
+        for ([_]u1{ 0, 1 }) |i| {
+            if (i == 1 and mode != .replace) break;
+            const t = fieldAt(d, i).items;
+            const c = editor.colOf(t, 0, 0, d.pcur[i]);
+            const n = @max(cols[i], 1);
+            var s = d.pscroll[i];
+            if (c < s) s = c;
+            if (c + 1 > s + n) s = c + 1 - n;
+            d.pscroll[i] = @min(s, (editor.colOf(t, 0, 0, t.len) + 1) -| n);
+            d.pfx[i] = fx[i];
         }
-        x += f(k.text(d.held.items, null, th, ink, x, ty, 0, 400)) * cw;
-        var cx = x;
-        if (d.held_mode == .replace) {
-            x += 2 * cw;
-            x += f(k.text("with", null, th, th.caret, x, ty, 0, 8) + 1) * cw;
-            x += f(k.text(d.held_with.items, null, th, ink, x, ty, 0, 400)) * cw;
-            if (d.held_which == 1) cx = x;
+    }
+    // The field's selection, a prefill's included, fades out over
+    // `fade_time` once typing or a click ends it, where it last was.
+    var sel_on = false;
+    if (prompting) {
+        const i = fieldIndex(d);
+        const r = fieldSel(d);
+        const t = fieldAt(d, i).items;
+        const s = d.pscroll[i];
+        const c0 = @max(editor.colOf(t, 0, 0, r[0]), s);
+        const c1 = @min(editor.colOf(t, 0, 0, r[1]), s + cols[i]);
+        if (r[0] != r[1] and c1 > c0) {
+            d.pband_x = fx[i] + f(c0 - s) * cw;
+            d.pband_w = f(c1 - c0) * cw;
+            sel_on = true;
         }
+    }
+    if (sel_on) {
+        d.pband_shown = true;
+    } else if (d.pband_shown) {
+        d.pband_shown = false;
+        d.pband_t0 = now;
+    }
+    const band_a = if (d.pband_shown) 1 else 1 - std.math.clamp((now - d.pband_t0) / fade_time, 0, 1);
+    if (band_a > 0 and d.pband_w > 0) {
         k.flush();
-        if (prompting) {
-            const width = if (d.which == 1 and d.mode == .replace) d.with.items.len else d.prompt.items.len;
-            placeCaret(d, now, cx, band_y + 8 + drop, false, .{ 1 + @as(usize, @intFromEnum(d.mode)) * 2 + d.which, width, 0 }, key, key);
+        fillA(ctx, th.sel, band_a, d.pband_x + shake, band_y + 6, d.pband_w, lh);
+    }
+    _ = k.text(d.held.items, null, th, ink, fx[0] + shake, ty, d.pscroll[0], cols[0]);
+    if (mode == .replace) {
+        _ = k.text("with", null, th, if (which == 1) th.caret else th.muted, fx0 + f(cols[0] + 2) * cw + shake, ty, 0, 8);
+        _ = k.text(d.held_with.items, null, th, ink, fx[1] + shake, ty, d.pscroll[1], cols[1]);
+    }
+    k.flush();
+    if (prompting) {
+        const i = fieldIndex(d);
+        const t = fieldAt(d, i).items;
+        const c = editor.colOf(t, 0, 0, d.pcur[i]);
+        placeCaret(d, now, fx[i] + f(c -| d.pscroll[i]) * cw, band_y + 8 + drop, false, .{ 1 + @as(usize, @intFromEnum(d.mode)) * 2 + i, c, d.pscroll[i] }, key, key);
+    }
+}
+
+/// Quick open's and the palette's tally: "3 of 120 matches" while typing
+/// narrows the list, else "3 of 4,512 files" or commands.
+fn listTally(d: *const Doc, buf: []u8) []const u8 {
+    if (d.npicks == 0) return "no matches";
+    const all = (listing(d) orelse return "").len;
+    var g: [32]u8 = undefined;
+    const what = if (d.pmatches < all) "matches" else if (d.mode == .command) "commands" else "files";
+    return std.fmt.bufPrint(buf, "{d} of {s} {s}", .{ d.pick + 1, grouped(&g, d.pmatches), what }) catch "";
+}
+
+/// How much of find's "wrapped" cue shows: in over `fade_time`, out over
+/// the last quarter second of `wrap_time`.
+fn wrapAlpha(d: *const Doc, now: f64) f64 {
+    const t = now - d.wrap_t0;
+    if (t < 0 or t >= wrap_time) return 0;
+    return @min(@min(t / fade_time, 1), @min((wrap_time - t) / 0.25, 1));
+}
+
+/// While find is open, a thin tick for each row with a match along the
+/// card's right edge, where the scroll bar runs, and the current match's in
+/// the accent. Found again when the search, its rules, the text or the
+/// rows change; `a` fades them with the band.
+fn drawTicks(d: *Doc, ctx: Id, th: *const Theme, card: Rect, q: []const u8, cur: ?[2]usize, a: f64) void {
+    if (q.len == 0 or a < 0.01) return;
+    const rows = totalRows(d);
+    var h = std.hash.Fnv1a_64.init();
+    h.update(q);
+    h.update(&.{ @as(u8, @intFromEnum(find_opts.case_mode)), @as(u8, @intFromBool(find_opts.whole_word)) });
+    h.update(std.mem.asBytes(&d.file.ed.buf.changes));
+    h.update(std.mem.asBytes(&rows));
+    h.update(std.mem.asBytes(&d.file.id));
+    const key = h.final();
+    if (key != d.ticks_key) {
+        d.ticks_key = key;
+        d.ticks.clearRetainingCapacity();
+        const t = d.file.ed.text();
+        var from: usize = 0;
+        while (d.ticks.items.len < max_ticks) {
+            const p = editor.searchWith(t, q, from, false, find_opts) orelse break;
+            if (p < from) break;
+            const r: u32 = @intCast(rowColOf(d, p).row);
+            const n = d.ticks.items.len;
+            if (n == 0 or d.ticks.items[n - 1] != r) d.ticks.append(gpa, r) catch break;
+            from = p + q.len;
         }
-        const tally = d.held_tally[0..d.held_n];
-        _ = k.text(tally, null, th, th.muted, card.x + card.w - pad_x - f(tally.len) * cw, ty, 0, 64);
-        k.flush();
-        objc.CGContextRestoreGState(ctx);
-    } else d.fresh_shown = false;
+    }
+    if (d.ticks.items.len == 0) return;
+    const y0 = top_h + 2;
+    const span = textH(d) - 4;
+    const x = card.x + card.w - bar_w - 3;
+    const all = f(@max(rows, 1));
+    const ta: f64 = if (contrast) 1 else 0.8;
+    for (d.ticks.items) |r| fillA(ctx, th.match, ta * a, x, snapPx(y0 + span * f(r) / all), bar_w, 2);
+    if (cur) |c| fillA(ctx, th.caret, a, x - 1, snapPx(y0 + span * f(rowColOf(d, c[0]).row) / all) - 0.5, bar_w + 2, 3);
 }
 
 fn drawHint(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, now: f64) void {
@@ -7731,11 +8631,9 @@ fn drawHeader(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, 
         fill(ctx, th.header, card.x, card.y, card.w, head_h);
         fill(ctx, th.rule, card.x, card.y + head_h, card.w, hair());
         fill(ctx, th.bg, card.x, card.y + head_h + hair(), card.w, top_h - gap - head_h - hair());
-        const hy = headY();
-        const mono_y = @round(hy - lh / 2 + baseline);
         const right = card.x + card.w - 10;
         objc.CGContextClipToRect(ctx, .{ .x = card.x, .y = card.y, .w = @max(right - card.x, 0), .h = head_h });
-        drawTabs(d, ctx, th, k, dark, ka, tabsX(card.x + d.org.x, d.org.y < 1) - d.org.x, right, mono_y, now);
+        drawTabs(d, ctx, th, k, dark, ka, tabsX(card.x + d.org.x, d.org.y < 1) - d.org.x, right, now);
         if (zt > 0.001) objc.CGContextEndTransparencyLayer(ctx);
     }
 }
@@ -7873,7 +8771,7 @@ fn tabCap(d: *const Doc, s: *const Slot, cap: f64, room: f64) f64 {
 /// name, unsaved dot and folder; with more, a row of tabs and a + after
 /// them, which the one tab grows into. The active tab's highlight springs
 /// from tab to tab, and the row scrolls to keep it in view.
-fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0: f64, x1: f64, mono_y: f64, now: f64) void {
+fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0: f64, x1: f64, now: f64) void {
     const n = tabCount(d);
     const want: f64 = if (n > 1) 1 else 0;
     if (d.slots_seen) d.tabbed.aim(want, now) else d.tabbed.snap(want);
@@ -8046,8 +8944,7 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
         nx += bw + 8;
     }
     if (folder_a > 0.01) {
-        const note_w = if (d.note.len > 0) f(d.note.len + 2) * cw else 0;
-        const head_room = @max(@floor(x1 - nx - note_w), 24);
+        const head_room = @max(@floor(x1 - nx), 24);
         // Made again when `dropHead` clears it, when the room shrinks below
         // the line, or when the room changes for a line that was cut; one
         // that fit whole stays right in more room. A file at the top of the
@@ -8083,7 +8980,6 @@ fn drawTabs(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, dark: bool, ka: f64, x0
         objc.CGContextRestoreGState(ctx);
         nx = @max(nx, pe + 36 + 26 * chev);
     }
-    if (d.note.len > 0) _ = k.text(d.note, null, th, th.muted, nx, mono_y, 0, 200);
     k.flush();
 }
 
@@ -8705,9 +9601,9 @@ fn drawRect(self: Id, _: Sel, dirty: Rect) callconv(.c) void {
 
 fn keyDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     const d = docOf(self) orelse return;
-    d.note = "";
     const flags = msg(usize, ev, "modifierFlags", .{});
     const code = msg(u16, ev, "keyCode", .{});
+    const mods = flags & (objc.cmd_key | objc.opt_key | objc.ctrl_key | objc.shift_key);
     // ⎋ mid-drag drops nothing: the tab or file goes home.
     if (code == 53 and d.win.tdrag != null) return cancelDrag(d.win);
     // While the sidebar has the keys, they move through its rows.
@@ -8716,6 +9612,18 @@ fn keyDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
     if (flags & (objc.cmd_key | objc.opt_key | objc.ctrl_key) == objc.opt_key and code == 6) return flip(.wrap);
     // ⌃⌘Z reaches here while Late-Night greys the Zen item: it leaves Late-Night.
     if (flags & (objc.cmd_key | objc.opt_key | objc.ctrl_key) == objc.cmd_key | objc.ctrl_key and code == 6 and conf.late_night) return flip(.@"late-night");
+    // ⌥↑ and ⌥↓ move lines, before the text system takes them as paragraph moves.
+    if (d.mode == .edit and mods == objc.opt_key and (code == 126 or code == 125)) {
+        lineEdit(d, if (code == 126) .up else .down);
+        return refresh(d);
+    }
+    // ⌥⌘C and ⌥⌘W flip find's match case and whole word.
+    if ((d.mode == .find or d.mode == .replace) and mods == objc.cmd_key | objc.opt_key and (code == 8 or code == 13)) return toggleFind(d, if (code == 8) 0 else 1);
+    // ⌘Return opens quick open's pick in a new tab.
+    if (d.mode == .open and mods == objc.cmd_key and (code == 36 or code == 76)) {
+        openPick(d, .tab);
+        return refresh(d);
+    }
     // Command keys that the menu didn't take: only arrows and delete mean something.
     if (flags & objc.cmd_key != 0) {
         if (std.mem.indexOfScalar(u16, &.{ 51, 117, 115, 119, 123, 124, 125, 126 }, code) == null) return;
@@ -8737,7 +9645,7 @@ fn insertText(self: Id, _: Sel, s: Id) callconv(.c) void {
     const ns = if (msg(bool, s, "isKindOfClass:", .{objc.class("NSAttributedString")})) msg(Id, s, "string", .{}) else s;
     const bytes = objc.utf8(ns);
     if (d.mode != .edit) {
-        promptType(d, bytes);
+        promptType(d, bytes, true);
     } else {
         const e = &d.file.ed;
         const len0 = e.text().len;
@@ -8938,7 +9846,6 @@ fn mouseDown(self: Id, _: Sel, ev: Id) callconv(.c) void {
 /// quick open list, or the text.
 fn cardDown(d: *Doc, p: Point, ev: Id) void {
     const by = bottom(d);
-    d.note = "";
     if (p.y < top_h) {
         if (onTabPlus(d, p)) {
             d.plus_down.snap(1);
@@ -8967,14 +9874,26 @@ fn cardDown(d: *Doc, p: Point, ev: Id) void {
     // The empty card's buttons.
     if (d.hint_n > 0 and isBlank(d) and d.mode == .edit) if (hintAt(d, p)) |i| return runHint(d, i);
     if (listing(d) != null) {
-        const top = by - f(panelRows(d)) * prow - ppad;
-        if (p.y >= top and p.y < by) {
-            d.pick = @min(@as(usize, @intFromFloat((p.y - top) / prow)), d.npicks -| 1);
-            accept(d);
+        const top = d.plist_top;
+        if (p.y >= top and p.y < top + f(panelRows(d)) * prow) {
+            d.pick = @min(@as(usize, @intFromFloat(@max((p.y - top + d.plist.to) / prow, 0))), d.npicks -| 1);
+            // ⌘-click opens the file in a new tab and ⌥-click in a split, like ⌘Return and ⌥Return.
+            const flags = msg(usize, ev, "modifierFlags", .{});
+            if (d.mode == .open and flags & objc.cmd_key != 0) {
+                openPick(d, .tab);
+            } else if (d.mode == .open and flags & objc.opt_key != 0) {
+                openPick(d, .split);
+            } else accept(d);
             return refresh(d);
         }
     }
-    if (p.y >= by) return;
+    // A click on the prompt line places its caret or flips a find pill.
+    if (d.mode != .edit and p.y >= by) return promptDown(d, p, ev);
+    if (p.y >= by) {
+        // The status strip's "Ln, Col" opens Go to Line.
+        if (d.stat_x >= 0 and p.x >= d.stat_x - 4 and p.x < d.stat_x + d.stat_ln_w + 4) startPrompt(d, .line);
+        return;
+    }
     if (barDown(d, p)) return;
     d.win.side_down = false;
     d.mode = .edit;
@@ -9195,6 +10114,16 @@ fn hoverAt(w: *Win, p: Point) void {
             d.hint_hot = hint;
             msg(void, w.view, "setNeedsDisplay:", .{true});
         }
+        // The quick open or palette row under the mouse.
+        var row: ?usize = null;
+        if (d == over and w.tdrag == null and listing(d) != null and lp.y >= d.plist_top and lp.y < d.plist_top + f(panelRows(d)) * prow) {
+            const r: usize = @intFromFloat(@max((lp.y - d.plist_top + d.plist.to) / prow, 0));
+            if (r < d.npicks) row = r;
+        }
+        if (row != d.phover) {
+            d.phover = row;
+            msg(void, w.view, "setNeedsDisplay:", .{true});
+        }
         // The scroll bars show while the pointer nears the card's right
         // edge, or its bottom edge for the sideways bar, and fade a hold
         // after it leaves.
@@ -9316,6 +10245,7 @@ fn mouseUp(self: Id, _: Sel, _: Id) callconv(.c) void {
     const w = winOf(self) orelse return;
     letGo(w);
     w.sel_at = null;
+    w.focus.pdrag = false;
     if (w.focus.bar_drag != .none) {
         w.focus.bar_drag = .none;
         w.focus.bar_t0 = CACurrentMediaTime();
@@ -9361,6 +10291,7 @@ fn mouseDragged(self: Id, _: Sel, ev: Id) callconv(.c) void {
     }
     if (w.grab) |n| return dragGap(w, n, local(self, ev));
     if (w.focus.bar_drag != .none) return barTo(w.focus, inPane(w.focus, local(self, ev)), false);
+    if (w.focus.pdrag) return promptDrag(w.focus, inPane(w.focus, local(self, ev)));
     if (w.side_down) return;
     dragText(w, local(self, ev));
 }
@@ -9460,9 +10391,17 @@ fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
         dx *= lh;
         dy *= lh;
     }
+    const lp = inPane(d, at);
+    // Over quick open's or the palette's list, the wheel scrolls its rows.
+    if (listing(d) != null and d.npicks > list_rows and lp.y >= d.plist_top - ppad and lp.y < bottom(d)) {
+        const most = f(d.npicks - list_rows) * prow;
+        const to = std.math.clamp(d.plist.to - dy, 0, most);
+        if (precise) d.plist.snap(to) else d.plist.aim(to, CACurrentMediaTime());
+        hoverAt(w, at);
+        return msg(void, w.view, "setNeedsDisplay:", .{true});
+    }
     // Over a tab row that runs past its end, a sideways scroll, or a mouse
     // wheel's, scrolls the tabs.
-    const lp = inPane(d, at);
     if (lp.y < top_h and d.tabbed.to == 1 and d.tab_over > 0 and !offHeadRow(lp, 14) and (@abs(dx) > @abs(dy) or !precise)) {
         const by = if (@abs(dx) > @abs(dy)) dx else dy;
         const to = std.math.clamp((d.tab_user orelse d.tab_x.to) - by, 0, d.tab_over);
@@ -9526,6 +10465,13 @@ fn resetCursorRects(self: Id, _: Sel) callconv(.c) void {
         };
         if (d.plus_x > 0) _ = msg(isize, self, "addToolTipRect:owner:userData:", .{ Rect{ .x = d.org.x + d.plus_x - 14, .y = hy - 14, .w = 28, .h = 28 }, self, @as(?*anyopaque, null) });
     };
+    // Find's pills say what they do and their keys.
+    for (docs.items) |d| {
+        if (d.win != w or (d.mode != .find and d.mode != .replace)) continue;
+        for (d.tog_x) |t| {
+            if (t[1] > 0) _ = msg(isize, self, "addToolTipRect:owner:userData:", .{ Rect{ .x = d.org.x + t[0], .y = d.org.y + d.size.y - gap - barH(), .w = t[1], .h = barH() }, self, @as(?*anyopaque, null) });
+        }
+    }
 }
 
 /// The tooltip under `p`: a button's menu item title and keys (or why the
@@ -9540,6 +10486,11 @@ fn toolTip(self: Id, _: Sel, _: Id, _: isize, p: Point, _: ?*anyopaque) callconv
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     if (!overSide(w, p)) if (paneAt(w, p)) |d| {
         const lp = inPane(d, p);
+        if ((d.mode == .find or d.mode == .replace) and lp.y >= bottom(d)) {
+            for (d.tog_x, 0..) |t, k| {
+                if (t[1] > 0 and lp.x >= t[0] and lp.x < t[0] + t[1]) return objc.str(if (k == 0) "Match Case ⌥⌘C" else "Whole Word ⌥⌘W");
+            }
+        }
         if (lp.y >= top_h) return null;
         if (onTabPlus(d, lp)) return objc.str("New Tab " ++ comptime menuKeys("newTab:"));
         const hit = tabAt(d, lp) orelse return null;
@@ -9806,11 +10757,29 @@ fn menuForEvent(self: Id, _: Sel, ev: Id) callconv(.c) Id {
         if (lp.y < top_h) return tabMenu(self, w, d, lp) orelse cardMenu(d);
         if (lp.y >= bottom(d)) return null;
         focus(d);
+        // A right-click outside the selection moves the caret there first,
+        // so the menu acts where it opened.
+        if (d.mode == .edit) {
+            const pos = posAt(d, lp);
+            const s = d.file.ed.sel();
+            if (s[0] == s[1] or pos < s[0] or pos > s[1]) {
+                d.file.ed.moveTo(pos, false);
+                refresh(d);
+            }
+        }
         if (text_menu == null) {
             const m = objc.new("NSMenu");
+            _ = menuItem(m, "Undo", "undo:", "z", objc.cmd_key);
+            _ = menuItem(m, "Redo", "redo:", "z", objc.cmd_key | objc.shift_key);
+            separator(m);
             clipboardItems(m);
             separator(m);
+            _ = menuItem(m, "Find Selection", "findText:", "f", objc.cmd_key);
             _ = menuItem(m, "Toggle Comment", "toggleComment:", "/", objc.cmd_key);
+            _ = menuItem(m, "Format JSON", "formatJson:", "j", objc.cmd_key | objc.opt_key);
+            separator(m);
+            _ = menuItem(m, "Split Right", "splitRight:", "d", objc.cmd_key);
+            _ = menuItem(m, "Split Down", "splitDown:", "d", objc.cmd_key | objc.shift_key);
             text_menu = m;
         }
         return text_menu;
@@ -10170,7 +11139,6 @@ fn action(comptime run: anytype, comptime args: anytype) *const anyopaque {
     return @ptrCast(&struct {
         fn imp(self: Id, _: Sel, _: Id) callconv(.c) void {
             const d = docOf(self) orelse return;
-            d.note = "";
             _ = @call(.auto, run, .{d} ++ args);
             // Closing the last tab closes the window, and the card with it.
             if (std.mem.indexOfScalar(*Doc, docs.items, d) != null) refresh(d);
@@ -10203,8 +11171,13 @@ fn pasteboard() Id {
 extern const NSPasteboardTypeString: Id;
 
 fn copy(d: *Doc) void {
+    if (d.mode != .edit) {
+        const r = fieldSel(d);
+        if (r[0] != r[1]) putClipboard(field(d).items[r[0]..r[1]]);
+        return;
+    }
     const s = d.file.ed.sel();
-    if (d.mode != .edit or s[0] == s[1]) return;
+    if (s[0] == s[1]) return;
     putClipboard(d.file.ed.text()[s[0]..s[1]]);
 }
 
@@ -10216,7 +11189,13 @@ fn putClipboard(text: []const u8) void {
 }
 
 fn cut(d: *Doc) void {
-    if (d.mode != .edit or !d.file.ed.hasSel()) return;
+    if (d.mode != .edit) {
+        const r = fieldSel(d);
+        if (r[0] == r[1]) return;
+        putClipboard(field(d).items[r[0]..r[1]]);
+        return fieldPut(d, "", false);
+    }
+    if (!d.file.ed.hasSel()) return;
     copy(d);
     d.file.ed.deleteSelection(gpa) catch {};
     // A bar flashes where the cut text was.
@@ -10225,14 +11204,30 @@ fn cut(d: *Doc) void {
     reveal(d);
 }
 
-/// The prompt is one line: a paste drops its trailing line break, and
-/// Quick Open and the palette take only its first line.
+/// The prompt is one line. In find and replace a paste over several lines
+/// becomes one, each line break and the indent around it a single space;
+/// Quick Open and the palette take only its first line, and go to line
+/// keeps its digits, `:`, `+` and `-`.
 fn promptPaste(d: *Doc, s: []const u8) void {
-    var t = std.mem.trimEnd(u8, s, "\r\n");
-    if (d.mode == .open or d.mode == .command) {
-        if (std.mem.indexOfAny(u8, t, "\r\n")) |i| t = t[0..i];
+    const t = std.mem.trim(u8, s, "\r\n");
+    if (t.len == 0) return;
+    const nl = std.mem.indexOfAny(u8, t, "\r\n") orelse return promptType(d, t, false);
+    switch (d.mode) {
+        .open, .command => fieldPut(d, std.mem.trimEnd(u8, t[0..nl], " \t"), false),
+        .line => promptType(d, t[0..nl], false),
+        else => {
+            var out: std.ArrayList(u8) = .empty;
+            defer out.deinit(gpa);
+            var lines = std.mem.tokenizeAny(u8, t, "\r\n");
+            while (lines.next()) |l| {
+                const part = std.mem.trim(u8, l, " \t");
+                if (part.len == 0) continue;
+                if (out.items.len > 0) out.append(gpa, ' ') catch return;
+                out.appendSlice(gpa, part) catch return;
+            }
+            fieldPut(d, out.items, false);
+        },
     }
-    if (t.len > 0) promptType(d, t);
 }
 
 fn paste(d: *Doc) void {
@@ -10249,10 +11244,17 @@ fn paste(d: *Doc) void {
 }
 
 fn selectAll(d: *Doc) void {
-    if (d.mode == .edit) d.file.ed.selectAll();
+    if (d.mode == .edit) return d.file.ed.selectAll();
+    const i = fieldIndex(d);
+    d.panc[i] = 0;
+    d.pcur[i] = field(d).items.len;
+    d.ptyping = false;
 }
 
 fn stepHistory(d: *Doc, forward: bool) void {
+    // In a prompt, ⌘Z and ⇧⌘Z step back and forth through its typing; with
+    // none to step, the prompt closes and the text's own undo runs.
+    if (d.mode != .edit and (if (forward) d.predo.items.len else d.pundo.items.len) > 0) return promptUndo(d, forward);
     d.mode = .edit;
     flashStart(d);
     if ((if (forward) d.file.ed.redo(gpa) else d.file.ed.undo(gpa)) catch null) |span| flashAdd(d, span[0], span[1]);
@@ -10290,10 +11292,67 @@ fn comment(d: *Doc) void {
     d.file.ed.toggleComment(gpa, d.file.lang.line_comment) catch {};
 }
 
+/// Edit > Format JSON: lays out the selection or the file and flashes what
+/// it laid out. JSON it can't read moves the caret to where it goes wrong,
+/// shakes the card and says what's wrong there.
 fn formatJson(d: *Doc) void {
     if (d.mode != .edit) return;
-    const ok = d.file.ed.formatJson(gpa) catch return;
-    if (!ok) d.note = if (d.file.ed.hasSel()) "selection isn't valid JSON" else "not valid JSON";
+    const e = &d.file.ed;
+    const t = e.text();
+    const r = if (e.hasSel()) e.sel() else [2]usize{ 0, t.len };
+    const ws = " \t\r\n";
+    const a = r[1] - std.mem.trimStart(u8, t[r[0]..r[1]], ws).len;
+    const z = r[0] + std.mem.trimEnd(u8, t[r[0]..r[1]], ws).len;
+    if (a >= z) return toast(d.win, if (e.hasSel()) "the selection has no JSON in it" else "no JSON to format");
+    const len0 = t.len;
+    if (e.formatJson(gpa) catch return) {
+        flashStart(d);
+        flashAdd(d, a, z + e.text().len - len0);
+        return reveal(d);
+    }
+    // Nothing changed, so the text and its offsets still hold.
+    const bad = jsonFault(t[a..z]);
+    const at = a + bad.at;
+    e.select(at, at);
+    center(d);
+    d.card_shake_t0 = CACurrentMediaTime();
+    const b = &e.buf;
+    const row = b.lineOf(at);
+    const col = codepoints(t[b.lineStart(row)..at]) + 1;
+    var buf: [96]u8 = undefined;
+    const c: u8 = if (at < z) t[at] else 0;
+    toast(d.win, if (bad.end)
+        std.fmt.bufPrint(&buf, "JSON ends too soon at line {d}, column {d}", .{ row + 1, col }) catch "not valid JSON"
+    else if (c > 0x20 and c < 0x7f)
+        std.fmt.bufPrint(&buf, "unexpected \"{c}\" in JSON at line {d}, column {d}", .{ c, row + 1, col }) catch "not valid JSON"
+    else
+        std.fmt.bufPrint(&buf, "JSON goes wrong at line {d}, column {d}", .{ row + 1, col }) catch "not valid JSON");
+}
+
+/// Where JSON text `s` first goes wrong, and whether it just ends too soon.
+fn jsonFault(s: []const u8) struct { at: usize, end: bool } {
+    var sc = std.json.Scanner.initCompleteInput(gpa, s);
+    defer sc.deinit();
+    while (true) {
+        const tok = sc.next() catch |err| return .{ .at = @min(sc.cursor, s.len), .end = err == error.UnexpectedEndOfInput };
+        if (tok == .end_of_document) return .{ .at = s.len, .end = true };
+    }
+}
+
+const LineEdit = enum { duplicate, up, down, join, delete };
+
+/// Edit's line commands, on the caret's line or every line the selection touches.
+fn lineEdit(d: *Doc, op: LineEdit) void {
+    if (d.mode != .edit) return;
+    const e = &d.file.ed;
+    (switch (op) {
+        .duplicate => e.duplicateLine(gpa),
+        .up => e.moveLinesUp(gpa),
+        .down => e.moveLinesDown(gpa),
+        .join => e.joinLines(gpa),
+        .delete => e.deleteLine(gpa),
+    }) catch {};
+    reveal(d);
 }
 
 /// A zoom's size, applied at once and written to the settings file once
@@ -10356,7 +11415,7 @@ fn saveEverything(_: *Doc) void {
 
 /// File > Reveal in Finder: the file on show, selected in Finder.
 fn revealCurrent(d: *Doc) void {
-    if (d.file.path) |p| revealPath(p) else d.note = "not saved yet";
+    if (d.file.path) |p| revealPath(p) else toast(d.win, "not saved yet");
 }
 
 /// Window > Merge All Windows: every other window's tabs move into this
@@ -10520,6 +11579,12 @@ const menu_bar = .{
         .{ .title = "Go to Line…", .sel = "gotoLine:", .key = "l", .mods = objc.cmd_key, .to = .view, .run = startPrompt, .args = .{Mode.line} },
         .{ .title = "Toggle Comment", .sel = "toggleComment:", .key = "/", .mods = objc.cmd_key, .to = .view, .run = comment },
         .{ .title = "Format JSON", .sel = "formatJson:", .key = "j", .mods = objc.cmd_key | objc.opt_key, .to = .view, .run = formatJson },
+        .{ .sep = true },
+        .{ .title = "Duplicate Line", .sel = "duplicateLine:", .key = "d", .mods = objc.ctrl_key | objc.shift_key, .to = .view, .run = lineEdit, .args = .{LineEdit.duplicate} },
+        .{ .title = "Move Line Up", .sel = "moveLineUp:", .key = "\u{F700}", .mods = objc.opt_key, .to = .view, .run = lineEdit, .args = .{LineEdit.up} },
+        .{ .title = "Move Line Down", .sel = "moveLineDown:", .key = "\u{F701}", .mods = objc.opt_key, .to = .view, .run = lineEdit, .args = .{LineEdit.down} },
+        .{ .title = "Join Lines", .sel = "joinLines:", .key = "j", .mods = objc.ctrl_key, .to = .view, .run = lineEdit, .args = .{LineEdit.join} },
+        .{ .title = "Delete Line", .sel = "deleteLine:", .key = "k", .mods = objc.cmd_key | objc.shift_key, .to = .view, .run = lineEdit, .args = .{LineEdit.delete} },
     } },
     .{ .menu = "View", .items = .{
         .{ .title = "Command Palette…", .sel = "commandPalette:", .key = "k", .mods = objc.cmd_key, .to = .view, .run = startPrompt, .args = .{Mode.command} },
@@ -10864,3 +11929,5 @@ pub fn setup() void {
 
 extern fn objc_getProtocol(name: [*:0]const u8) ?*anyopaque;
 extern fn class_addProtocol(cls: Id, protocol: ?*anyopaque) bool;
+extern fn CTLineGetOffsetForStringIndex(line: Id, index: isize, secondary: ?*f64) f64;
+extern fn CGContextClipToRects(ctx: Id, rects: [*]const Rect, count: usize) void;
