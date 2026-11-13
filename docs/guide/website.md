@@ -23,7 +23,7 @@ Scroll through **Size** to watch the page zoom out. The first frame shows Zag's 
 
 ## Screenshots
 
-Under **Included**, choose a theme beside the app screenshot to preview its colors. This changes the screenshot, not your installed app. A short list under it says what Zag does.
+The app screenshots use Zag's Paper theme when the website is light and Ink when it is dark, and switch when you change the website's appearance. Late-Night Focus always shows the Black theme. Under **Included**, choose a theme beside the app screenshot to preview its colors; the picker starts on Paper or Ink to match the website. This changes the screenshot, not your installed app. A short list under it says what Zag does.
 
 In the writing preview, choose **Source** or **Preview**, or drag the divider to compare the Markdown and its rendered page. Open either focus screenshot to see the full window. Press Escape to close it.
 
