@@ -27,6 +27,10 @@ Under **Included**, choose a theme beside the app screenshot to preview its colo
 
 In the writing preview, choose **Source** or **Preview**, or drag the divider to compare the Markdown and its rendered page. Open either focus screenshot to see the full window. Press Escape to close it.
 
+## The settings file
+
+**Config** comes after **Included**. Its picture plays a Zag window editing `config.toml`: the caret selects `false` on `line-numbers`, types `true`, saves, and the window shows "saved" and its line numbers. The window uses Zag's Paper theme when the website is light and Ink when it is dark. The picture plays only while it is on screen; with the page paused or Reduce Motion on, it shows the saved window.
+
 ## Appearance and motion
 
 Choose **System**, **Light** or **Dark** in the header to change the website's appearance. Use the pause control beside it to stop the page's animation; the page then shows every section as a still picture. The page also stays still when your Mac has Reduce Motion turned on.
