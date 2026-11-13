@@ -41,145 +41,122 @@ pub const Lang = struct {
     diff: bool = false,
     /// Keywords match in any case (SQL).
     ignore_case: bool = false,
-    keywords: []const []const u8 = &.{},
+    exts: []const u8 = "",
+    keywords: []const u8 = "",
 };
+
+inline fn kw(comptime words: []const u8) []const u8 {
+    comptime {
+        @setEvalBranchQuota(10000);
+        var buf: [words.len + 1]u8 = undefined;
+        var n: usize = 0;
+        var it = std.mem.tokenizeAny(u8, words, " \n");
+        while (it.next()) |w| {
+            buf[n] = @intCast(w.len);
+            @memcpy(buf[n + 1 ..][0..w.len], w);
+            n += 1 + w.len;
+        }
+        const out = buf[0..n].*;
+        return &out;
+    }
+}
+
+fn hasWord(packed_words: []const u8, w: []const u8, ignore_case: bool) bool {
+    var i: usize = 0;
+    while (i < packed_words.len) {
+        const len = packed_words[i];
+        const word = packed_words[i + 1 ..][0..len];
+        if (len == w.len and (if (ignore_case) std.ascii.eqlIgnoreCase(word, w) else std.mem.eql(u8, word, w))) return true;
+        i += 1 + len;
+    }
+    return false;
+}
 
 pub const plain: Lang = .{};
 
-const zig: Lang = .{ .line_comment = "//", .line_string = "\\\\", .names = true, .keywords = &.{
-    "const", "var", "fn", "pub", "return", "if", "else", "while", "for", "switch", "break",
-    "continue", "defer", "errdefer", "try", "catch", "orelse", "and", "or", "struct", "enum",
-    "union", "error", "comptime", "inline", "export", "extern", "test", "unreachable", "null",
-    "undefined", "true", "false", "opaque", "packed", "align", "callconv", "noreturn", "anytype",
-    "anyerror", "type", "void", "bool", "threadlocal", "volatile", "allowzero", "noalias",
-    "linksection", "usize", "isize", "u8", "u16", "u32", "u64", "i32", "i64", "f32", "f64",
-} };
+const zig: Lang = .{ .line_comment = "//", .line_string = "\\\\", .names = true, .exts = kw("zig zon"), .keywords = kw(
+    "const var fn pub return if else while for switch break continue defer errdefer try catch orelse " ++
+    "and or struct enum union error comptime inline export extern test unreachable null undefined true " ++
+    "false opaque packed align callconv noreturn anytype anyerror type void bool threadlocal volatile " ++
+    "allowzero noalias linksection usize isize u8 u16 u32 u64 i32 i64 f32 f64",
+) };
 
-const c_like: Lang = .{ .line_comment = "//", .block_comment = true, .names = true, .keywords = &.{
-    "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",
-    "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "return", "short",
-    "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void",
-    "volatile", "while", "bool", "true", "false", "NULL", "nullptr", "class", "namespace",
-    "public", "private", "protected", "template", "typename", "virtual", "override", "new",
-    "delete", "this", "using", "try", "catch", "throw", "constexpr", "include", "define",
-    "ifdef", "ifndef", "endif", "pragma", "self", "nil", "id", "final", "package", "import",
-    "extends", "implements", "interface", "var", "val", "fun", "object",
-} };
+const c_like: Lang = .{ .line_comment = "//", .block_comment = true, .names = true, .exts = kw("c h cc cpp hpp m mm java kt cs"), .keywords = kw(
+    "auto break case char const continue default do double else enum extern float for goto if inline " ++
+    "int long return short signed sizeof static struct switch typedef union unsigned void volatile " ++
+    "while bool true false NULL nullptr class namespace public private protected template typename " ++
+    "virtual override new delete this using try catch throw constexpr include define ifdef ifndef " ++
+    "endif pragma self nil id final package import extends implements interface var val fun object",
+) };
 
-const js: Lang = .{ .line_comment = "//", .block_comment = true, .backtick = true, .names = true, .keywords = &.{
-    "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete",
-    "do", "else", "export", "extends", "finally", "for", "function", "if", "import", "in",
-    "instanceof", "let", "new", "return", "super", "switch", "this", "throw", "try", "typeof",
-    "var", "void", "while", "yield", "async", "await", "of", "true", "false", "null",
-    "undefined", "interface", "type", "enum", "implements", "private", "public", "protected",
-    "readonly", "static", "as", "from",
-} };
+const js: Lang = .{ .line_comment = "//", .block_comment = true, .backtick = true, .names = true, .exts = kw("js mjs cjs jsx ts tsx"), .keywords = kw(
+    "break case catch class const continue debugger default delete do else export extends finally for " ++
+    "function if import in instanceof let new return super switch this throw try typeof var void while " ++
+    "yield async await of true false null undefined interface type enum implements private public " ++
+    "protected readonly static as from",
+) };
 
-const python: Lang = .{ .line_comment = "#", .triple = true, .names = true, .keywords = &.{
-    "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif",
-    "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda",
-    "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield", "True",
-    "False", "None", "self", "match", "case",
-} };
+const python: Lang = .{ .line_comment = "#", .triple = true, .names = true, .exts = kw("py"), .keywords = kw(
+    "and as assert async await break class continue def del elif else except finally for from global " ++
+    "if import in is lambda nonlocal not or pass raise return try while with yield True False None " ++
+    "self match case",
+) };
 
-const rust: Lang = .{ .line_comment = "//", .block_comment = true, .names = true, .lifetimes = true, .keywords = &.{
-    "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
-    "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move",
-    "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true",
-    "type", "unsafe", "use", "where", "while",
-} };
+const rust: Lang = .{ .line_comment = "//", .block_comment = true, .names = true, .lifetimes = true, .exts = kw("rs"), .keywords = kw(
+    "as async await break const continue crate dyn else enum extern false fn for if impl in let loop " ++
+    "match mod move mut pub ref return self Self static struct super trait true type unsafe use where while",
+) };
 
-const go: Lang = .{ .line_comment = "//", .block_comment = true, .backtick = true, .raw_backtick = true, .names = true, .keywords = &.{
-    "break", "case", "chan", "const", "continue", "default", "defer", "else", "fallthrough",
-    "for", "func", "go", "goto", "if", "import", "interface", "map", "package", "range",
-    "return", "select", "struct", "switch", "type", "var", "true", "false", "nil",
-} };
+const go: Lang = .{ .line_comment = "//", .block_comment = true, .backtick = true, .raw_backtick = true, .names = true, .exts = kw("go"), .keywords = kw(
+    "break case chan const continue default defer else fallthrough for func go goto if import " ++
+    "interface map package range return select struct switch type var true false nil",
+) };
 
-const swift: Lang = .{ .line_comment = "//", .block_comment = true, .names = true, .keywords = &.{
-    "class", "struct", "enum", "protocol", "extension", "func", "var", "let", "if", "else",
-    "guard", "return", "for", "in", "while", "repeat", "switch", "case", "default", "break",
-    "continue", "import", "public", "private", "internal", "fileprivate", "open", "static",
-    "self", "Self", "init", "deinit", "true", "false", "nil", "try", "throw", "throws", "async",
-    "await", "some", "any", "where",
-} };
+const swift: Lang = .{ .line_comment = "//", .block_comment = true, .names = true, .exts = kw("swift"), .keywords = kw(
+    "class struct enum protocol extension func var let if else guard return for in while repeat switch " ++
+    "case default break continue import public private internal fileprivate open static self Self init " ++
+    "deinit true false nil try throw throws async await some any where",
+) };
 
-const shell: Lang = .{ .line_comment = "#", .keywords = &.{
-    "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac",
-    "function", "in", "return", "export", "local", "readonly", "set", "unset", "exit",
-    "select", "declare", "typeset", "source", "alias",
-} };
+const shell: Lang = .{ .line_comment = "#", .exts = kw("sh bash zsh zshrc zshenv zprofile bashrc bash_profile profile"), .keywords = kw(
+    "if then else elif fi for while until do done case esac function in return export local readonly " ++
+    "set unset exit select declare typeset source alias",
+) };
 
-const fish: Lang = .{ .line_comment = "#", .keywords = &.{
-    "if", "else", "end", "for", "in", "while", "switch", "case", "function", "begin", "return",
-    "break", "continue", "and", "or", "not", "set", "set_color", "status", "source", "exit",
-} };
+const fish: Lang = .{ .line_comment = "#", .exts = kw("fish"), .keywords = kw("if else end for in while switch case function begin return break continue and or not set set_color status source exit") };
+const ruby: Lang = .{ .line_comment = "#", .names = true, .exts = kw("rb"), .keywords = kw("def end if elsif else unless while until for in do return class module self nil true false yield begin rescue ensure require") };
+const lua: Lang = .{ .line_comment = "--", .names = true, .exts = kw("lua"), .keywords = kw("and break do else elseif end false for function if in local nil not or repeat return then true until while") };
 
-const ruby: Lang = .{ .line_comment = "#", .names = true, .keywords = &.{
-    "def", "end", "if", "elsif", "else", "unless", "while", "until", "for", "in", "do",
-    "return", "class", "module", "self", "nil", "true", "false", "yield", "begin", "rescue",
-    "ensure", "require",
-} };
+const sql: Lang = .{ .line_comment = "--", .block_comment = true, .ignore_case = true, .exts = kw("sql"), .keywords = kw(
+    "select from where and or not in is null as on join left right inner outer full cross group by " ++
+    "order having limit offset insert into values update set delete create table view index drop alter " ++
+    "add column primary key foreign references unique default distinct union all case when then else " ++
+    "end exists between like asc desc with returning begin commit rollback transaction if true false " ++
+    "integer int text varchar boolean real blob date timestamp trigger constraint check",
+) };
 
-const lua: Lang = .{ .line_comment = "--", .names = true, .keywords = &.{
-    "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in",
-    "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while",
-} };
+const php: Lang = .{ .line_comment = "//", .block_comment = true, .names = true, .exts = kw("php"), .keywords = kw(
+    "abstract and array as break case catch class clone const continue declare default do echo else " ++
+    "elseif empty enum extends final finally fn for foreach function global if implements include " ++
+    "include_once instanceof interface isset list match namespace new or print private protected " ++
+    "public readonly require require_once return static switch throw trait try unset use var while " ++
+    "yield true false null self parent this php",
+) };
 
-const sql: Lang = .{ .line_comment = "--", .block_comment = true, .ignore_case = true, .keywords = &.{
-    "select", "from", "where", "and", "or", "not", "in", "is", "null", "as", "on", "join",
-    "left", "right", "inner", "outer", "full", "cross", "group", "by", "order", "having",
-    "limit", "offset", "insert", "into", "values", "update", "set", "delete", "create", "table",
-    "view", "index", "drop", "alter", "add", "column", "primary", "key", "foreign", "references",
-    "unique", "default", "distinct", "union", "all", "case", "when", "then", "else", "end",
-    "exists", "between", "like", "asc", "desc", "with", "returning", "begin", "commit",
-    "rollback", "transaction", "if", "true", "false", "integer", "int", "text", "varchar",
-    "boolean", "real", "blob", "date", "timestamp", "trigger", "constraint", "check",
-} };
+const dart: Lang = .{ .line_comment = "//", .block_comment = true, .triple = true, .names = true, .exts = kw("dart"), .keywords = kw(
+    "abstract as assert async await break case catch class const continue covariant default deferred " ++
+    "do dynamic else enum export extends extension external factory false final finally for Function " ++
+    "get hide if implements import in interface is late library mixin new null on operator part " ++
+    "required rethrow return sealed set show static super switch sync this throw true try typedef var " ++
+    "void when while with yield",
+) };
 
-const php: Lang = .{ .line_comment = "//", .block_comment = true, .names = true, .keywords = &.{
-    "abstract", "and", "array", "as", "break", "case", "catch", "class", "clone", "const",
-    "continue", "declare", "default", "do", "echo", "else", "elseif", "empty", "enum",
-    "extends", "final", "finally", "fn", "for", "foreach", "function", "global", "if",
-    "implements", "include", "include_once", "instanceof", "interface", "isset", "list",
-    "match", "namespace", "new", "or", "print", "private", "protected", "public", "readonly",
-    "require", "require_once", "return", "static", "switch", "throw", "trait", "try", "unset",
-    "use", "var", "while", "yield", "true", "false", "null", "self", "parent", "this", "php",
-} };
-
-const dart: Lang = .{ .line_comment = "//", .block_comment = true, .triple = true, .names = true, .keywords = &.{
-    "abstract", "as", "assert", "async", "await", "break", "case", "catch", "class", "const",
-    "continue", "covariant", "default", "deferred", "do", "dynamic", "else", "enum", "export",
-    "extends", "extension", "external", "factory", "false", "final", "finally", "for",
-    "Function", "get", "hide", "if", "implements", "import", "in", "interface", "is", "late",
-    "library", "mixin", "new", "null", "on", "operator", "part", "required", "rethrow",
-    "return", "sealed", "set", "show", "static", "super", "switch", "sync", "this", "throw",
-    "true", "try", "typedef", "var", "void", "when", "while", "with", "yield",
-} };
-
-const diff: Lang = .{ .diff = true };
-const data: Lang = .{ .keys = true, .keywords = &.{ "true", "false", "null" } };
-const hash_data: Lang = .{ .line_comment = "#", .keys = true, .keywords = &.{ "true", "false", "null" } };
-const css: Lang = .{ .block_comment = true, .keys = true };
-const markdown: Lang = .{ .markdown = true };
-const html: Lang = .{ .html = true };
-
-const by_ext = [_]struct { []const u8, *const Lang }{
-    .{ "zig", &zig },       .{ "zon", &zig },        .{ "c", &c_like },       .{ "h", &c_like },
-    .{ "cc", &c_like },     .{ "cpp", &c_like },     .{ "hpp", &c_like },     .{ "m", &c_like },
-    .{ "mm", &c_like },     .{ "java", &c_like },    .{ "kt", &c_like },      .{ "cs", &c_like },
-    .{ "js", &js },         .{ "mjs", &js },         .{ "cjs", &js },         .{ "jsx", &js },
-    .{ "ts", &js },         .{ "tsx", &js },         .{ "py", &python },      .{ "rs", &rust },
-    .{ "go", &go },         .{ "swift", &swift },    .{ "sh", &shell },       .{ "bash", &shell },
-    .{ "zsh", &shell },     .{ "fish", &fish },      .{ "rb", &ruby },        .{ "lua", &lua },
-    .{ "json", &data },     .{ "jsonl", &data },     .{ "ndjson", &data },    .{ "toml", &hash_data },
-    .{ "yaml", &hash_data }, .{ "yml", &hash_data }, .{ "ini", &hash_data }, .{ "conf", &hash_data },
-    .{ "css", &css },       .{ "md", &markdown },    .{ "markdown", &markdown }, .{ "html", &html },
-    .{ "htm", &html },      .{ "xhtml", &html },     .{ "xml", &html },       .{ "svg", &html },
-    .{ "plist", &html },    .{ "sql", &sql },        .{ "php", &php },        .{ "dart", &dart },
-    .{ "diff", &diff },     .{ "patch", &diff },     .{ "gitignore", &hash_data }, .{ "gitattributes", &hash_data },
-    .{ "env", &hash_data }, .{ "zshrc", &shell },    .{ "zshenv", &shell },   .{ "zprofile", &shell },
-    .{ "bashrc", &shell },  .{ "bash_profile", &shell }, .{ "profile", &shell },
-};
+const diff: Lang = .{ .diff = true, .exts = kw("diff patch") };
+const data: Lang = .{ .keys = true, .exts = kw("json jsonl ndjson"), .keywords = kw("true false null") };
+const hash_data: Lang = .{ .line_comment = "#", .keys = true, .exts = kw("toml yaml yml ini conf gitignore gitattributes env"), .keywords = kw("true false null") };
+const css: Lang = .{ .block_comment = true, .keys = true, .exts = kw("css") };
+const markdown: Lang = .{ .markdown = true, .exts = kw("md markdown") };
+const html: Lang = .{ .html = true, .exts = kw("html htm xhtml xml svg plist") };
 
 /// The languages a user can pick by hand, by name. Several names share a
 /// family's table (C, C++ and Java all lex as C).
@@ -201,10 +178,14 @@ pub const languages = [_]struct { name: []const u8, lang: *const Lang }{
     .{ .name = "YAML", .lang = &hash_data },    .{ .name = "Zig", .lang = &zig },
 };
 
-/// The language picked by `name` from `languages`, in any case.
-pub fn langByName(name: []const u8) ?*const Lang {
-    for (languages) |l| if (std.ascii.eqlIgnoreCase(l.name, name)) return l.lang;
-    return null;
+/// The language for a Markdown code fence info string, in any case.
+pub fn forFence(hint: []const u8) *const Lang {
+    for (languages) |l| if (std.ascii.eqlIgnoreCase(l.name, hint) or hasWord(l.lang.exts, hint, true)) return l.lang;
+    const aliases = comptime [_]struct { []const u8, *const Lang }{
+        .{ "console", &shell }, .{ "golang", &go }, .{ "objc", &c_like }, .{ "csharp", &c_like }, .{ "jsonc", &data },
+    };
+    for (aliases) |a| if (std.ascii.eqlIgnoreCase(a[0], hint)) return a[1];
+    return &plain;
 }
 
 /// The first name in `languages` for `lang`'s family.
@@ -231,13 +212,11 @@ pub fn forHeader(first_line: []const u8) ?*const Lang {
     var end = prog.len;
     while (end > 0 and (std.ascii.isDigit(prog[end - 1]) or prog[end - 1] == '.')) end -= 1;
     const name = prog[0..end];
-    const table = [_]struct { []const u8, *const Lang }{
-        .{ "sh", &shell },   .{ "bash", &shell }, .{ "zsh", &shell },  .{ "dash", &shell },
-        .{ "ksh", &shell },  .{ "fish", &fish },  .{ "python", &python }, .{ "node", &js },
-        .{ "deno", &js },    .{ "bun", &js },     .{ "ruby", &ruby },  .{ "lua", &lua },
-        .{ "php", &php },    .{ "dart", &dart },
+    const table = comptime [_]struct { []const u8, *const Lang }{
+        .{ kw("sh bash zsh dash ksh"), &shell }, .{ kw("node deno bun"), &js }, .{ kw("fish"), &fish }, .{ kw("python"), &python },
+        .{ kw("ruby"), &ruby },                  .{ kw("lua"), &lua },          .{ kw("php"), &php },   .{ kw("dart"), &dart },
     };
-    for (table) |e| if (std.mem.eql(u8, e[0], name)) return e[1];
+    for (table) |e| if (hasWord(e[0], name, false)) return e[1];
     return null;
 }
 
@@ -254,7 +233,7 @@ pub fn forPath(path: []const u8) *const Lang {
     if (std.mem.startsWith(u8, base, ".env.")) return &hash_data;
     const dot = std.mem.lastIndexOfScalar(u8, base, '.') orelse return &plain;
     const ext = base[dot + 1 ..];
-    for (by_ext) |e| if (std.mem.eql(u8, e[0], ext)) return e[1];
+    for (languages) |l| if (hasWord(l.lang.exts, ext, false)) return l.lang;
     return &plain;
 }
 
@@ -269,14 +248,6 @@ pub const Sync = struct {
     delta: ?isize = null,
 };
 
-/// Repairs cached line-start states and returns the half-open range whose
-/// kinds must be forgotten. Same-line-count edits stop at state convergence.
-pub fn syncStates(gpa: std.mem.Allocator, lang: *const Lang, b: *Buffer, states: *std.ArrayList(State), upto: usize) ![2]usize {
-    if (b.lines_shifted) b.line_delta = null;
-    const res = try syncStatesShift(gpa, lang, b, states, upto);
-    return .{ res.from, res.end };
-}
-
 /// Repairs cached line-start states, preserving shifted suffix states when a
 /// single line-count delta is known.
 pub fn syncStatesShift(gpa: std.mem.Allocator, lang: *const Lang, b: *Buffer, states: *std.ArrayList(State), upto: usize) !Sync {
@@ -285,25 +256,17 @@ pub fn syncStatesShift(gpa: std.mem.Allocator, lang: *const Lang, b: *Buffer, st
     if (first < states.items.len) {
         var converge = !b.lines_shifted;
         if (b.lines_shifted) {
-            if (b.line_delta) |delta| {
-                if (b.shift_at == first and first + 1 < states.items.len) {
-                    if (delta > 0) {
-                        const add_n: usize = @intCast(delta);
-                        const slot = try states.addManyAt(gpa, first + 1, add_n);
-                        @memset(slot, .normal);
-                    } else if (delta < 0) {
-                        const rem_n = @min(@as(usize, @intCast(-delta)), states.items.len - (first + 1));
-                        states.replaceRangeAssumeCapacity(first + 1, rem_n, &.{});
-                    }
-                    res.shift_at = first;
-                    res.delta = delta;
-                    converge = true;
-                } else {
-                    states.shrinkRetainingCapacity(first + 1);
+            if (b.line_delta) |delta| if (b.shift_at == first and first + 1 < states.items.len) {
+                if (delta > 0) {
+                    @memset(try states.addManyAt(gpa, first + 1, @intCast(delta)), .normal);
+                } else if (delta < 0) {
+                    states.replaceRangeAssumeCapacity(first + 1, @min(@as(usize, @intCast(-delta)), states.items.len - (first + 1)), &.{});
                 }
-            } else {
-                states.shrinkRetainingCapacity(first + 1);
-            }
+                res.shift_at = first;
+                res.delta = delta;
+                converge = true;
+            };
+            if (!converge) states.shrinkRetainingCapacity(first + 1);
         }
         if (converge) {
             var i = first;
@@ -420,7 +383,7 @@ pub fn lexLine(lang: *const Lang, s: []const u8, state: State, out: ?[]Kind) Sta
                     i += 1;
                     while (i < s.len and isWord(s[i])) i += 1;
                     if (out != null) {
-                        if (c == '@' or isKeyword(lang, s[start..i])) {
+                        if (c == '@' or hasWord(lang.keywords, s[start..i], lang.ignore_case)) {
                             kind = .keyword;
                         } else if (lang.names) kind = nameKind(s[start..i], s, i);
                     }
@@ -436,17 +399,12 @@ fn mark(out: ?[]Kind, from: usize, to: usize, kind: Kind) void {
     if (out) |o| @memset(o[from..to], kind);
 }
 
-fn isKeyword(lang: *const Lang, w: []const u8) bool {
-    for (lang.keywords) |k| if (if (lang.ignore_case) std.ascii.eqlIgnoreCase(k, w) else std.mem.eql(u8, k, w)) return true;
-    return false;
-}
-
 /// A diff line's color: file headers as keywords, hunk headers as
 /// functions, added lines as strings, removed ones as numbers and
 /// `\ No newline` notes as comments.
 fn diffKind(s: []const u8) Kind {
-    const headers = [_][]const u8{ "+++ ", "--- ", "diff ", "index ", "new file", "deleted file", "similarity", "rename ", "old mode", "new mode" };
-    for (headers) |h| if (std.mem.startsWith(u8, s, h)) return .keyword;
+    var it = std.mem.tokenizeScalar(u8, "+++ |--- |diff |index |new file|deleted file|similarity|rename |old mode|new mode", '|');
+    while (it.next()) |h| if (std.mem.startsWith(u8, s, h)) return .keyword;
     if (std.mem.startsWith(u8, s, "@@")) return .function;
     if (s.len == 0) return .text;
     return switch (s[0]) {
@@ -703,7 +661,9 @@ test "new languages: sql keywords in any case, diff lines, names and headers" {
     try t.expectEqual(@as(?*const Lang, null), forHeader("#!/usr/bin/env"));
     try t.expectEqual(&ruby, detect("bin/tool", "#!/usr/bin/env ruby"));
     try t.expectEqual(&rust, detect("a.rs", "#!/bin/sh"));
-    try t.expectEqual(&sql, langByName("sql").?);
+    inline for (.{ .{ "sql", &sql }, .{ "C++", &c_like }, .{ "C#", &c_like }, .{ "csharp", &c_like }, .{ "py", &python }, .{ "golang", &go }, .{ "jsonc", &data }, .{ "console", &shell }, .{ "objc", &c_like }, .{ "unknown", &plain } }) |c| {
+        try t.expectEqual(c[1], forFence(c[0]));
+    }
     try t.expectEqualStrings("C", nameOf(&c_like));
 }
 
@@ -812,7 +772,9 @@ test "markdown fences carry across lines and color nothing else inside" {
 }
 
 fn expectIncremental(lang: *const Lang, b: *Buffer, states: *std.ArrayList(State), cached: *std.ArrayList([]Kind)) ![2]usize {
-    const invalid = try syncStates(t.allocator, lang, b, states, b.lines() - 1);
+    if (b.lines_shifted) b.line_delta = null;
+    const sync = try syncStatesShift(t.allocator, lang, b, states, b.lines() - 1);
+    const invalid = [2]usize{ sync.from, sync.end };
     // A line-count change may move all later rows; discard those old slots.
     if (cached.items.len != b.lines()) {
         for (cached.items) |k| t.allocator.free(k);

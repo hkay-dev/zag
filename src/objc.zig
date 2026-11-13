@@ -24,8 +24,9 @@ pub fn no(_: Id, _: Sel) callconv(.c) bool {
 }
 
 pub const Point = extern struct { x: f64 = 0, y: f64 = 0 };
+pub const Size = extern struct { w: f64 = 0, h: f64 = 0 };
 pub const Rect = extern struct { x: f64 = 0, y: f64 = 0, w: f64 = 0, h: f64 = 0 };
-const Range = extern struct { loc: isize, len: isize };
+pub const Range = extern struct { loc: usize = 0, len: usize = 0 };
 const Transform = extern struct { a: f64, b: f64, c: f64, d: f64, tx: f64, ty: f64 };
 
 extern fn objc_getClass(name: [*:0]const u8) Id;
@@ -41,12 +42,10 @@ extern fn objc_msgSend() callconv(.c) void;
 pub extern fn objc_autoreleasePoolPush() ?*anyopaque;
 pub extern fn objc_autoreleasePoolPop(pool: ?*anyopaque) void;
 
-pub fn class(name: [*:0]const u8) Id {
-    return objc_getClass(name);
-}
+pub const class = objc_getClass;
 
 /// Sends `sel` to `target`. Literal numbers in `args` need a type.
-pub fn msg(comptime R: type, target: Id, comptime sel: [:0]const u8, args: anytype) R {
+pub fn msg(comptime R: type, target: Id, sel: [*:0]const u8, args: anytype) R {
     const fields = @typeInfo(@TypeOf(args)).@"struct".field_types;
     const params = comptime blk: {
         var p: [fields.len + 2]type = undefined;
@@ -61,15 +60,15 @@ pub fn msg(comptime R: type, target: Id, comptime sel: [:0]const u8, args: anyty
 }
 
 /// Runs `sel` on `target` after `delay`, replacing an earlier one with the same `key`.
-pub fn later(target: Id, comptime sel: [:0]const u8, key: Id, delay: f64) void {
+pub fn later(target: Id, sel: [*:0]const u8, key: Id, delay: f64) void {
     const s = sel_registerName(sel);
     msg(void, class("NSObject"), "cancelPreviousPerformRequestsWithTarget:selector:object:", .{ target, s, key });
     msg(void, target, "performSelector:withObject:afterDelay:", .{ s, key, delay });
 }
 
-/// `[[cls alloc] init]`.
+/// `[cls new]`.
 pub fn new(cls: [*:0]const u8) Id {
-    return msg(Id, msg(Id, class(cls), "alloc", .{}), "init", .{});
+    return msg(Id, class(cls), "new", .{});
 }
 
 /// A subclass under construction.
@@ -115,6 +114,17 @@ pub fn utf8(ns: Id) []const u8 {
     return p[0..msg(usize, ns, "lengthOfBytesUsingEncoding:", .{@as(usize, 4)})];
 }
 
+pub fn utf16(cp: u21, out: *[2]u16) []const u16 {
+    if (cp < 0x10000) {
+        out[0] = @intCast(cp);
+        return out[0..1];
+    }
+    const v = cp - 0x10000;
+    out[0] = @intCast(0xD800 + (v >> 10));
+    out[1] = @intCast(0xDC00 + (v & 0x3FF));
+    return out[0..2];
+}
+
 pub extern fn CFRelease(cf: *anyopaque) void;
 pub extern fn CFRetain(cf: *anyopaque) *anyopaque;
 pub extern fn CGContextSetRGBFillColor(ctx: Id, r: f64, g: f64, b: f64, a: f64) void;
@@ -138,7 +148,6 @@ pub extern fn CGContextSetAlpha(ctx: Id, alpha: f64) void;
 pub extern fn CGContextBeginTransparencyLayer(ctx: Id, info: ?*anyopaque) void;
 pub extern fn CGContextEndTransparencyLayer(ctx: Id) void;
 pub extern fn CGContextClip(ctx: Id) void;
-pub const Size = extern struct { w: f64 = 0, h: f64 = 0 };
 pub extern fn CGColorCreateGenericGray(gray: f64, alpha: f64) ?*anyopaque;
 pub extern fn CGContextSetShadowWithColor(ctx: Id, offset: Size, blur: f64, color: ?*anyopaque) void;
 pub extern fn CGContextSetBlendMode(ctx: Id, mode: i32) void;
@@ -170,5 +179,5 @@ pub fn flipText(ctx: Id) void {
 /// The font the system picks for `units` when `font` lacks the glyph. Retained.
 pub fn fallbackFont(font: Id, units: []const u16) Id {
     const s = msg(Id, class("NSString"), "stringWithCharacters:length:", .{ units.ptr, units.len });
-    return CTFontCreateForString(font, s, .{ .loc = 0, .len = @intCast(units.len) });
+    return CTFontCreateForString(font, s, .{ .len = units.len });
 }

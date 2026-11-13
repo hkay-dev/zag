@@ -479,17 +479,6 @@ fn setFont() void {
     preview.setTypography(conf.font(), conf.size, conf.spacing);
 }
 
-fn utf16(cp: u21, out: *[2]u16) usize {
-    if (cp < 0x10000) {
-        out[0] = @intCast(cp);
-        return 1;
-    }
-    const v = cp - 0x10000;
-    out[0] = @intCast(0xD800 + (v >> 10));
-    out[1] = @intCast(0xDC00 + (v & 0x3FF));
-    return 2;
-}
-
 /// The font and glyph that draw `cp`, falling back to a system font that
 /// has it (emoji, CJK).
 fn glyph(cp: u21, heavy: bool) Fallback {
@@ -502,15 +491,15 @@ fn glyph(cp: u21, heavy: bool) Fallback {
     }
     if (lo < fallbacks.items.len and fallbacks.items[lo].cp == cp) return fallbacks.items[lo].fb;
     fallbacks.ensureUnusedCapacity(gpa, 1) catch return .{ .font = font, .glyph = 0 };
-    var units: [2]u16 = undefined;
-    const n = utf16(cp, &units);
+    var pair: [2]u16 = undefined;
+    const units = objc.utf16(cp, &pair);
     var g: [2]u16 = .{ 0, 0 };
     var fb: Fallback = .{ .font = font, .glyph = 0 };
-    if (objc.CTFontGetGlyphsForCharacters(font, &units, &g, @intCast(n)) and g[0] != 0) {
+    if (objc.CTFontGetGlyphsForCharacters(font, units.ptr, &g, @intCast(units.len)) and g[0] != 0) {
         fb.glyph = g[0];
     } else {
-        const alt = objc.fallbackFont(font, units[0..n]);
-        if (alt != null and objc.CTFontGetGlyphsForCharacters(alt, &units, &g, @intCast(n))) {
+        const alt = objc.fallbackFont(font, units);
+        if (alt != null and objc.CTFontGetGlyphsForCharacters(alt, units.ptr, &g, @intCast(units.len))) {
             fb = .{ .font = alt, .glyph = g[0] };
         } else if (alt != null) objc.CFRelease(alt.?);
     }
