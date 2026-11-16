@@ -129,6 +129,6 @@ an animation acts at once: a closing folder keeps sliding and the click maps thr
 ## Reduce Motion is not followed
 
 Decided by Harsha on 2026-11-05: "I do not want to cater to Reduced Motion at all." The audit
-(docs/design/2026-11-05-design-audit.md) suggested a crossfade-only mode, and we're not building
+(~/Development/incubator/zag/docs/design/2026-11-05-design-audit.md) suggested a crossfade-only mode, and we're not building
 it. Increase Contrast is followed (zig-editor#ms1x). Don't add a Reduce Motion branch to any
 animation.

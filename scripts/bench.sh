@@ -11,7 +11,8 @@
 #                                  touching a file.
 #   bench.sh ab A B OUT [N]        runs A then B once each, N rounds (default
 #                                  6), into OUT/a and OUT/b, with one
-#                                  `qm with quiet zag-perf` hold per pair.
+#                                  `qm with quiet zag-perf` hold per pair when
+#                                  qm (a local build queue) is installed.
 # Each run launch gets a fresh HOME and session, and opens the same frozen copy
 # of Zag's sources (ZE_BENCH_DATA, made once from commit 7132176), so two
 # builds see the same files. The last step, quickopen_ms (open quick open, type
@@ -19,9 +20,12 @@
 # 60k files (ZE_BENCH_HOME_DATA, made once by this script, never in Git) and
 # puts the root back after. Nothing takes focus. Time `run` and `session`
 # inside `qm with quiet`, one A/B pair per hold (`ab` does this): qm stops a
-# hold past 10 minutes when a build waits.
+# hold past 10 minutes when a build waits. Without qm or mise, the script runs
+# each command directly with the zig on PATH.
 set -eu
 cd "$(dirname "$0")/.."
+zig_env=""; command -v mise >/dev/null 2>&1 && zig_env="mise exec zig@0.17.0 --"
+hold() { if command -v qm >/dev/null 2>&1; then qm with "$@"; else shift 3; "$@"; fi; }
 data=${ZE_BENCH_DATA:-$HOME/.local/share/zig-editor-perf/data}
 homedata=${ZE_BENCH_HOME_DATA:-$HOME/.local/share/zig-editor-perf/home}
 # A home-shaped tree of empty files: a deep Library (caches, app support,
@@ -71,12 +75,12 @@ PY
 case ${1:-} in
   build)
     app=${2:-"$PWD/zig-out/Zag Perf.app"}
-    qm with build zag -- nice mise exec zig@0.17.0 -- scripts/bundle.sh perf "$app" >/dev/null
+    hold build zag -- nice $zig_env scripts/bundle.sh perf "$app" >/dev/null
     echo "$app" ;;
   ab)
     a=$2 b=$3 out=$4 n=${5:-6} k=0
     while [ "$k" -lt "$n" ]; do
-      qm with quiet zag-perf -- sh -c 'scripts/bench.sh run "$1" "$3/a" 1 && scripts/bench.sh run "$2" "$3/b" 1' sh "$a" "$b" "$out"
+      hold quiet zag-perf -- sh -c 'scripts/bench.sh run "$1" "$3/a" 1 && scripts/bench.sh run "$2" "$3/b" 1' sh "$a" "$b" "$out"
       k=$((k + 1))
     done ;;
   run|session)

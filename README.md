@@ -12,8 +12,7 @@ Zag is a small native text editor for macOS on Apple Silicon, written from scrat
 - **Quick Open and Command Palette.** Jump to any file in the open folder with fuzzy matching (`⌘P`) or run any menu command from the keyboard (`⌘K`).
 - **Live Markdown Preview.** Render the active Markdown file in a companion preview window (`⇧⌘M`) with synchronized scrolling, lists, code blocks, links, and tables.
 - **Focused writing modes.** Turn on Typewriter Scrolling, Focus dimming (line, sentence, or paragraph), Zen Mode (`⌃⌘Z`), or Late-Night Focus (`⌃⌘N`).
-- **Safe saves and crash-proof drafts.** Zag writes a sibling temporary file, copies permissions, extended attributes, and Finder tags, `fsync`s, and swaps atomically. Zag autosaves untitled tabs to `~/Library/Application Support/ze/Drafts` and restores open windows and tabs on launch.
-- **VoiceOver and Increase Contrast.** Zag exposes native macOS accessibility elements on demand when VoiceOver runs and sharpens borders and muted ink when Increase Contrast is active.
+- **Atomic saves and autosaved drafts.** Zag writes a sibling temporary file, copies permissions, extended attributes, and Finder tags, `fsync`s, and swaps atomically. Zag autosaves untitled tabs to `~/Library/Application Support/zag/Drafts` and restores open windows and tabs on launch.
 
 ## Install
 
@@ -63,7 +62,7 @@ CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/dmg.s
 | Save / Save As | `⌘S` / `⇧⌘S` |
 | Close tab / Close window | `⌘W` / `⇧⌘W` |
 | Split right / Split down | `⌘D` / `⇧⌘D` |
-| Focus previous / next card | `⌥⌘←` / `⌥⌘→` |
+| Focus card left / right | `⌥⌘←` / `⌥⌘→` |
 | Previous / next tab | `⇧⌘[` / `⇧⌘]` (or `⌃⇧⇥` / `⌃⇥`) |
 | Toggle sidebar | `⌘\` |
 | Find / Find and Replace | `⌘F` / `⌥⌘F` |
@@ -80,7 +79,7 @@ CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/dmg.s
 
 Press `⌘,` to open `~/.config/zag/config.toml` inside Zag. Zag watches the file and applies saved edits right away across every open window.
 
-Built-in light themes include **Paper** (default), **Ayu Light**, and **One Light**. Built-in dark themes include **Ink** (default), **Ayu Dark**, **One Dark**, and **Black** (OLED). Override any individual theme slot with `light.<slot> = "#RRGGBB"` or `dark.<slot> = "#RRGGBB"`.
+Built-in light themes include **Paper** (default), **Ayu Light**, **One Light**, **Solarized Light**, and **Gruvbox Light**. Built-in dark themes include **Ink** (default), **Ayu Dark**, **One Dark**, **Solarized Dark**, **Gruvbox Dark**, and **Black** (OLED). Override any individual theme slot with `light.<slot> = "#RRGGBB"` or `dark.<slot> = "#RRGGBB"`.
 
 Read the full user manual in [docs/guide/index.md](docs/guide/index.md). Design notes on binary size and animation appear in [docs/decisions/tiny-binary.md](docs/decisions/tiny-binary.md) and [docs/decisions/motion.md](docs/decisions/motion.md).
 

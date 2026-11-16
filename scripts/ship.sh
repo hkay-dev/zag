@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Ship it (`deckhand ship run zag`): builds the stable "Zag" from this commit
-# and installs it at ~/Applications/Zag.app, the only copy Harsha runs. A
-# running Zag is quit and opened again on the new build. Only Ship it runs
-# this; agents test "Zag Dev" from scripts/dev.sh.
+# Ship it: builds stable Zag from this commit and installs it at
+# ~/Applications/Zag.app. The script quits a running Zag and opens the new
+# build. Use scripts/dev.sh for development builds instead.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

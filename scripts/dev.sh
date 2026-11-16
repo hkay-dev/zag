@@ -3,16 +3,20 @@
 # the background, behind every window, without taking the keys. Prints its
 # pid. `dev.sh build` only builds. Its settings file lives under ZE_DEV_HOME
 # (default /tmp/ze-dev-home) and its session in its own defaults
-# (dev.hkay.ze.dev), never Harsha's. What it prints, panics included, goes
-# to ZE_DEV_LOG (default /tmp/ze-dev.log). ZE_DEBUG=1 makes a debug build.
-# Harsha's own Zag is the stable one at ~/Applications/Zag.app; only Ship it
-# changes that (scripts/ship.sh).
+# (dev.hkay.ze.dev), never the stable app's. What it prints, panics included,
+# goes to ZE_DEV_LOG (default /tmp/ze-dev.log). ZE_DEBUG=1 makes a debug build.
+# The stable Zag is the one at ~/Applications/Zag.app; only Ship it changes
+# that (scripts/ship.sh).
 set -eu
 # `open` starts the app in /, so paths are made absolute from here first.
 here=$PWD
 cd "$(dirname "$0")/.."
 app="$PWD/zig-out/Zag Dev.app"
-qm with build zag -- mise exec zig@0.17.0 -- scripts/bundle.sh dev "$app" >/dev/null
+# qm (a local build queue) and mise (pins Zig 0.17.0) are optional: without
+# them the script runs the build directly with the zig on PATH.
+zig_env=""; command -v mise >/dev/null 2>&1 && zig_env="mise exec zig@0.17.0 --"
+hold() { if command -v qm >/dev/null 2>&1; then qm with "$@"; else shift 3; "$@"; fi; }
+hold build zag -- $zig_env scripts/bundle.sh dev "$app" >/dev/null
 [ "${1:-}" = build ] && { echo "$app"; exit 0; }
 home=${ZE_DEV_HOME:-/tmp/ze-dev-home}
 mkdir -p "$home"
