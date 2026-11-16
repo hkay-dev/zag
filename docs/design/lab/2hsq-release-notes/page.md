@@ -13,7 +13,7 @@ takes:
 recommended: A
 approve: Mark the release notes ready to publish
 round: 1
-status: waiting
+status: approved
 ---
 
 # Zag 0.1.1 release notes
