@@ -1,6 +1,6 @@
 # Zag
 
-Zag is a small native text editor for macOS on Apple Silicon, written from scratch in Zig. The release binary is ~360 KB (306 KB packaged as a compressed `.dmg`) and links only Apple's system frameworks (`AppKit`, `QuartzCore`, `CoreText`, `CoreGraphics`, `CoreFoundation`) and `libc`.
+Zag is a small native text editor for macOS on Apple Silicon, written from scratch in Zig. The 0.1.0 executable is 436,560 bytes (about 426 KiB, signature included), the compressed `.dmg` is 366,969 bytes (about 358 KiB), and Zag links only Apple's system frameworks (`AppKit`, `QuartzCore`, `CoreText`, `CoreGraphics`, `CoreFoundation`) and `libc`.
 
 ![Zag](docs/assets/zag-hero.png)
 
@@ -18,7 +18,7 @@ Zag is a small native text editor for macOS on Apple Silicon, written from scrat
 
 Requires **macOS 15 (Sequoia) or newer** on **Apple Silicon (`arm64`)**.
 
-1. Download `Zag-0.1.0-arm64.dmg` from the latest release.
+1. Download `Zag-0.1.0-arm64.dmg` from the [latest release](https://github.com/hkay-dev/zag/releases/latest).
 2. Open the disk image and drag **Zag** into **Applications**.
 3. If macOS Gatekeeper blocks the first launch of an unnotarized build, clear the quarantine attribute once in Terminal and open Zag:
 

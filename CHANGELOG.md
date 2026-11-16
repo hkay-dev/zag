@@ -1,12 +1,12 @@
 # Changelog
 
-## 0.1.0 (2026-11-11)
+## 0.1.0 (2026-11-15)
 
 First public open-source release of Zag for macOS 15+ on Apple Silicon.
 
 ### Features
 
-- Native `AppKit`, `CoreGraphics`, and `CoreText` editor in a ~360 KB stripped binary with zero external dependencies.
+- Native `AppKit`, `CoreGraphics`, and `CoreText` editor in a 436,560-byte executable (about 426 KiB) with zero external dependencies.
 - Rounded editor cards with horizontal and vertical splits (`⌘D`, `⇧⌘D`), draggable tabs, and a collapsible folder sidebar (`⌘\`).
 - Fuzzy Quick Open (`⌘P`), Command Palette (`⌘K`), Go to Line (`⌘L`), and incremental Find and Replace (`⌘F`, `⌥⌘F`).
 - Built-in syntax highlighting for Zig, C/C++/Objective-C, Java, Kotlin, C#, JavaScript/TypeScript, Python, Rust, Go, Swift, Shell, Fish, Ruby, Lua, SQL, PHP, Dart, Diff, JSON/JSONL, TOML, YAML, INI, CSS, HTML/XML/SVG, and Markdown.
