@@ -15,7 +15,6 @@ const msg = objc.msg;
 
 extern fn CGEventCreateScrollWheelEvent2(source: ?*anyopaque, units: u32, count: u32, w1: i32, w2: i32, w3: i32) ?*anyopaque;
 extern fn CGEventSetLocation(ev: ?*anyopaque, at: objc.Point) void;
-extern fn usleep(us: c_uint) c_int;
 extern fn clock_gettime_nsec_np(clock: c_int) u64;
 
 const Sample = struct { metric: []const u8, x: f64 };
@@ -23,6 +22,19 @@ var samples: std.ArrayList(Sample) = .empty;
 var out: []const u8 = "";
 var v: Id = null;
 var win: Id = null;
+
+const Phase = enum {
+    start, launch_done, frame, move, key, erase, enter_start, enter, join,
+    scroll, tab, anim, hold, palette, activate, guards, quick, quick_parts, done,
+};
+var phase: Phase = .start;
+var index: usize = 0;
+var settling: usize = 0;
+var cpu0: f64 = 0;
+var main0: f64 = 0;
+var quick_root: []const u8 = "";
+var saved_root: ?[]const u8 = null;
+const frame_delay = 1.0 / 120.0;
 
 /// Called from main before the run loop starts. Does nothing without ZE_BENCH.
 pub fn start() void {
@@ -61,81 +73,150 @@ fn visible() void {
     put("visible", if (msg(usize, win, "occlusionState", .{}) & 2 != 0) 1 else 0);
 }
 
-fn run(_: Id, _: Sel, _: Id) callconv(.c) void {
-    // A copy of a real session: just launch and let it settle, never edit.
-    if (std.c.getenv("ZE_BENCH_LAUNCH_ONLY") != null) {
-        for (0..5) |_| settle();
-        memory("footprint_mb", "peak_mb");
-        flush();
-        std.c.exit(0);
-    }
-    const cpu0 = cpuNow();
-    const main0 = threadCpu();
-    // The first tab holds the big file.
-    view.stepTab(view.keyDoc().?, 1);
-    settle();
+fn advance(next: Phase, frames: usize) void {
+    phase = next;
+    index = 0;
+    settling = frames;
+}
 
-    // A full redraw of an idle window.
-    for (0..120) |_| step("frame_ms", true, nothing, .{});
-    memory("mem_frame_mb", "peak_frame_mb");
-
-    // Typing in the middle of the big file.
-    for (0..600) |_| command("moveDown:");
-    settle();
-    for (0..200) |i| step("key_ms", false, insert, .{if (i % 7 == 6) " " else "x"});
-    for (0..200) |_| command("deleteBackward:");
-    settle();
-    memory("mem_key_mb", "peak_key_mb");
-
-    // Column zero avoids auto-indent, so each backspace joins one inserted line.
-    command("moveToBeginningOfParagraph:");
-    settle();
-    for (0..50) |_| step("enter_ms", false, command, .{"insertNewline:"});
-    for (0..50) |_| step("join_ms", false, command, .{"deleteBackward:"});
-    settle();
-
-    // Scrolling down and back up with the trackpad.
-    for (0..400) |i| step("scroll_ms", false, scroll, .{@as(i32, if (i < 200) -40 else 40)});
-    settle();
-    memory("mem_scroll_mb", "peak_scroll_mb");
-
-    // Switching tabs: the switch and its first frame, then later frames of
-    // the switch's fade at 120 Hz.
-    for (0..60) |_| {
-        step("tab_ms", false, view.stepTab, .{ view.keyDoc().?, @as(isize, 1) });
+/// One action or settling frame per callback. Returning lets AppKit and
+/// Quick Open's main-queue completion run between measurements.
+fn run(self: Id, _: Sel, _: Id) callconv(.c) void {
+    if (settling > 0) {
+        settling -= 1;
         settle();
+        objc.later(self, "run:", null, frame_delay);
+        return;
     }
-    memory("mem_tab_mb", "peak_tab_mb");
-    for (0..20) |_| {
-        view.stepTab(view.keyDoc().?, 1);
-        for (0..12) |_| step("anim_frame_ms", false, send, .{"tick:"});
+    const i = index;
+    index += 1;
+    var delay: f64 = frame_delay;
+    switch (phase) {
+        .start => {
+            if (std.c.getenv("ZE_BENCH_LAUNCH_ONLY") != null) {
+                advance(.launch_done, 150);
+            } else {
+                cpu0 = cpuNow();
+                main0 = threadCpu();
+                view.stepTab(view.keyDoc().?, 1);
+                advance(.frame, 30);
+            }
+        },
+        .launch_done => {
+            memory("footprint_mb", "peak_mb");
+            complete();
+        },
+        .frame => {
+            step("frame_ms", true, nothing, .{});
+            if (index == 120) advance(.move, 0);
+        },
+        .move => {
+            if (i == 0) memory("mem_frame_mb", "peak_frame_mb");
+            command("moveDown:");
+            if (index == 600) advance(.key, 30);
+        },
+        .key => {
+            step("key_ms", false, insert, .{if (i % 7 == 6) " " else "x"});
+            if (index == 200) advance(.erase, 0);
+        },
+        .erase => {
+            command("deleteBackward:");
+            if (index == 200) advance(.enter_start, 30);
+        },
+        .enter_start => {
+            memory("mem_key_mb", "peak_key_mb");
+            // Column zero avoids auto-indent, so backspace joins each line.
+            command("moveToBeginningOfParagraph:");
+            advance(.enter, 30);
+        },
+        .enter => {
+            step("enter_ms", false, command, .{"insertNewline:"});
+            if (index == 50) advance(.join, 0);
+        },
+        .join => {
+            step("join_ms", false, command, .{"deleteBackward:"});
+            if (index == 50) advance(.scroll, 30);
+        },
+        .scroll => {
+            step("scroll_ms", false, scroll, .{@as(i32, if (i < 200) -40 else 40)});
+            if (index == 400) advance(.tab, 30);
+        },
+        .tab => {
+            if (i == 0) memory("mem_scroll_mb", "peak_scroll_mb");
+            step("tab_ms", false, view.stepTab, .{ view.keyDoc().?, @as(isize, 1) });
+            settling = 30;
+            if (index == 60) advance(.anim, 30);
+        },
+        .anim => {
+            if (i == 0) memory("mem_tab_mb", "peak_tab_mb");
+            if (i % 13 == 0) {
+                view.stepTab(view.keyDoc().?, 1);
+            } else step("anim_frame_ms", false, send, .{"tick:"});
+            if (index == 20 * 13) advance(.hold, 30);
+        },
+        .hold => {
+            memory("mem_anim_mb", "peak_anim_mb");
+            // A timer leaves the main queue available during footprint/vmmap.
+            if (std.c.getenv("ZE_BENCH_HOLD")) |h| {
+                const seconds_to_hold = std.fmt.parseFloat(f64, std.mem.span(h)) catch 0;
+                if (!std.math.isFinite(seconds_to_hold)) fail("invalid bench hold");
+                delay = @max(frame_delay, seconds_to_hold);
+            }
+            advance(.palette, 0);
+        },
+        .palette => {
+            const letters = [_][]const u8{ "s", "p", "l", "i", "t" };
+            switch (i % 7) {
+                0 => step("palette_ms", false, send, .{"commandPalette:"}),
+                6 => {
+                    step("palette_ms", false, command, .{"cancelOperation:"});
+                    settling = 30;
+                },
+                else => step("palette_ms", false, insert, .{letters[i % 7 - 1]}),
+            }
+            if (index == 20 * 7) advance(.activate, 30);
+        },
+        .activate => {
+            step("activate_ms", false, view.recheckAll, .{});
+            settling = 30;
+            if (index == 40) advance(.guards, 30);
+        },
+        .guards => {
+            put("proc_cpu_ms", (cpuNow() - cpu0) * 1000);
+            put("main_cpu_ms", (threadCpu() - main0) * 1000);
+            memory("footprint_mb", "peak_mb");
+            visible();
+            if (std.c.getenv("ZE_BENCH_QUICKOPEN_ROOT")) |r| {
+                quick_root = std.mem.span(r);
+                // setRoot frees the old root, so retain an owned copy.
+                saved_root = if (view.root) |root| view.gpa.dupe(u8, root) catch fail("no memory") else null;
+                view.setRoot(view.gpa.dupe(u8, quick_root) catch fail("no memory"));
+                advance(.quick, 30);
+            } else advance(.done, 0);
+        },
+        .quick => {
+            const letters = [_][]const u8{ "m", "a", "i" };
+            switch (i % 5) {
+                0 => step("quickopen_ms", false, send, .{"quickOpen:"}),
+                4 => {
+                    step("quickopen_ms", false, command, .{"cancelOperation:"});
+                    settling = 30;
+                },
+                else => step("quickopen_ms", false, insert, .{letters[i % 5 - 1]}),
+            }
+            if (index == 20 * 5) advance(.quick_parts, 60);
+        },
+        .quick_parts => {
+            quickOpenParts(quick_root);
+            settling = 30;
+            if (index == 20) advance(.done, 0);
+        },
+        .done => {
+            if (saved_root) |root| view.setRoot(root);
+            complete();
+        },
     }
-    settle();
-    memory("mem_anim_mb", "peak_anim_mb");
-    // ZE_BENCH_HOLD=<seconds> waits here, for footprint or vmmap to look.
-    if (std.c.getenv("ZE_BENCH_HOLD")) |h| sleep(std.fmt.parseFloat(f64, std.mem.span(h)) catch 0);
-
-    // The command palette: open it, filter it a letter at a time, close it.
-    for (0..20) |_| {
-        step("palette_ms", false, send, .{"commandPalette:"});
-        for ([_][]const u8{ "s", "p", "l", "i", "t" }) |ch| step("palette_ms", false, insert, .{ch});
-        step("palette_ms", false, command, .{"cancelOperation:"});
-        settle();
-    }
-
-    // Zag coming forward: the recheck of settings, files and folders, and the frame after.
-    for (0..40) |_| {
-        step("activate_ms", false, view.recheckAll, .{});
-        settle();
-    }
-
-    put("proc_cpu_ms", (cpuNow() - cpu0) * 1000);
-    put("main_cpu_ms", (threadCpu() - main0) * 1000);
-    memory("footprint_mb", "peak_mb");
-    visible();
-    if (std.c.getenv("ZE_BENCH_QUICKOPEN_ROOT")) |r| quickOpenSteps(std.mem.span(r));
-    flush();
-    std.c.exit(0);
+    objc.later(self, "run:", null, delay);
 }
 
 /// The process's physical footprint now and its peak so far, in MB, from
@@ -156,7 +237,6 @@ fn memory(comptime now: []const u8, comptime peak: []const u8) void {
 /// window that shows on screen piles up new backing stores for frames the
 /// screen hasn't shown yet, which real use never does.
 fn step(comptime metric: []const u8, comptime full: bool, comptime f: anytype, args: anytype) void {
-    sleep(1.0 / 120.0);
     const pool = objc.objc_autoreleasePoolPush();
     const t0 = threadCpu();
     @call(.auto, f, args);
@@ -201,14 +281,11 @@ fn scroll(dy: i32) void {
     msg(void, v, "scrollWheel:", .{msg(Id, objc.class("NSEvent"), "eventWithCGEvent:", .{ev})});
 }
 
-/// Lets springs and fades finish, drawing about as often as the display would.
+/// One untimed spring/fade frame; the caller schedules the next turn.
 fn settle() void {
-    for (0..30) |_| {
-        sleep(0.008);
-        const pool = objc.objc_autoreleasePoolPush();
-        send("tick:");
-        finishFrame(pool, null, 0);
-    }
+    const pool = objc.objc_autoreleasePoolPush();
+    send("tick:");
+    finishFrame(pool, null, 0);
 }
 
 fn findView() void {
@@ -225,10 +302,6 @@ fn findView() void {
         }
     }
     fail("no ze view");
-}
-
-fn sleep(s: f64) void {
-    _ = usleep(@intFromFloat(s * 1e6));
 }
 
 fn seconds(tv: std.c.timeval) f64 {
@@ -258,69 +331,61 @@ fn cpuNow() f64 {
 }
 
 fn put(metric: []const u8, x: f64) void {
-    samples.append(view.gpa, .{ .metric = metric, .x = x }) catch {};
+    samples.append(view.gpa, .{ .metric = metric, .x = x }) catch fail("no memory for sample");
 }
 
 /// Appends each sample to `<out>/<metric>.txt`.
 fn flush() void {
     for (samples.items) |s| {
-        var path: [1024]u8 = undefined;
-        const p = std.fmt.bufPrintSentinel(&path, "{s}/{s}.txt", .{ out, s.metric }, 0) catch continue;
+        var path: [std.fs.max_path_bytes]u8 = undefined;
+        const p = std.fmt.bufPrintSentinel(&path, "{s}/{s}.txt", .{ out, s.metric }, 0) catch fail("metric path too long");
         const fd = std.c.open(p, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, @as(std.c.mode_t, 0o644));
-        if (fd < 0) continue;
-        defer _ = std.c.close(fd);
+        if (fd < 0) fail("cannot open metric");
         var line: [64]u8 = undefined;
-        const t = std.fmt.bufPrint(&line, "{d:.4}\n", .{s.x}) catch continue;
-        _ = std.c.write(fd, t.ptr, t.len);
+        const t = std.fmt.bufPrint(&line, "{d:.4}\n", .{s.x}) catch fail("cannot format metric");
+        if (std.c.write(fd, t.ptr, t.len) != @as(isize, @intCast(t.len))) fail("incomplete metric write");
+        if (std.c.close(fd) != 0) fail("cannot close metric");
     }
+}
+
+fn complete() noreturn {
+    flush();
+    // `open -W` does not report the app's exit status. Publish success only
+    // after every sample reached its file, so bench.sh rejects failed runs.
+    if (std.c.getenv("ZE_BENCH_DONE")) |path| {
+        const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true }, @as(std.c.mode_t, 0o600));
+        if (fd < 0) fail("cannot record benchmark completion");
+        if (std.c.close(fd) != 0) {
+            _ = std.c.unlink(path);
+            fail("cannot close benchmark completion");
+        }
+    }
+    std.c.exit(0);
 }
 
 fn fail(why: []const u8) noreturn {
     _ = std.c.write(2, why.ptr, why.len);
+    _ = std.c.write(2, "\n", 1);
     std.c.exit(1);
 }
 
-/// Quick open on a home-sized folder (ZE_BENCH_QUICKOPEN_ROOT, made by
-/// bench.sh): open it, type three letters, close it. Runs after the
-/// guards above are recorded, so main_cpu_ms and the memory numbers don't
-/// include it. The root points at the big folder only for this step.
-/// Beside the steps' numbers, the parts of an open step are timed alone on
-/// the same folder, so what's left is drawing: quickopen_walk_ms
-/// (`finder.scan`), quickopen_score0_ms (`finder.best` with the empty query
-/// the open step starts with), quickopen_free_ms (dropping the last list)
-/// and quickopen_score_ms (each typed letter's `finder.best`).
-fn quickOpenSteps(big: []const u8) void {
-    // setRoot frees the old root, so keep a copy to put back.
-    const keep = if (view.root) |r| view.gpa.dupe(u8, r) catch return else null;
-    view.setRoot(view.gpa.dupe(u8, big) catch return);
-    defer if (keep) |k| view.setRoot(k);
-    settle();
-    const letters = [_][]const u8{ "m", "a", "i" };
-    for (0..20) |_| {
-        step("quickopen_ms", false, send, .{"quickOpen:"});
-        for (letters) |ch| step("quickopen_ms", false, insert, .{ch});
-        step("quickopen_ms", false, command, .{"cancelOperation:"});
-        settle();
+/// Isolated Quick Open parts, after the interaction rounds and guards.
+/// The scheduler gives each round its own turn after settling frames.
+fn quickOpenParts(big: []const u8) void {
+    const t0 = threadCpu();
+    var f = finder.scan(view.gpa, big, false) catch fail("cannot scan benchmark folder");
+    put("quickopen_walk_ms", (threadCpu() - t0) * 1000);
+    put("quickopen_files", @floatFromInt(f.paths.items.len));
+    var picks: [10]usize = undefined;
+    const t2 = threadCpu();
+    _ = finder.best(f.paths.items, "", &.{}, &picks, null);
+    put("quickopen_score0_ms", (threadCpu() - t2) * 1000);
+    for (1..4) |n| {
+        const t1 = threadCpu();
+        _ = finder.best(f.paths.items, "mai"[0..n], &.{}, &picks, null);
+        put("quickopen_score_ms", (threadCpu() - t1) * 1000);
     }
-    for (0..20) |_| {
-        // Wake up as the open step does, after the settling frames.
-        settle();
-        const t0 = threadCpu();
-        var f = finder.scan(view.gpa, big, false) catch return;
-        put("quickopen_walk_ms", (threadCpu() - t0) * 1000);
-        put("quickopen_files", @floatFromInt(f.paths.items.len));
-        var picks: [10]usize = undefined;
-        const t2 = threadCpu();
-        _ = finder.best(f.paths.items, "", &.{}, &picks, null);
-        put("quickopen_score0_ms", (threadCpu() - t2) * 1000);
-        for (1..letters.len + 1) |n| {
-            const q = "mai"[0..n];
-            const t1 = threadCpu();
-            _ = finder.best(f.paths.items, q, &.{}, &picks, null);
-            put("quickopen_score_ms", (threadCpu() - t1) * 1000);
-        }
-        const t3 = threadCpu();
-        f.deinit();
-        put("quickopen_free_ms", (threadCpu() - t3) * 1000);
-    }
+    const t3 = threadCpu();
+    f.deinit();
+    put("quickopen_free_ms", (threadCpu() - t3) * 1000);
 }

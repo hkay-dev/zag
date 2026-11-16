@@ -757,7 +757,6 @@ pub fn setLine(gpa: Allocator, text: []const u8, opt: Opt, value: []const u8) ![
 /// under its comment, with the value `parse` gives it. Null when none is
 /// missing.
 fn withMissing(gpa: Allocator, text: []const u8) !?[]u8 {
-    const s = parse(text);
     const end = rootEnd(text);
     var seen: [options.len]bool = @splat(false);
     var r = Reader.init(text[0..end]);
@@ -766,16 +765,13 @@ fn withMissing(gpa: Allocator, text: []const u8) !?[]u8 {
             seen[@intFromEnum(o)] = true;
         };
     }
+    if (std.mem.indexOfScalar(bool, &seen, false) == null) return null;
+    const s = parse(text);
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(gpa);
     try out.appendSlice(gpa, text[0..end]);
     if (end > 0 and text[end - 1] != '\n') try out.append(gpa, '\n');
-    const base = out.items.len;
     for (options, seen) |row, ok| if (!ok) try writeOption(gpa, &out, &s, row);
-    if (out.items.len == base) {
-        out.deinit(gpa);
-        return null;
-    }
     if (end < text.len) {
         try out.append(gpa, '\n');
         try out.appendSlice(gpa, text[end..]);
@@ -789,9 +785,9 @@ pub fn path(gpa: Allocator) ![:0]u8 {
     return std.fmt.allocPrintSentinel(gpa, "{s}/.config/zag/config.toml", .{home}, 0);
 }
 
-/// Reads the file at `p`; a missing or unreadable file gives the defaults.
-pub fn load(gpa: Allocator, p: [:0]const u8) Settings {
-    const text = files.read(gpa, p) catch return .{};
+/// Reads the file at `p`; failures leave the caller's last settings intact.
+pub fn load(gpa: Allocator, p: [:0]const u8) !Settings {
+    const text = try files.read(gpa, p);
     defer gpa.free(text);
     return parse(text);
 }
@@ -1062,4 +1058,16 @@ test "late-night covers the saved look and is written back as a flag" {
     const text = try render(t.allocator, &parse("late-night = on\n"));
     defer t.allocator.free(text);
     try t.expect(std.mem.indexOf(u8, text, "late-night = true\n") != null);
+}
+
+test "complete settings preparation does not allocate" {
+    const text = try render(t.allocator, &.{});
+    defer t.allocator.free(text);
+    var storage: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    try t.expect((try withMissing(fixed.allocator(), text)) == null);
+}
+
+test "settings load reports read failures instead of defaults" {
+    try t.expectError(error.NotAFile, load(t.allocator, "/"));
 }

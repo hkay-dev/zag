@@ -91,26 +91,74 @@ case ${1:-} in
       git archive 7132176 src | tar -x -C "$data"
     fi
     mkdir -p "$out"
+    out=$(cd "$out" && pwd -P)
     [ "$mode" = run ] && [ ! -e "$homedata/.done" ] && make_home
     i=0
     while [ "$i" -lt "$n" ]; do
       home=$(mktemp -d /tmp/ze-bench-home.XXXXXX)
+      home=$(cd "$home" && pwd -P)
       defaults delete dev.hkay.ze.perf >/dev/null 2>&1 || true
       if [ "$mode" = session ]; then
-        defaults export dev.hkay.ze - | defaults import dev.hkay.ze.perf -
-        mkdir -p "$home/Library/Application Support/ze"
-        cp -R "$HOME/Library/Application Support/ze/Drafts" "$home/Library/Application Support/ze/" 2>/dev/null || true
-        mkdir -p "$home/.config"; cp -R "$HOME/.config/zag" "$home/.config/" 2>/dev/null || true
-        open -W -g -j -n "$app" --env HOME="$home" --env ZE_BENCH="$out" --env ZE_BENCH_LAUNCH_ONLY=1 \
+        defaults export dev.hkay.ze "$home/session.plist"
+        python3 - "$HOME" "$home" <<'PY'
+import pathlib, plistlib, shutil, sys
+source_home, home = map(pathlib.Path, sys.argv[1:])
+source_drafts = source_home / "Library/Application Support/zag/Drafts"
+drafts = home / "Library/Application Support/zag/Drafts"
+if source_drafts.exists():
+    shutil.copytree(source_drafts, drafts)
+else:
+    drafts.mkdir(parents=True)
+with (home / "session.plist").open("rb") as f:
+    prefs = plistlib.load(f)
+copies = {}
+def rewrite(token):
+    encoded = token.startswith("!1d")
+    if not encoded and not token.startswith("*"):
+        return token
+    path = bytes.fromhex(token[3:]).decode("utf-8") if encoded else token[1:]
+    source = pathlib.Path(path)
+    if not source.is_absolute():
+        sys.exit("bench.sh: draft path is not absolute")
+    old_drafts = source_home / "Library/Application Support/ze/Drafts"
+    if not source.exists() and source.parent == old_drafts:
+        source = source_drafts / source.name
+    source = source.resolve()
+    if source not in copies:
+        if source.is_relative_to(source_drafts.resolve()):
+            target = drafts / source.relative_to(source_drafts.resolve())
+            if not target.is_file():
+                sys.exit("bench.sh: copied draft is missing")
+        else:
+            target = home / "Imported Drafts" / str(len(copies))
+            target.parent.mkdir(exist_ok=True)
+            shutil.copy2(source, target)
+        copies[source] = str(target)
+    target = copies[source]
+    return "!1d" + target.encode("utf-8").hex() if encoded else "*" + target
+prefs["session"] = ["\t".join(rewrite(t) for t in line.split("\t"))
+                    for line in prefs.get("session", [])]
+with (home / "session.plist").open("wb") as f:
+    plistlib.dump(prefs, f)
+config = source_home / ".config/zag"
+if config.exists():
+    shutil.copytree(config, home / ".config/zag")
+PY
+        defaults import dev.hkay.ze.perf "$home/session.plist"
+        open -W -g -j -n "$app" --env HOME="$home" --env ZE_BENCH="$out" --env ZE_BENCH_DONE="$home/complete" --env ZE_BENCH_LAUNCH_ONLY=1 \
           --stdout "$out/log.txt" --stderr "$out/log.txt"
       else
         if [ "${ZE_BENCH_WRAP:-0}" = 1 ]; then
           mkdir -p "$home/.config/zag"
           printf 'wrap = true\n' > "$home/.config/zag/config.toml"
         fi
-        open -W -g -j -n "$app" --env HOME="$home" --env ZE_BENCH="$out" --env ZE_BENCH_HOLD="${ZE_BENCH_HOLD:-0}" \
+        open -W -g -j -n "$app" --env HOME="$home" --env ZE_BENCH="$out" --env ZE_BENCH_DONE="$home/complete" --env ZE_BENCH_HOLD="${ZE_BENCH_HOLD:-0}" \
           --env ZE_BENCH_ROOT="$data" --env ZE_BENCH_QUICKOPEN_ROOT="$homedata" --env ZE_BENCH_FILES="$files" \
           --stdout "$out/log.txt" --stderr "$out/log.txt"
+      fi
+      if [ ! -f "$home/complete" ]; then
+        echo "bench.sh: benchmark failed; incomplete samples in $out (see log.txt)" >&2
+        exit 1
       fi
       rm -rf "$home"
       i=$((i + 1))

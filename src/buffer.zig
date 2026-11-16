@@ -137,79 +137,131 @@ pub const Buffer = struct {
     /// typing or deleting next to the last edit extends it instead.
     pub fn replace(b: *Buffer, gpa: Allocator, start: usize, end: usize, new: []const u8, caret: usize, join: bool) !void {
         if (start == end and new.len == 0) return;
-        const old = b.text.items[start..end];
-        b.seq += 1;
         // Never extend an edit that is the saved state, or undo would step past it.
         if (join and b.undos.items.len > 0 and b.top() != b.saved) {
             const last = &b.undos.items[b.undos.items.len - 1];
-            if (old.len == 0 and last.old.len == 0 and start == last.pos + last.new.len) {
-                last.new = try grow(gpa, last.new, new, false);
-            } else if (new.len == 0 and last.new.len == 0 and end == last.pos) {
-                last.old = try grow(gpa, last.old, old, true);
-                last.pos = start;
-            } else if (new.len == 0 and last.new.len == 0 and start == last.pos) {
-                last.old = try grow(gpa, last.old, old, false);
-            } else return b.record(gpa, start, end, new, caret);
-            try b.splice(gpa, start, end, new);
+            const insert = start == end and last.old.len == 0 and start == last.pos + last.new.len;
+            const prepend = new.len == 0 and last.new.len == 0 and end == last.pos;
+            const append = new.len == 0 and last.new.len == 0 and start == last.pos;
+            if (!insert and !prepend and !append) return b.record(gpa, start, end, new, caret);
+            // Text growth can move a replacement borrowed from this buffer.
+            const new_offset: ?usize = if (insert and @intFromPtr(new.ptr) >= @intFromPtr(b.text.items.ptr) and
+                @intFromPtr(new.ptr) < @intFromPtr(b.text.items.ptr) + b.text.items.len)
+                @intFromPtr(new.ptr) - @intFromPtr(b.text.items.ptr)
+            else
+                null;
+            const change = try b.prepareSplice(gpa, start, end, new);
+            var replacement: []const u8 = "";
+            if (insert) {
+                const previous_len = last.new.len;
+                const extra = if (new_offset) |offset| b.text.items[offset..][0..new.len] else new;
+                last.new = try grow(gpa, last.new, extra, false);
+                replacement = last.new[previous_len..];
+            } else {
+                last.old = try grow(gpa, last.old, b.text.items[start..end], prepend);
+                if (prepend) last.pos = start;
+            }
+            b.seq += 1;
+            last.seq = b.seq;
+            b.splice(gpa, start, end, replacement, change);
+            for (b.redos.items) |r| free(gpa, r);
+            b.redos.clearRetainingCapacity();
             return;
         }
         try b.record(gpa, start, end, new, caret);
     }
 
     fn record(b: *Buffer, gpa: Allocator, start: usize, end: usize, new: []const u8, caret: usize) !void {
-        const e: Edit = .{
+        const old = try gpa.dupe(u8, b.text.items[start..end]);
+        errdefer gpa.free(old);
+        const replacement = try gpa.dupe(u8, new);
+        errdefer gpa.free(replacement);
+        try b.undos.ensureUnusedCapacity(gpa, 1);
+        const change = try b.prepareSplice(gpa, start, end, replacement);
+        b.seq += 1;
+        b.undos.appendAssumeCapacity(.{
             .pos = start,
-            .old = try gpa.dupe(u8, b.text.items[start..end]),
-            .new = try gpa.dupe(u8, new),
+            .old = old,
+            .new = replacement,
             .before = caret,
             .seq = b.seq,
-        };
-        try b.undos.append(gpa, e);
+        });
+        b.splice(gpa, start, end, replacement, change);
         for (b.redos.items) |r| free(gpa, r);
         b.redos.clearRetainingCapacity();
-        try b.splice(gpa, start, end, new);
     }
 
     /// Undoes the last edit and returns the restored change.
     pub fn undo(b: *Buffer, gpa: Allocator) !?Edit {
-        const e = b.undos.pop() orelse return null;
-        try b.redos.append(gpa, e);
-        try b.splice(gpa, e.pos, e.pos + e.new.len, e.old);
+        if (b.undos.items.len == 0) return null;
+        const e = b.undos.items[b.undos.items.len - 1];
+        try b.redos.ensureUnusedCapacity(gpa, 1);
+        const change = try b.prepareSplice(gpa, e.pos, e.pos + e.new.len, e.old);
+        _ = b.undos.pop();
+        b.redos.appendAssumeCapacity(e);
+        b.splice(gpa, e.pos, e.pos + e.new.len, e.old, change);
         return e;
     }
 
     pub fn redo(b: *Buffer, gpa: Allocator) !?Edit {
-        const e = b.redos.pop() orelse return null;
-        try b.undos.append(gpa, e);
-        try b.splice(gpa, e.pos, e.pos + e.old.len, e.new);
+        if (b.redos.items.len == 0) return null;
+        const e = b.redos.items[b.redos.items.len - 1];
+        try b.undos.ensureUnusedCapacity(gpa, 1);
+        const change = try b.prepareSplice(gpa, e.pos, e.pos + e.old.len, e.new);
+        _ = b.redos.pop();
+        b.undos.appendAssumeCapacity(e);
+        b.splice(gpa, e.pos, e.pos + e.old.len, e.new, change);
         return e;
     }
 
-    /// Swaps the bytes and keeps `starts` in step without rescanning the file.
-    fn splice(b: *Buffer, gpa: Allocator, start: usize, end: usize, new: []const u8) !void {
+    const Splice = struct { first: usize, last: usize, added: usize };
+
+    /// Reserves authoritative storage without changing any logical state.
+    fn prepareSplice(b: *Buffer, gpa: Allocator, start: usize, end: usize, new: []const u8) !Splice {
         const first = b.lineOf(start);
         const last = b.lineOf(end);
+        const added = std.mem.count(u8, new, "\n");
+        const line_count = b.lines() - (last - first) + added;
+        try b.starts.ensureTotalCapacity(gpa, line_count);
+        if (b.wraps.items.len > 0) try b.wraps.ensureTotalCapacity(gpa, line_count);
+        try b.text.ensureTotalCapacity(gpa, b.text.items.len - (end - start) + new.len);
+        return .{ .first = first, .last = last, .added = added };
+    }
+
+    /// Commits a prepared edit; only the disposable UTF-16 cache can allocate.
+    fn splice(b: *Buffer, gpa: Allocator, start: usize, end: usize, new: []const u8, change: Splice) void {
+        const first = change.first;
+        const last = change.last;
+        const old_lines = last - first;
+        const new_lines = change.added;
         const removed_words = if (b.words != null) wordStarts(b.text.items, start, @min(end + 1, b.text.items.len)) else 0;
-        try b.text.replaceRange(gpa, start, end - start, new);
+        b.text.replaceRangeAssumeCapacity(start, end - start, new);
         if (b.words) |*w| w.* = w.* - removed_words + wordStarts(b.text.items, start, @min(start + new.len + 1, b.text.items.len));
         b.changes += 1;
 
-        var added: std.ArrayList(u32) = .empty;
-        defer added.deinit(gpa);
-        for (new, 0..) |c, i| if (c == '\n') try added.append(gpa, @intCast(start + i + 1));
-        try b.starts.replaceRange(gpa, first + 1, last - first, added.items);
+        if (new_lines > old_lines) {
+            _ = b.starts.addManyAtAssumeCapacity(first + 1, new_lines - old_lines);
+        } else if (old_lines > new_lines) {
+            b.starts.replaceRangeAssumeCapacity(first + 1, old_lines - new_lines, &.{});
+        }
+        var row = first + 1;
+        for (new, 0..) |c, i| if (c == '\n') {
+            b.starts.items[row] = @intCast(start + i + 1);
+            row += 1;
+        };
         if (b.wraps.items.len > 0) {
-            @memset(added.items, 0);
-            try b.wraps.replaceRange(gpa, first + 1, last - first, added.items);
-            b.wraps.items[first] = 0;
+            if (new_lines > old_lines) {
+                _ = b.wraps.addManyAtAssumeCapacity(first + 1, new_lines - old_lines);
+            } else if (old_lines > new_lines) {
+                b.wraps.replaceRangeAssumeCapacity(first + 1, old_lines - new_lines, &.{});
+            }
+            @memset(b.wraps.items[first .. first + new_lines + 1], 0);
             b.wraps_from = @min(b.wraps_from, first);
         }
 
         const delta: i64 = @as(i64, @intCast(new.len)) - @as(i64, @intCast(end - start));
-        for (b.starts.items[first + 1 + added.items.len ..]) |*s| s.* = @intCast(@as(i64, s.*) + delta);
-        if (b.units.items.len > 0) b.spliceUnits(gpa, first, last, added.items.len);
-        const old_lines = last - first;
-        const new_lines = added.items.len;
+        for (b.starts.items[first + 1 + new_lines ..]) |*s| s.* = @intCast(@as(i64, s.*) + delta);
+        if (b.units.items.len > 0) b.spliceUnits(gpa, first, last, new_lines);
         const prev_end = b.touched_end;
         b.touched = @min(b.touched, first);
         b.touched_end = @max(b.touched_end, first + new_lines + 1);
@@ -495,4 +547,156 @@ test "line_delta tracks single Return, Backspace line join, and stacked Returns"
     try b.replace(t.allocator, 5, 5, "\n", 5, false);
     try t.expect(b.lines_shifted);
     try t.expectEqual(@as(?isize, null), b.line_delta);
+}
+
+const AtomicPath = enum { record, fallback, typing, backward, forward, undo, redo };
+const atomic_text = "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\neta\ntheta\niota\nkappa\nlambda\nmu\nnu\nxi\nomicron\n";
+
+fn atomicFixture(path: AtomicPath, caches: bool) !Buffer {
+    var b = try Buffer.init(t.allocator, if (path == .undo) atomic_text else "one\ntwo\nthree");
+    errdefer b.deinit(t.allocator);
+    switch (path) {
+        .record, .fallback, .typing => {
+            try b.replace(t.allocator, 0, 0, "x", 0, false);
+            try b.replace(t.allocator, b.text.items.len, b.text.items.len, "!", b.text.items.len, false);
+            _ = try b.undo(t.allocator);
+        },
+        .backward => try b.replace(t.allocator, b.text.items.len - 1, b.text.items.len, "", b.text.items.len, false),
+        .forward => try b.replace(t.allocator, 0, 1, "", 0, false),
+        .undo => try b.replace(t.allocator, 0, b.text.items.len, "x", 0, false),
+        .redo => {
+            try b.replace(t.allocator, 0, b.text.items.len, atomic_text, 0, false);
+            _ = try b.undo(t.allocator);
+        },
+    }
+    switch (path) {
+        .fallback, .typing, .backward, .forward => {},
+        else => b.markSaved(),
+    }
+    if (caches) {
+        _ = try b.unitStarts(t.allocator);
+        try b.wraps.appendNTimes(t.allocator, 2, b.lines());
+        b.wraps_cols = 80;
+    }
+    _ = b.wordCount();
+    b.touched = std.math.maxInt(usize);
+    b.touched_end = 0;
+    b.lines_shifted = false;
+    b.shift_at = 0;
+    b.line_delta = null;
+    b.wraps_from = std.math.maxInt(usize);
+    // Force every growth path, including history transfers, to reserve storage.
+    inline for (.{ "text", "starts", "units", "wraps", "undos", "redos" }) |field| {
+        const list = &@field(b, field);
+        list.* = .fromOwnedSlice(try list.toOwnedSlice(t.allocator));
+    }
+    return b;
+}
+
+fn atomicOperation(b: *Buffer, gpa: Allocator, path: AtomicPath) !void {
+    // Enter coalescing, then reject the nonempty replacement as a joined edit.
+    if (path == .fallback) try t.expect(b.undos.items.len > 0 and b.dirty());
+    switch (path) {
+        .record, .fallback => try b.replace(gpa, 1, 2, atomic_text, 2, path == .fallback),
+        .typing => try b.replace(gpa, 1, 1, atomic_text, 1, true),
+        .backward, .forward => try b.replace(gpa, 0, b.text.items.len, "", b.text.items.len, true),
+        .undo => _ = try b.undo(gpa),
+        .redo => _ = try b.redo(gpa),
+    }
+}
+
+fn expectBufferState(want: *const Buffer, got: *const Buffer) !void {
+    try t.expectEqualStrings(want.text.items, got.text.items);
+    inline for (.{ "starts", "units", "wraps" }) |field| {
+        try t.expectEqualSlices(u32, @field(want, field).items, @field(got, field).items);
+    }
+    inline for (.{ "undos", "redos" }) |field| {
+        const expected = @field(want, field).items;
+        const actual = @field(got, field).items;
+        try t.expectEqual(expected.len, actual.len);
+        for (expected, actual) |a, b| {
+            try t.expectEqual(a.pos, b.pos);
+            try t.expectEqualStrings(a.old, b.old);
+            try t.expectEqualStrings(a.new, b.new);
+            try t.expectEqual(a.before, b.before);
+            try t.expectEqual(a.seq, b.seq);
+        }
+    }
+    inline for (.{
+        "seq", "saved", "changes", "touched", "touched_end", "lines_shifted",
+        "shift_at", "line_delta", "words", "wraps_cols", "wraps_from",
+    }) |field| {
+        try t.expectEqual(@field(want, field), @field(got, field));
+    }
+    try t.expectEqual(want.dirty(), got.dirty());
+}
+
+test "buffer allocation failures leave edits and history atomic" {
+    for ([_]AtomicPath{ .record, .fallback, .typing, .backward, .forward, .undo, .redo }) |path| {
+        for ([_]bool{ false, true }) |caches| {
+            var before = try atomicFixture(path, caches);
+            defer before.deinit(t.allocator);
+            var after = try atomicFixture(path, caches);
+            defer after.deinit(t.allocator);
+            try atomicOperation(&after, t.allocator, path);
+            try expectStarts(&after);
+            var failures: usize = 0;
+            var discarded_units = false;
+            var fail_index: usize = 0;
+            while (true) : (fail_index += 1) {
+                var b = try atomicFixture(path, caches);
+                defer b.deinit(t.allocator);
+                var failing = t.FailingAllocator.init(t.allocator, .{
+                    .fail_index = fail_index,
+                    .resize_fail_index = 0,
+                });
+                atomicOperation(&b, failing.allocator(), path) catch |err| {
+                    try t.expectEqual(error.OutOfMemory, err);
+                    try t.expect(failing.has_induced_failure);
+                    try expectBufferState(&before, &b);
+                    failures += 1;
+                    continue;
+                };
+                if (failing.has_induced_failure) {
+                    // A failed UTF-16 cache grow must not fail the committed edit.
+                    try t.expect(caches);
+                    try t.expectEqual(@as(usize, 0), b.units.items.len);
+                    _ = try b.unitStarts(t.allocator);
+                    discarded_units = true;
+                }
+                try expectBufferState(&after, &b);
+                if (!failing.has_induced_failure) break;
+            }
+            try t.expect(failures > 0);
+            if (caches and path != .backward and path != .forward) try t.expect(discarded_units);
+        }
+    }
+}
+
+test "joined edit after undo discards the abandoned redo branch" {
+    var b = try atomicFixture(.typing, false);
+    defer b.deinit(t.allocator);
+    try t.expectEqual(@as(usize, 1), b.redos.items.len);
+    try b.replace(t.allocator, 1, 1, "y", 1, true);
+    try t.expectEqual(@as(usize, 0), b.redos.items.len);
+    try t.expectEqual(@as(usize, 1), b.undos.items.len);
+    try t.expect((try b.redo(t.allocator)) == null);
+    _ = try b.undo(t.allocator);
+    try t.expectEqualStrings("one\ntwo\nthree", b.text.items);
+    try t.expect(!b.dirty());
+    _ = try b.redo(t.allocator);
+    try t.expectEqualStrings("xyone\ntwo\nthree", b.text.items);
+    try t.expect(b.dirty());
+}
+
+test "joined typing can borrow replacement bytes from the buffer" {
+    var b = try Buffer.init(t.allocator, "ab");
+    defer b.deinit(t.allocator);
+    try b.replace(t.allocator, 0, 0, "x", 0, true);
+    b.text = .fromOwnedSlice(try b.text.toOwnedSlice(t.allocator));
+    var relocating = t.FailingAllocator.init(t.allocator, .{ .resize_fail_index = 0 });
+    try b.replace(relocating.allocator(), 1, 1, b.text.items, 1, true);
+    try t.expectEqualStrings("xxabab", b.text.items);
+    _ = try b.undo(t.allocator);
+    try t.expectEqualStrings("ab", b.text.items);
 }

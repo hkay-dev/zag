@@ -35,7 +35,7 @@ pub const Tree = struct {
     show_hidden: bool = false,
     /// The last `rebuild` couldn't open the root folder.
     unreadable: bool = false,
-    /// The last `rebuild` stopped at `max_rows`, so rows are missing.
+    /// The last `rebuild` hit `max_rows`; unread expanded folders may contain more rows.
     truncated: bool = false,
 
     pub fn init(gpa: Allocator) Tree {
@@ -138,6 +138,11 @@ pub const Tree = struct {
     const Entry = struct { name: []const u8, dir: bool };
 
     fn list(t: *Tree, gpa: Allocator, path: *std.ArrayList(u8), rel: usize, depth: u16) !void {
+        const remaining = max_rows - t.rows.items.len;
+        if (remaining == 0) {
+            t.truncated = true;
+            return;
+        }
         const a = t.arena.allocator();
         try path.append(gpa, 0);
         const dir = c.opendir(@ptrCast(path.items.ptr));
@@ -148,6 +153,11 @@ pub const Tree = struct {
             return;
         };
         var entries: std.ArrayList(Entry) = .empty;
+        var emitted: usize = 0;
+        defer {
+            for (entries.items[emitted..]) |e| gpa.free(e.name);
+            entries.deinit(gpa);
+        }
         {
             defer _ = c.closedir(dh);
             const fd = dirfd(dh);
@@ -168,7 +178,7 @@ pub const Tree = struct {
                     var est: c.Stat = undefined;
                     is_dir = c.fstatat(fd, @ptrCast(&ent.name), &est, 0) == 0 and est.mode & c.S.IFMT == c.S.IFDIR;
                 }
-                try entries.append(a, .{ .name = try a.dupe(u8, name), .dir = is_dir });
+                if (try retain(&entries, gpa, .{ .name = name, .dir = is_dir }, remaining)) t.truncated = true;
             }
         }
         const len = path.items.len;
@@ -183,8 +193,49 @@ pub const Tree = struct {
             try path.appendSlice(gpa, e.name);
             const r = try a.dupe(u8, path.items[rel..]);
             try t.rows.append(a, .{ .rel = r, .base = r.len - e.name.len, .depth = depth, .dir = e.dir });
-            if (e.dir and t.isOpen(r)) try t.list(gpa, path, rel, depth + 1);
+            gpa.free(e.name);
+            emitted += 1;
+            if (e.dir and t.isOpen(r)) {
+                if (t.rows.items.len == max_rows) {
+                    t.truncated = true;
+                    return;
+                }
+                try t.list(gpa, path, rel, depth + 1);
+            }
         }
+    }
+
+    /// Retain only the first `cap` entries in a max-heap. Read every entry
+    /// to select the exact sorted prefix, but never copy a rejected name.
+    /// True means this directory had more candidates than remaining rows.
+    fn retain(entries: *std.ArrayList(Entry), gpa: Allocator, candidate: Entry, cap: usize) !bool {
+        if (cap == 0) return true;
+        const full = entries.items.len == cap;
+        if (full and !before({}, candidate, entries.items[0])) return true;
+        const own: Entry = .{ .name = try gpa.dupe(u8, candidate.name), .dir = candidate.dir };
+        if (!full) {
+            errdefer gpa.free(own.name);
+            try entries.append(gpa, own);
+            var at = entries.items.len - 1;
+            while (at > 0) {
+                const parent = (at - 1) / 2;
+                if (!before({}, entries.items[parent], entries.items[at])) break;
+                std.mem.swap(Entry, &entries.items[parent], &entries.items[at]);
+                at = parent;
+            }
+        } else {
+            gpa.free(entries.items[0].name);
+            entries.items[0] = own;
+            var at: usize = 0;
+            while (at * 2 + 1 < entries.items.len) {
+                var child = at * 2 + 1;
+                if (child + 1 < entries.items.len and before({}, entries.items[child], entries.items[child + 1])) child += 1;
+                if (!before({}, entries.items[at], entries.items[child])) break;
+                std.mem.swap(Entry, &entries.items[at], &entries.items[child]);
+                at = child;
+            }
+        }
+        return full;
     }
 
     /// Folders first, then names in letter order, ignoring case, with
@@ -221,7 +272,11 @@ fn naturalLess(x: []const u8, y: []const u8) bool {
         i += 1;
         j += 1;
     }
-    return x.len - i < y.len - j;
+    const xr = x.len - i;
+    const yr = y.len - j;
+    if (xr != yr) return xr < yr;
+    // Equal natural keys need the same cutoff regardless of readdir order.
+    return std.mem.order(u8, x, y) == .lt;
 }
 
 test "names with numbers sort by value, ignoring case" {
@@ -233,6 +288,45 @@ test "names with numbers sort by value, ignoring case" {
     try t.expect(naturalLess("x9y", "x09z"));
     try t.expect(!naturalLess("abc", "ABC"));
     try t.expect(naturalLess("ab", "abc"));
+}
+
+test "bounded candidates match the full natural directory-first prefix in any arrival order" {
+    const t = std.testing;
+    var sorted = [_]Tree.Entry{
+        .{ .name = "file10", .dir = false },
+        .{ .name = "z10", .dir = true },
+        .{ .name = "file2", .dir = false },
+        .{ .name = "a", .dir = false },
+        .{ .name = "file02", .dir = false },
+        .{ .name = "z2", .dir = true },
+        .{ .name = "File2", .dir = false },
+    };
+    std.sort.heap(Tree.Entry, &sorted, {}, Tree.before);
+    const want = [_][]const u8{ "z2", "z10", "a", "File2", "file02", "file2", "file10" };
+    for (sorted, want) |e, name| try t.expectEqualStrings(name, e.name);
+    for (0..sorted.len + 1) |cap| {
+        for (0..sorted.len * 2) |order| {
+            var entries: std.ArrayList(Tree.Entry) = .empty;
+            defer {
+                for (entries.items) |e| t.allocator.free(e.name);
+                entries.deinit(t.allocator);
+            }
+            var dropped = false;
+            for (0..sorted.len) |i| {
+                const index = (i + order) % sorted.len;
+                const e = sorted[if (order < sorted.len) index else sorted.len - 1 - index];
+                dropped = try Tree.retain(&entries, t.allocator, e, cap) or dropped;
+                try t.expect(entries.items.len <= cap);
+            }
+            try t.expectEqual(cap < sorted.len, dropped);
+            std.sort.heap(Tree.Entry, entries.items, {}, Tree.before);
+            try t.expectEqual(cap, entries.items.len);
+            for (entries.items, sorted[0..cap]) |got, expected| {
+                try t.expectEqualStrings(expected.name, got.name);
+                try t.expectEqual(expected.dir, got.dir);
+            }
+        }
+    }
 }
 
 test "folders first, names ignore case, hidden files skipped, open folders list inside" {
@@ -273,4 +367,21 @@ test "folders first, names ignore case, hidden files skipped, open folders list 
     try t.expect(tr.fresh());
     tr.toggle(t.allocator, "Alpha");
     try t.expect(!tr.fresh());
+
+    // Seed an already emitted prefix without creating 50,000 files on disk.
+    for (0..3) |remaining| {
+        var capped: Tree = .init(t.allocator);
+        defer capped.deinit(t.allocator);
+        capped.toggle(t.allocator, "Alpha");
+        try capped.rows.resize(capped.arena.allocator(), max_rows - remaining);
+        var path: std.ArrayList(u8) = .empty;
+        defer path.deinit(t.allocator);
+        try path.appendSlice(t.allocator, root);
+        try capped.list(t.allocator, &path, root.len + 1, 0);
+        try t.expect(capped.truncated);
+        try t.expectEqual(@as(usize, max_rows), capped.rows.items.len);
+        try t.expectEqual(remaining, capped.read.items.len);
+        if (remaining > 0) try t.expectEqualStrings("Alpha", capped.rows.items[max_rows - remaining].rel);
+        if (remaining == 2) try t.expectEqualStrings("Alpha/y.md", capped.rows.items[max_rows - 1].rel);
+    }
 }

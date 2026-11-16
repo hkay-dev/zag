@@ -110,6 +110,7 @@ pub fn rename(id: u32, new: []const u8) void {
     if (window != null and id == seen_id) {
         msg(void, path, "setString:", .{objc.str(new)});
         retitle();
+        objc.later(target, "render:", null, 0.15);
     }
 }
 /// Titles the window "<file> Preview" and gives it the file's proxy icon.
@@ -593,18 +594,10 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     msg(void, store, "setAttributedString:", .{out});
     msg(void, text, "setNeedsDisplay:", .{true});
     const new_len = msg(usize, store, "length", .{});
-    // An edit above an index shifts it by the change in length; one at or below it leaves it alone.
-    const kept = msg(usize, msg(Id, old, "commonPrefixWithString:options:", .{ msg(Id, store, "string", .{}), @as(usize, 0) }), "length", .{});
-    const delta: isize = @as(isize, @intCast(new_len)) - @as(isize, @intCast(old_len));
-    const shift = struct {
-        fn at(x: usize, k: usize, d: isize, n: usize) usize {
-            if (x < k) return x;
-            return @min(@max(@as(usize, @intCast(@max(@as(isize, @intCast(x)) + d, 0))), k), n);
-        }
-    }.at;
+    const mapped = mapAnchors(objc.utf8(old), objc.utf8(text_out), .{ selected.loc, selected.loc +| selected.len, anchor });
     if (old_len > 0) {
-        const from = shift(selected.loc, kept, delta, new_len);
-        const to = shift(selected.loc + selected.len, kept, delta, new_len);
+        const from = mapped[0];
+        const to = mapped[1];
         msg(void, text, "setSelectedRange:", .{Range{ .loc = from, .len = to -| from }});
     }
     if (!found or new_len == 0) {
@@ -612,12 +605,134 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
         return;
     }
     // The paragraph that was at the top of the view stays there.
-    const at = @min(shift(anchor, kept, delta, new_len), new_len - 1);
+    const at = @min(mapped[2], new_len - 1);
     // Heights below the view are only estimated until laid out, so lay out all of it first.
     msg(void, tlm, "ensureLayoutForRange:", .{msg(Id, tcs, "documentRange", .{})});
     const top = fragmentFrame(tlm, tcs, at).y;
     msg(void, text, "scrollPoint:", .{objc.Point{ .x = position.x, .y = top + origin.y + above }});
 }
+
+/// Map only the two selection ends and the viewport, not a whole-document edit script.
+/// Unchanged prefix/suffix positions are exact. Inside the changed span, search for up
+/// to 32 bytes of unchanged context on either side, halving the window when edits cut it.
+/// Repeated context chooses the nearest occurrence; removed context uses the net shift.
+fn mapAnchors(old: []const u8, new: []const u8, offsets: [3]usize) [3]usize {
+    if (std.mem.eql(u8, old, new)) return offsets;
+    var prefix: usize = 0;
+    while (prefix < @min(old.len, new.len) and old[prefix] == new[prefix]) : (prefix += 1) {}
+    while (prefix > 0 and prefix < old.len and old[prefix] & 0xC0 == 0x80) prefix -= 1;
+    var suffix: usize = 0;
+    while (suffix < @min(old.len, new.len) - prefix and old[old.len - suffix - 1] == new[new.len - suffix - 1]) : (suffix += 1) {}
+    while (suffix > 0 and old[old.len - suffix] & 0xC0 == 0x80) suffix -= 1;
+    var mapped: [3]usize = undefined;
+    for (offsets, 0..) |offset, i| {
+        // A collapsed selection and a shared viewport anchor need only one search.
+        var previous: usize = 0;
+        while (previous < i and offsets[previous] != offset) : (previous += 1) {}
+        if (previous < i) {
+            mapped[i] = mapped[previous];
+            continue;
+        }
+        const x = byteOffset(old, offset);
+        var at = if (x < prefix) x else if (x >= old.len - suffix)
+            new.len - (old.len - x)
+        else
+            contextAnchor(old, new, x, prefix, new.len - suffix, i == 1) orelse @max(prefix, new.len -| (old.len - x));
+        // The fallback can land inside a scalar after a replacement of different width.
+        while (at > 0 and at < new.len and new[at] & 0xC0 == 0x80) at -= 1;
+        mapped[i] = utf16Offset(new[0..at]);
+    }
+    return mapped;
+}
+
+fn contextAnchor(old: []const u8, new: []const u8, x: usize, lo: usize, hi: usize, prefer_before: bool) ?usize {
+    var width: usize = 32;
+    while (width > 0) : (width /= 2) {
+        var best: ?usize = null;
+        var strength: usize = 0;
+        // Equal-strength contexts favor the selected text's side of an endpoint.
+        for ([_]bool{ prefer_before, !prefer_before }) |before| {
+            var start = if (before) x -| width else x;
+            var end = if (before) x else @min(old.len, x +| width);
+            while (start < x and old[start] & 0xC0 == 0x80) start += 1;
+            while (end > x and end < old.len and old[end] & 0xC0 == 0x80) end -= 1;
+            // A halved window can cut through a three-byte scalar on both sides.
+            // Always try the complete adjacent scalar before falling back.
+            if (start == end) {
+                if (before and x > 0) {
+                    start = x - 1;
+                    while (start > 0 and old[start] & 0xC0 == 0x80) start -= 1;
+                } else if (!before and x < old.len) {
+                    end = x + 1;
+                    while (end < old.len and old[end] & 0xC0 == 0x80) end += 1;
+                }
+            }
+            const needle = old[start..end];
+            if (needle.len == 0 or needle.len <= strength) continue;
+            var nearest: ?usize = null;
+            var distance: usize = std.math.maxInt(usize);
+            // Only candidate anchors in [lo, hi] can match. Include the needle's
+            // bytes before/after those anchors, not the rest of the document.
+            const offset = x - start;
+            if (needle.len > new.len or offset > hi) continue;
+            var scan = lo -| offset;
+            const last = @min(new.len - needle.len, hi - offset);
+            if (scan > last) continue;
+            const search_end = last + needle.len;
+            while (scan <= last) {
+                const hit = std.mem.find(u8, new[scan..search_end], needle) orelse break;
+                const match = scan + hit;
+                const candidate = match + offset;
+                const gap = @max(candidate, x) - @min(candidate, x);
+                if (nearest == null or gap < distance) {
+                    nearest = candidate;
+                    distance = gap;
+                }
+                if (gap == 0) break;
+                scan = match + 1;
+            }
+            if (nearest) |at| {
+                best = at;
+                strength = needle.len;
+            }
+        }
+        if (best) |at| return at;
+    }
+    return null;
+}
+
+fn byteOffset(bytes: []const u8, units: usize) usize {
+    var at: usize = 0;
+    var u: usize = 0;
+    while (at < bytes.len and u < units) {
+        const b = bytes[at];
+        const count: usize = if (b >= 0xF0) 2 else 1;
+        if (count > units - u) break;
+        u += count;
+        at += @as(usize, if (b >= 0xF0) 4 else if (b >= 0xE0) 3 else if (b >= 0xC0) 2 else 1);
+    }
+    return at;
+}
+
+fn utf16Offset(bytes: []const u8) usize {
+    var units: usize = 0;
+    for (bytes) |b| units += @as(usize, if (b & 0xC0 == 0x80) 0 else if (b >= 0xF0) 2 else 1);
+    return units;
+}
+
+test "preview anchors preserve scalars between disjoint edits" {
+    try std.testing.expectEqual([3]usize{ 1, 2, 1 }, mapAnchors("a☃bb", "c☃éé", .{ 1, 2, 1 }));
+    try std.testing.expectEqual([3]usize{ 1, 3, 1 }, mapAnchors("a\u{1D11E}bb", "c\u{1D11E}éé", .{ 1, 3, 1 }));
+    try std.testing.expectEqual([3]usize{ 7, 13, 7 }, mapAnchors("aaa\nTARGET\nzzz", "XXXaaa\nTARGET\n", .{ 4, 10, 4 }));
+}
+
+test "preview context searches include bytes around eligible anchors" {
+    const value = "leftTARGETtail";
+    try std.testing.expectEqual(@as(?usize, 4), contextAnchor(value, value, 4, 4, 4, false));
+    try std.testing.expectEqual(@as(?usize, 10), contextAnchor(value, value, 10, 10, 10, true));
+    try std.testing.expectEqual(@as(?usize, null), contextAnchor("aTARGETz", "TARGET", 1, 2, 4, false));
+}
+
 /// The layout fragment holding character `offset`, or null.
 fn fragmentAt(tlm: Id, tcs: Id, offset: usize) Id {
     const place = msg(Id, tcs, "locationFromLocation:withOffset:", .{ msg(Id, msg(Id, tcs, "documentRange", .{}), "location", .{}), @as(isize, @intCast(offset)) });
@@ -749,7 +864,7 @@ fn clicked(_: Id, _: objc.Sel, _: Id, link: Id, _: usize) callconv(.c) bool {
         }
     }
     if (to != null) {
-        if (msg(bool, msg(Id, objc.class("NSFileManager"), "defaultManager", .{}), "fileExistsAtPath:", .{to})) view.openFile(objc.utf8(to)) else NSBeep();
+        if (msg(bool, msg(Id, objc.class("NSFileManager"), "defaultManager", .{}), "fileExistsAtPath:", .{to})) _ = view.openFile(objc.utf8(to)) else NSBeep();
         return true;
     }
     if (scheme == null) return false;

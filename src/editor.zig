@@ -137,9 +137,14 @@ pub const Editor = struct {
     /// Inserts pasted text with its `\n` and `\r\n` breaks turned into the
     /// file's own line ending.
     pub fn paste(e: *Editor, gpa: Allocator, s: []const u8) !void {
+        var rest = s;
+        while (std.mem.indexOfScalar(u8, rest, '\n')) |i| {
+            if ((i > 0 and rest[i - 1] == '\r') != (e.eol.len == 2)) break;
+            rest = rest[i + 1 ..];
+        } else return e.insert(gpa, s);
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(gpa);
-        var rest = s;
+        try out.appendSlice(gpa, s[0 .. s.len - rest.len]);
         while (std.mem.indexOfScalar(u8, rest, '\n')) |i| {
             try out.appendSlice(gpa, rest[0 .. if (i > 0 and rest[i - 1] == '\r') i - 1 else i]);
             try out.appendSlice(gpa, e.eol);
@@ -653,7 +658,7 @@ pub const Editor = struct {
         var start = b.lineStart(rows[0]);
         const end = b.lineStop(rows[1]);
         // The last line has no break of its own, so it takes the one before.
-        if (end == e.text().len and rows[0] > 0) start = b.lineEnd(rows[0] - 1);
+        if (rows[1] + 1 == b.lines() and rows[0] > 0) start = b.lineEnd(rows[0] - 1);
         if (start == end) return;
         const col = e.cur - b.lineStart(b.lineOf(e.cur));
         try b.replace(gpa, start, end, "", e.cur, false);
@@ -710,10 +715,11 @@ pub const Editor = struct {
         const t = e.text();
         var a: usize = 0;
         while (a < t.len and a < bytes.len and t[a] == bytes[a]) a += 1;
-        a = charStart(t, a);
+        a = @min(charStart(t, a), charStart(bytes, a));
         var z: usize = 0;
         while (z < t.len - a and z < bytes.len - a and t[t.len - 1 - z] == bytes[bytes.len - 1 - z]) z += 1;
-        while (z > 0 and t[t.len - z] & 0xC0 == 0x80) z -= 1;
+        while (z > 0 and (charStart(t, t.len - z) != t.len - z or
+            charStart(bytes, bytes.len - z) != bytes.len - z)) z -= 1;
         const old_len = t.len;
         const fix = struct {
             fn at(p: usize, keep: usize, tail: usize, from: usize, to: usize) usize {
@@ -722,8 +728,8 @@ pub const Editor = struct {
                 return keep;
             }
         }.at;
-        const anchor = fix(e.anchor, a, z, old_len, bytes.len);
-        const cur = fix(e.cur, a, z, old_len, bytes.len);
+        const anchor = charStart(bytes, fix(e.anchor, a, z, old_len, bytes.len));
+        const cur = charStart(bytes, fix(e.cur, a, z, old_len, bytes.len));
         try e.buf.replace(gpa, a, old_len - z, bytes[a .. bytes.len - z], e.cur, false);
         e.buf.markSaved();
         e.detectStyle();
@@ -930,15 +936,21 @@ fn wordRight(t: []const u8, from: usize) usize {
 
 pub fn nextChar(t: []const u8, i: usize) usize {
     if (i >= t.len) return t.len;
-    var j = i + 1;
-    while (j < t.len and t[j] & 0xC0 == 0x80) j += 1;
-    return j;
+    return i + decode(t, i).len;
 }
 
 pub fn charStart(t: []const u8, i: usize) usize {
+    if (i >= t.len or t[i] & 0xC0 != 0x80) return i;
+    // Only a valid UTF-8 sequence can own a continuation byte. Invalid
+    // bytes each stand alone, matching decode, with at most three bytes
+    // of lookbehind for a four-byte code point.
+    const limit = i -| 3;
     var j = i;
-    while (j > 0 and j < t.len and t[j] & 0xC0 == 0x80) j -= 1;
-    return j;
+    while (j > limit) {
+        j -= 1;
+        if (t[j] & 0xC0 != 0x80) return if (decode(t, j).len > i - j) j else i;
+    }
+    return i;
 }
 
 pub fn prevChar(t: []const u8, i: usize) usize {
@@ -1236,6 +1248,63 @@ test "pasted breaks take the file's line ending" {
     try t_.expectEqualStrings("ax\ny\n\nb", lf.text());
 }
 
+test "editor regression: matching paste allocates only what insert needs" {
+    const Case = struct { eol: []const u8, text: []const u8 };
+    for ([_]Case{
+        .{ .eol = "\n", .text = "" },
+        .{ .eol = "\n", .text = "x" },
+        .{ .eol = "\n", .text = "plain\rtext" },
+        .{ .eol = "\n", .text = "a\nb\n" },
+        .{ .eol = "\r\n", .text = "plain text" },
+        .{ .eol = "\r\n", .text = "a\r\nb\r\n" },
+    }) |c| {
+        var pasted_alloc = t_.FailingAllocator.init(gpa_t, .{});
+        var inserted_alloc = t_.FailingAllocator.init(gpa_t, .{});
+        const pg = pasted_alloc.allocator();
+        const ig = inserted_alloc.allocator();
+        var pasted = try Editor.init(pg, "");
+        defer pasted.deinit(pg);
+        var inserted = try Editor.init(ig, "");
+        defer inserted.deinit(ig);
+        pasted.eol = c.eol;
+        inserted.eol = c.eol;
+        try pasted.insert(pg, "q");
+        try inserted.insert(ig, "q");
+        try pasted.paste(pg, c.text);
+        try inserted.insert(ig, c.text);
+        try t_.expectEqual(inserted_alloc.allocations, pasted_alloc.allocations);
+        try t_.expectEqual(inserted_alloc.allocated_bytes, pasted_alloc.allocated_bytes);
+        try t_.expectEqualStrings(inserted.text(), pasted.text());
+        try t_.expectEqual(inserted.sel(), pasted.sel());
+        try t_.expectEqual(inserted.typing, pasted.typing);
+        _ = try pasted.undo(pg);
+        _ = try inserted.undo(ig);
+        try t_.expectEqualStrings(inserted.text(), pasted.text());
+        _ = try pasted.redo(pg);
+        _ = try inserted.redo(ig);
+        try t_.expectEqualStrings(inserted.text(), pasted.text());
+    }
+}
+
+test "editor regression: paste converts after matching breaks and undoes once" {
+    const Case = struct { eol: []const u8, text: []const u8, want: []const u8 };
+    for ([_]Case{
+        .{ .eol = "\n", .text = "a\nb\r\nc\rd", .want = "a\nb\nc\rd" },
+        .{ .eol = "\r\n", .text = "a\r\nb\nc\rd", .want = "a\r\nb\r\nc\rd" },
+    }) |c| {
+        var e = try Editor.init(gpa_t, "old");
+        defer e.deinit(gpa_t);
+        e.eol = c.eol;
+        e.selectAll();
+        try e.paste(gpa_t, c.text);
+        try t_.expectEqualStrings(c.want, e.text());
+        _ = try e.undo(gpa_t);
+        try t_.expectEqualStrings("old", e.text());
+        _ = try e.redo(gpa_t);
+        try t_.expectEqualStrings(c.want, e.text());
+    }
+}
+
 test "line deletes at a line's edge take the whole CRLF break" {
     var e = try Editor.init(gpa_t, "a\r\nb\r\n");
     defer e.deinit(gpa_t);
@@ -1523,6 +1592,59 @@ test "reload keeps a changed multi-byte character whole for undo and redo" {
     try t_.expectEqual(@as(usize, 2), e.cur);
 }
 
+test "editor regression: reload aligns malformed UTF-8 changes before editing" {
+    for ([_][2]usize{ .{ 1, 1 }, .{ 1, 2 }, .{ 2, 1 } }) |selection| {
+        var e = try Editor.init(gpa_t, "\xE0\x80\x80");
+        defer e.deinit(gpa_t);
+        e.select(selection[0], selection[1]);
+        try e.reload(gpa_t, "\xE0\xA0\x80");
+        try t_.expectEqualStrings("\xE0\xA0\x80", e.text());
+        try t_.expectEqual([2]usize{ 0, 0 }, e.sel());
+        try e.deleteBack(gpa_t, .char);
+        try t_.expectEqualStrings("\xE0\xA0\x80", e.text());
+        e.move(.right, false);
+        try t_.expectEqual(@as(usize, 3), e.cur);
+        try e.deleteBack(gpa_t, .char);
+        try t_.expectEqualStrings("", e.text());
+        try t_.expectEqual(@as(usize, 0), e.cur);
+        _ = try e.undo(gpa_t);
+        try t_.expectEqualStrings("\xE0\xA0\x80", e.text());
+        _ = try e.undo(gpa_t);
+        try t_.expectEqualStrings("\xE0\x80\x80", e.text());
+        try t_.expectEqual(selection[1], e.cur);
+        _ = try e.redo(gpa_t);
+        try t_.expectEqualStrings("\xE0\xA0\x80", e.text());
+        try t_.expectEqual(@as(usize, 3), e.cur);
+        try e.deleteBack(gpa_t, .char);
+        try t_.expectEqualStrings("", e.text());
+    }
+}
+
+test "editor regression: reload aligns a shared suffix against both texts" {
+    for ([_]bool{ false, true }) |reverse| {
+        const malformed = "x\x80\x80z";
+        const valid = "x\xE0\xA0\x80z";
+        const before = if (reverse) valid else malformed;
+        const after = if (reverse) malformed else valid;
+        var e = try Editor.init(gpa_t, before);
+        defer e.deinit(gpa_t);
+        e.select(1, before.len - 1);
+        try e.reload(gpa_t, after);
+        try t_.expectEqualStrings(after, e.text());
+        try t_.expectEqual([2]usize{ 1, after.len - 1 }, e.sel());
+        try e.deleteForward(gpa_t, .char);
+        try t_.expectEqualStrings("xz", e.text());
+        _ = try e.undo(gpa_t);
+        try t_.expectEqualStrings(after, e.text());
+        _ = try e.undo(gpa_t);
+        try t_.expectEqualStrings(before, e.text());
+        _ = try e.redo(gpa_t);
+        try t_.expectEqualStrings(after, e.text());
+        try t_.expectEqual(after.len - 1, e.cur);
+        try t_.expectEqual(e.cur, charStart(e.text(), e.cur));
+    }
+}
+
 test "matching bracket prefers the one after the caret and counts nesting" {
     var e = try Editor.init(gpa_t, "f(a[b]{c})");
     defer e.deinit(gpa_t);
@@ -1571,6 +1693,61 @@ test "caret motion and backspace step over a whole emoji with a skin tone" {
     e.moveTo(9, false);
     try e.deleteBack(gpa_t, .char);
     try t_.expectEqualStrings("ab", e.text());
+}
+
+test "editor regression: character boundaries match decoding of malformed UTF-8" {
+    for ([_][]const u8{
+        "a\x80b", "\x80\x81\x82\x83\x84\x85", "a\xC2b", "\xC0\xAF",
+        "\xE0\x80\x80", "\xED\xA0\x80", "\xF4\x90\x80\x80", "\xFF",
+        "\xC2", "\xE2\x82", "\xF0\x9F\x98", "\xE2\xC2\xA2",
+        "aü漢😀\x80b", "\x80e\u{0301}\xFF",
+    }) |s| {
+        var i: usize = 0;
+        while (i < s.len) {
+            const end = i + decode(s, i).len;
+            try t_.expectEqual(end, nextChar(s, i));
+            try t_.expectEqual(i, prevChar(s, end));
+            for (i..end) |j| try t_.expectEqual(i, charStart(s, j));
+            i = end;
+        }
+        try t_.expectEqual(s.len, charStart(s, s.len));
+        try t_.expectEqual(s.len, nextChar(s, s.len));
+        try t_.expectEqual(@as(usize, 0), prevChar(s, 0));
+    }
+}
+
+test "editor regression: malformed bytes preserve neighboring grapheme edits" {
+    for ([_][]const u8{
+        "a\x80b", "a\xC2b", "\xE2\x82", "\xF0\x9F\x98",
+        "aü漢😀\x80b", "\x80e\u{0301}\xFF",
+        "a\x80\u{1F44D}\u{1F3FD}\xFFb",
+        "\x80\u{1F468}\u{200D}\u{1F469}\x81",
+        "\x80\u{1F1EF}\u{1F1F5}\x81",
+    }) |s| {
+        var start: usize = 0;
+        while (start < s.len) {
+            const end = nextCluster(s, start);
+            try t_.expectEqual(start, prevCluster(s, end));
+            var e = try Editor.init(gpa_t, s);
+            defer e.deinit(gpa_t);
+            e.moveTo(start, false);
+            e.move(.right, false);
+            try t_.expectEqual(end, e.cur);
+            e.move(.left, false);
+            try t_.expectEqual(start, e.cur);
+            e.move(.right, false);
+            try e.deleteBack(gpa_t, .char);
+            try t_.expectEqualStrings(s[0..start], e.text()[0..start]);
+            try t_.expectEqualStrings(s[end..], e.text()[start..]);
+            _ = try e.undo(gpa_t);
+            try t_.expectEqualStrings(s, e.text());
+            e.moveTo(start, false);
+            try e.deleteForward(gpa_t, .char);
+            try t_.expectEqualStrings(s[0..start], e.text()[0..start]);
+            try t_.expectEqualStrings(s[end..], e.text()[start..]);
+            start = end;
+        }
+    }
 }
 
 test "search options set the case rule and whole-word matching" {
@@ -1636,6 +1813,48 @@ test "duplicate, move, join and delete lines are one undo step each" {
     try d.deleteLine(gpa_t);
     try t_.expectEqualStrings("a", d.text());
     try t_.expectEqual([2]usize{ 1, 1 }, d.sel());
+}
+
+test "editor regression: delete line distinguishes final terminated and actual final rows" {
+    inline for ([_][]const u8{ "\n", "\r\n" }) |eol| {
+        const text = "a" ++ eol ++ "b" ++ eol ++ "c" ++ eol;
+        const b = 1 + eol.len;
+        const c = b * 2;
+        const Case = struct { range: [2]usize, want: []const u8 };
+        for ([_]Case{
+            .{ .range = .{ c, c }, .want = "a" ++ eol ++ "b" ++ eol },
+            .{ .range = .{ c, c + 1 }, .want = "a" ++ eol ++ "b" ++ eol },
+            .{ .range = .{ c, text.len }, .want = "a" ++ eol ++ "b" ++ eol },
+            .{ .range = .{ b, c + 1 }, .want = "a" ++ eol },
+            .{ .range = .{ b, text.len }, .want = "a" ++ eol },
+            .{ .range = .{ text.len, text.len }, .want = "a" ++ eol ++ "b" ++ eol ++ "c" },
+            .{ .range = .{ 0, text.len }, .want = "" },
+        }) |case| {
+            for ([_]bool{ false, true }) |reverse| {
+                var e = try Editor.init(gpa_t, text);
+                defer e.deinit(gpa_t);
+                e.select(case.range[@intFromBool(reverse)], case.range[@intFromBool(!reverse)]);
+                try e.deleteLine(gpa_t);
+                try t_.expectEqualStrings(case.want, e.text());
+                try t_.expect(!e.hasSel());
+                _ = try e.undo(gpa_t);
+                try t_.expectEqualStrings(text, e.text());
+                _ = try e.redo(gpa_t);
+                try t_.expectEqualStrings(case.want, e.text());
+            }
+        }
+        for ([_]bool{ false, true }) |selected| {
+            var e = try Editor.init(gpa_t, "a" ++ eol ++ "b" ++ eol ++ "c");
+            defer e.deinit(gpa_t);
+            e.select(if (selected) b else c + 1, c + 1);
+            try e.deleteLine(gpa_t);
+            try t_.expectEqualStrings(if (selected) "a" else "a" ++ eol ++ "b", e.text());
+        }
+        var empty = try Editor.init(gpa_t, "");
+        defer empty.deinit(gpa_t);
+        try empty.deleteLine(gpa_t);
+        try t_.expectEqualStrings("", empty.text());
+    }
 }
 
 test "trim trailing whitespace and final newline keep the caret on its character" {

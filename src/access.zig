@@ -60,6 +60,9 @@ fn entryBefore(_: void, a: Entry, b: Entry) bool {
 /// Every element made so far, retained.
 /// Sorted by key, so a lookup is a binary search.
 var held: std.ArrayList(Entry) = .empty;
+/// Stack-local guards stop notification callbacks recreating a closing owner's elements.
+const Dropping = struct { owner: usize, kinds: u8, previous: ?*const Dropping };
+var dropping: ?*const Dropping = null;
 /// Bumped each time a list of children is built, to tell which ones it kept.
 var stamp: u32 = 0;
 var classes: [5]Id = @splat(null);
@@ -74,6 +77,7 @@ var text_cache: TextCache = .{};
 /// Each element's instance variables. `owner` is 0 once it's let go.
 /// A row keeps where it last was in the tree; a text area keeps the tab,
 /// change count and selection it last told VoiceOver about.
+/// A dead element uses `idx` to link the pending destruction notifications.
 const Field = enum { owner, key, idx, gen, id, changes, cur, anchor };
 const field_names = @typeInfo(Field).@"enum".field_names;
 var offs: [field_names.len]usize = undefined;
@@ -174,10 +178,13 @@ fn voiceOverOn() bool {
 pub fn changed(d: *Doc) void {
     if (held.items.len == 0 or !voiceOverOn()) return;
     const obj = (findIn(held.items, .{ .kind = .text, .owner = @intFromPtr(d), .key = 0 }) orelse return).obj;
+    _ = msg(Id, obj, "retain", .{});
+    defer msg(void, obj, "release", .{});
     if (slot(obj, .id).* != d.file.id or slot(obj, .changes).* != d.file.ed.buf.changes) {
         slot(obj, .id).* = d.file.id;
         slot(obj, .changes).* = d.file.ed.buf.changes;
         post(obj, "AXValueChanged");
+        if (slot(obj, .owner).* == 0) return;
     }
     if (slot(obj, .cur).* != d.file.ed.cur or slot(obj, .anchor).* != d.file.ed.anchor) {
         slot(obj, .cur).* = d.file.ed.cur;
@@ -205,8 +212,11 @@ pub fn dropWin(w: *Win) void {
 /// Lets go of every matching element.
 fn sweep(owner: usize, win: ?*Win, kinds: u8, unstamped: bool) void {
     if (held.items.len == 0) return;
-    var dead: std.ArrayList(Id) = .empty;
-    defer dead.deinit(gpa);
+    const guard: Dropping = .{ .owner = owner, .kinds = kinds, .previous = dropping };
+    if (!unstamped) dropping = &guard;
+    defer dropping = guard.previous;
+    var dead: Id = null;
+    var cached: Id = null;
     var keep: usize = 0;
     for (held.items) |e| {
         const k = e.key;
@@ -217,20 +227,24 @@ fn sweep(owner: usize, win: ?*Win, kinds: u8, unstamped: bool) void {
                 break :blk ax.alive(d) and d.win == win.?;
             } else k.owner == owner;
         if (gone) {
-            if (dead.append(gpa, e.h.obj)) |_| {
-                if (k.kind == .text and k.owner == text_cache.owner and text_cache.str != null) {
-                    msg(void, text_cache.str, "release", .{});
-                    text_cache = .{};
-                }
-                continue;
-            } else |_| {}
+            slot(e.h.obj, .owner).* = 0;
+            slot(e.h.obj, .idx).* = if (dead) |obj| @intFromPtr(obj) else 0;
+            dead = e.h.obj;
+            if (k.kind == .text and k.owner == text_cache.owner) {
+                cached = text_cache.str;
+                text_cache = .{};
+            }
+            continue;
         }
         held.items[keep] = e;
         keep += 1;
     }
     held.items.len = keep;
-    for (dead.items) |obj| {
-        slot(obj, .owner).* = 0;
+    // No array references survive callbacks, which can rebuild or sweep `held`.
+    msg(void, cached, "release", .{});
+    while (dead) |obj| {
+        const next = slot(obj, .idx).*;
+        dead = if (next == 0) null else @ptrFromInt(next);
         post(obj, "AXUIElementDestroyed");
         msg(void, obj, "release", .{});
     }
@@ -239,6 +253,10 @@ fn sweep(owner: usize, win: ?*Win, kinds: u8, unstamped: bool) void {
 // ---- making elements ----
 
 fn newElement(kind: Kind, owner: usize, key: u64, parent: Id) Id {
+    var active = dropping;
+    while (active) |guard| : (active = guard.previous) {
+        if (guard.owner == owner and guard.kinds & (@as(u8, 1) << @intFromEnum(kind)) != 0) return null;
+    }
     const obj = msg(Id, msg(Id, classes[@intFromEnum(kind)], "alloc", .{}), "init", .{});
     if (obj == null) return null;
     slot(obj, .owner).* = owner;
@@ -265,6 +283,7 @@ fn element(kind: Kind, owner: usize, key: u64, parent: Id) Id {
     const obj = newElement(kind, owner, key, parent);
     if (obj == null) return null;
     held.insert(gpa, lowerBoundIn(held.items, k), .{ .key = k, .h = .{ .obj = obj, .stamp = stamp } }) catch {
+        slot(obj, .owner).* = 0;
         msg(void, obj, "release", .{});
         return null;
     };
@@ -664,6 +683,7 @@ fn outlineChildren(self: Id, _: Sel) callconv(.c) Id {
             const made = newElement(.row, owner, key, parent);
             if (made == null) break :blk null;
             held.append(gpa, .{ .key = k, .h = .{ .obj = made, .stamp = stamp } }) catch {
+                slot(made, .owner).* = 0;
                 msg(void, made, "release", .{});
                 break :blk null;
             };

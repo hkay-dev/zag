@@ -7,6 +7,10 @@ covers:
   - src/
   - scripts/bundle.sh
 since: 2026-11-04
+related:
+  - zag#c325
+  - zag#56et
+  - zag#t8as
 ---
 
 Zag is a small text editor. A window shows files on cards with rounded corners, set a little in
@@ -299,9 +303,10 @@ new one's.
   The row shows a faint tinted outline in the caret's color while the menu is open, apart from
   the highlight on the file on show.
   - **New File…** asks for a name, makes an empty file in that folder and opens it in the focused
-    card. **New Folder…** makes a folder.
+    card. **New Folder…** makes a folder. Neither command replaces an existing file or folder.
   - **Rename…** renames the file or folder, and open tabs of it, or of files inside it, follow it
-    to its new name.
+    to its new name. You can change just the name's capitalization; Zag won't replace another
+    file or folder.
   - **Duplicate** makes a copy beside it named "name copy.ext", or "name copy 2.ext" and on.
   - **Move to Trash** moves it to the Trash; open tabs of it turn its text into unsaved changes.
   - **Collapse All** shuts every open folder, and the list crossfades to its top.
@@ -345,11 +350,13 @@ empty window.
 
 An untitled file saves itself as a draft a second after you stop typing, so there's no need to
 save a scratchpad. Its tab shows the fainter draft dot, quitting doesn't ask about it, and it
-comes back in its tab next time. If Zag ever stops without quitting, its drafts come back as tabs
-in the front window at the next start, after the tab on show, even when that start opens other
-files. Saving the draft to a file with ⌘S, or closing its tab and choosing **Don't Save**,
-deletes it. Zag writes drafts to `~/Library/Application Support/zag/Drafts`, and moves any it
-finds in the old `ze/Drafts` folder there.
+comes back in its tab next time. If Zag can't save its drafts when you quit, it says so and
+cancels quitting, leaving your tabs open. If Zag ever stops without quitting, its drafts come
+back as tabs in the front window at the next start, after the tab on show, even when that start
+opens other files. Saving the draft to a file with ⌘S removes the old draft, not the file you
+chose, even when you chose the draft's own file. Closing its tab and choosing **Don't Save**
+deletes the draft. Zag writes drafts to `~/Library/Application Support/zag/Drafts`, and moves
+any it finds in the old `ze/Drafts` folder there.
 
 - **File > Recover Drafts** brings back every draft that no tab shows, and says how many came
   back.
@@ -660,6 +667,9 @@ file, so a change you save elsewhere applies right away, even while Zag is in th
 you never switch to it. Every setting appears in the file: the first time Zag starts with a file
 that lacks one, Zag adds that line with its note after your other settings, and leaves your own
 lines and notes alone.
+
+If Zag can't read the file again, it leaves your last loaded settings in effect rather than
+switching to defaults. Fix the file's access, then use **Reload Settings** to try again.
 
 The Zag menu also has:
 

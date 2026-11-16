@@ -9,13 +9,18 @@ pub const Kind = enum(u8) { text, keyword, string, comment, number, function, ty
 /// What is still open at the end of a line. The HTML ones: inside a
 /// comment, inside a tag (one that opens a style or script element says
 /// so), and inside a style or script element and what's open in there.
-pub const State = enum(u8) {
-    normal, block_comment, triple_double, triple_single, backtick, fence,
+pub const State = enum(usize) {
+    normal, block_comment, triple_double, triple_single, backtick,
     html_comment, tag, tag_style, tag_script, style, style_comment, script, script_comment, script_backtick,
+    tag_double, tag_single, tag_style_double, tag_style_single, tag_script_double, tag_script_single,
+    // Values from fence onward encode (length - 3) * 2 plus the tilde bit.
+    fence = 32,
+    _,
 };
 
 pub const Lang = struct {
     line_comment: []const u8 = "",
+    hash_boundary: enum { anywhere, whitespace, shell } = .anywhere,
     block_comment: bool = false,
     /// Python's `"""` and `'''`.
     triple: bool = false,
@@ -118,12 +123,12 @@ const swift: Lang = .{ .line_comment = "//", .block_comment = true, .names = tru
     "deinit true false nil try throw throws async await some any where",
 ) };
 
-const shell: Lang = .{ .line_comment = "#", .exts = kw("sh bash zsh zshrc zshenv zprofile bashrc bash_profile profile"), .keywords = kw(
+const shell: Lang = .{ .line_comment = "#", .hash_boundary = .shell, .exts = kw("sh bash zsh zshrc zshenv zprofile bashrc bash_profile profile"), .keywords = kw(
     "if then else elif fi for while until do done case esac function in return export local readonly " ++
     "set unset exit select declare typeset source alias",
 ) };
 
-const fish: Lang = .{ .line_comment = "#", .exts = kw("fish"), .keywords = kw("if else end for in while switch case function begin return break continue and or not set set_color status source exit") };
+const fish: Lang = .{ .line_comment = "#", .hash_boundary = .shell, .exts = kw("fish"), .keywords = kw("if else end for in while switch case function begin return break continue and or not set set_color status source exit") };
 const ruby: Lang = .{ .line_comment = "#", .names = true, .exts = kw("rb"), .keywords = kw("def end if elsif else unless while until for in do return class module self nil true false yield begin rescue ensure require") };
 const lua: Lang = .{ .line_comment = "--", .names = true, .exts = kw("lua"), .keywords = kw("and break do else elseif end false for function if in local nil not or repeat return then true until while") };
 
@@ -153,7 +158,8 @@ const dart: Lang = .{ .line_comment = "//", .block_comment = true, .triple = tru
 
 const diff: Lang = .{ .diff = true, .exts = kw("diff patch") };
 const data: Lang = .{ .keys = true, .exts = kw("json jsonl ndjson"), .keywords = kw("true false null") };
-const hash_data: Lang = .{ .line_comment = "#", .keys = true, .exts = kw("toml yaml yml ini conf gitignore gitattributes env"), .keywords = kw("true false null") };
+const hash_data: Lang = .{ .line_comment = "#", .hash_boundary = .whitespace, .keys = true, .exts = kw("yaml yml ini conf gitignore gitattributes env"), .keywords = kw("true false null") };
+const toml: Lang = .{ .line_comment = "#", .keys = true, .exts = kw("toml"), .keywords = kw("true false null") };
 const css: Lang = .{ .block_comment = true, .keys = true, .exts = kw("css") };
 const markdown: Lang = .{ .markdown = true, .exts = kw("md markdown") };
 const html: Lang = .{ .html = true, .exts = kw("html htm xhtml xml svg plist") };
@@ -173,7 +179,7 @@ pub const languages = [_]struct { name: []const u8, lang: *const Lang }{
     .{ .name = "PHP", .lang = &php },           .{ .name = "Python", .lang = &python },
     .{ .name = "Ruby", .lang = &ruby },         .{ .name = "Rust", .lang = &rust },
     .{ .name = "Shell", .lang = &shell },       .{ .name = "SQL", .lang = &sql },
-    .{ .name = "Swift", .lang = &swift },       .{ .name = "TOML", .lang = &hash_data },
+    .{ .name = "Swift", .lang = &swift },       .{ .name = "TOML", .lang = &toml },
     .{ .name = "TypeScript", .lang = &js },     .{ .name = "XML", .lang = &html },
     .{ .name = "YAML", .lang = &hash_data },    .{ .name = "Zig", .lang = &zig },
 };
@@ -348,7 +354,7 @@ pub fn lexLine(lang: *const Lang, s: []const u8, state: State, out: ?[]Kind) Sta
                 const c = s[i];
                 const rest = s[i..];
                 if (lang.line_comment.len > 0 and std.mem.startsWith(u8, rest, lang.line_comment) and
-                    (lang.line_comment[0] != '#' or i == 0 or s[i - 1] == ' ' or s[i - 1] == '\t'))
+                    (lang.line_comment[0] != '#' or hashBoundary(lang, s, i)))
                 {
                     kind = .comment;
                     i = s.len;
@@ -375,7 +381,10 @@ pub fn lexLine(lang: *const Lang, s: []const u8, state: State, out: ?[]Kind) Sta
                         var j = i;
                         while (j < s.len and s[j] == ' ') j += 1;
                         kind = if (lang.keys and j < s.len and s[j] == ':') .function else .string;
-                    } else i += 1;
+                    } else {
+                        kind = .string;
+                        i = s.len;
+                    }
                 } else if (std.ascii.isDigit(c) and (i == 0 or !isWord(s[i - 1]))) {
                     kind = .number;
                     while (i < s.len and (isWord(s[i]) or s[i] == '.')) i += 1;
@@ -393,6 +402,17 @@ pub fn lexLine(lang: *const Lang, s: []const u8, state: State, out: ?[]Kind) Sta
         mark(out, start, i, kind);
     }
     return st;
+}
+
+fn hashBoundary(lang: *const Lang, s: []const u8, i: usize) bool {
+    if (lang.hash_boundary == .anywhere or i == 0) return true;
+    const prev = s[i - 1];
+    const whitespace = prev == ' ' or prev == '\t';
+    if (lang.hash_boundary == .whitespace) return whitespace;
+    if (!whitespace and std.mem.indexOfScalar(u8, ";|&()<>", prev) == null) return false;
+    var start = i - 1;
+    while (start > 0 and s[start - 1] == '\\') start -= 1;
+    return ((i - 1 - start) & 1) == 0;
 }
 
 fn mark(out: ?[]Kind, from: usize, to: usize, kind: Kind) void {
@@ -458,10 +478,23 @@ fn lexMarkdown(s: []const u8, state: State, out: ?[]Kind) State {
     var i: usize = 0;
     while (i < s.len and s[i] == ' ') i += 1;
     const rest = s[i..];
-    const fence = std.mem.startsWith(u8, rest, "```") or std.mem.startsWith(u8, rest, "~~~");
-    if (state == .fence or fence) {
+    var run: usize = 0;
+    if (i <= 3 and rest.len > 0 and (rest[0] == '`' or rest[0] == '~')) {
+        while (run < rest.len and rest[run] == rest[0]) run += 1;
+    }
+    const encoded = @backingInt(state);
+    const fence_base = @backingInt(State.fence);
+    if (encoded >= fence_base) {
         mark(out, 0, s.len, .string);
-        return if (fence == (state == .fence)) .normal else .fence;
+        const fence = encoded - fence_base;
+        const delimiter: u8 = if ((fence & 1) == 0) '`' else '~';
+        const closes = run >= fence / 2 + 3 and rest[0] == delimiter and
+            std.mem.trim(u8, rest[run..], " \t\r").len == 0;
+        return if (closes) .normal else state;
+    }
+    if (run >= 3 and (rest[0] == '~' or std.mem.indexOfScalar(u8, rest[run..], '`') == null)) {
+        mark(out, 0, s.len, .string);
+        return @fromBackingInt(fence_base + (run - 3) * 2 + @as(usize, @intFromBool(rest[0] == '~')));
     }
     if (out == null) return .normal;
     mark(out, 0, s.len, .text);
@@ -481,13 +514,15 @@ fn lexMarkdown(s: []const u8, state: State, out: ?[]Kind) State {
         if (p > i and p + 1 < s.len and (s[p] == '.' or s[p] == ')') and s[p + 1] == ' ') p += 1 else p = i;
     }
     mark(out, i, p, .keyword);
+    var bracket: usize = 0;
+    var paren: usize = 0;
     while (p < s.len) {
         const end: ?usize = switch (s[p]) {
             '`' => if (std.mem.indexOfScalarPos(u8, s, p + 1, '`')) |e| blk: {
                 mark(out, p, e + 1, .string);
                 break :blk e + 1;
             } else null,
-            '[' => link(s, p, out),
+            '[' => link(s, p, &bracket, &paren, out),
             '*', '_' => if (p + 1 < s.len and s[p + 1] == s[p]) (if (std.mem.indexOfPos(u8, s, p + 2, s[p .. p + 2])) |e| blk: {
                 mark(out, p, e + 2, .keyword);
                 break :blk e + 2;
@@ -499,11 +534,14 @@ fn lexMarkdown(s: []const u8, state: State, out: ?[]Kind) State {
     return .normal;
 }
 
-/// Colors a `[text](url)` link at `p` and returns where it ends.
-fn link(s: []const u8, p: usize, out: ?[]Kind) ?usize {
-    const e = std.mem.indexOfScalarPos(u8, s, p + 1, ']') orelse return null;
-    if (e + 1 >= s.len or s[e + 1] != '(') return null;
-    const q = std.mem.indexOfScalarPos(u8, s, e + 2, ')') orelse return null;
+/// Cached delimiter positions advance monotonically, even for failed links.
+fn link(s: []const u8, p: usize, bracket: *usize, paren: *usize, out: ?[]Kind) ?usize {
+    if (bracket.* <= p) bracket.* = std.mem.indexOfScalarPos(u8, s, p + 1, ']') orelse s.len;
+    const e = bracket.*;
+    if (e == s.len or e + 1 >= s.len or s[e + 1] != '(') return null;
+    if (paren.* <= e + 1) paren.* = std.mem.indexOfScalarPos(u8, s, e + 2, ')') orelse s.len;
+    const q = paren.*;
+    if (q == s.len) return null;
     mark(out, p, e + 1, .function);
     mark(out, e + 1, q + 1, .comment);
     return q + 1;
@@ -525,6 +563,21 @@ fn lexHtml(s: []const u8, state: State, out: ?[]Kind) State {
             if (e != null) st = .normal;
         },
         .tag, .tag_style, .tag_script => i = attrs(s, i, &st, out),
+        .tag_double, .tag_single, .tag_style_double, .tag_style_single, .tag_script_double, .tag_script_single => {
+            const quote: u8 = switch (st) {
+                .tag_double, .tag_style_double, .tag_script_double => '"',
+                else => '\'',
+            };
+            const e = std.mem.indexOfScalarPos(u8, s, i, quote);
+            const end = if (e) |at| at + 1 else s.len;
+            mark(out, i, end, .string);
+            i = end;
+            if (e != null) st = switch (st) {
+                .tag_style_double, .tag_style_single => .tag_style,
+                .tag_script_double, .tag_script_single => .tag_script,
+                else => .tag,
+            };
+        },
         .style, .style_comment, .script, .script_comment, .script_backtick => {
             const in_style = st == .style or st == .style_comment;
             const e = endTag(s, i, if (in_style) "style" else "script") orelse s.len;
@@ -587,9 +640,15 @@ fn attrs(s: []const u8, from: usize, st: *State, out: ?[]Kind) usize {
             };
             return i + 1;
         } else if (c == '"' or c == '\'') {
-            const e = if (std.mem.indexOfScalarPos(u8, s, i + 1, c)) |x| x + 1 else s.len;
+            const close = std.mem.indexOfScalarPos(u8, s, i + 1, c);
+            const e = if (close) |x| x + 1 else s.len;
             mark(out, i, e, .string);
             i = e;
+            if (close == null) st.* = switch (st.*) {
+                .tag_style => if (c == '"') .tag_style_double else .tag_style_single,
+                .tag_script => if (c == '"') .tag_script_double else .tag_script_single,
+                else => if (c == '"') .tag_double else .tag_single,
+            };
         } else if (isWord(c) or c == '@' or c == ':') {
             const start = i;
             while (i < s.len and (isWord(s[i]) or s[i] == '-' or s[i] == ':' or s[i] == '.' or s[i] == '@')) i += 1;
@@ -603,7 +662,10 @@ fn attrs(s: []const u8, from: usize, st: *State, out: ?[]Kind) usize {
 fn endTag(s: []const u8, from: usize, name: []const u8) ?usize {
     var i = from;
     while (std.mem.indexOfPos(u8, s, i, "</")) |at| : (i = at + 2) {
-        if (std.ascii.startsWithIgnoreCase(s[at + 2 ..], name)) return at;
+        if (!std.ascii.startsWithIgnoreCase(s[at + 2 ..], name)) continue;
+        const end = at + 2 + name.len;
+        if (end == s.len or s[end] == '>' or s[end] == '/' or
+            std.mem.indexOfScalar(u8, " \t\r\n\x0c", s[end]) != null) return at;
     }
     return null;
 }
@@ -805,8 +867,12 @@ test "incremental kinds converge inside and outside multiline regions" {
         .{ &js, "let a;\nx = `start\ninside\nend`;\nlet b;\nlet c;" },
         .{ &zig, "const a = 1;\nconst x =\n    \\\\start\n    \\\\inside\n;\nconst b = 2;" },
         .{ &markdown, "before\n```\ninside\n```\nafter\nlast" },
+        .{ &markdown, "before\n~~~~\ninside\n~~~~\nafter\nlast" },
+        .{ &markdown, "before\n````\ninside\n````\nafter\nlast" },
         .{ &html, "<p>\n<!-- start\ninside\nend -->\n<p>\n<p>" },
         .{ &html, "<p>\n<script>\nlet a = 1;\n</script>\n<p>\n<p>" },
+        .{ &html, "<p>\n<div title=\"start\ninside\nend\">\n<p>\n<p>" },
+        .{ &html, "<p>\n<script title='start\ninside\nend'></script>\n<p>\n<p>" },
     };
     inline for (cases) |case| {
         var b = try Buffer.init(t.allocator, case[1]);
@@ -916,5 +982,192 @@ test "state-only lexLine and lexMarkdown match full lexing" {
         const full = lexLine(c[0], c[2], c[1], scratch[0..c[2].len]);
         const fast = lexLine(c[0], c[2], c[1], null);
         try t.expectEqual(full, fast);
+    }
+}
+
+test "unfinished strings consume their line without opening comments" {
+    var k: [128]Kind = undefined;
+    inline for (.{ &c_like, &js, &python, &ruby, &toml, &zig }) |lang| {
+        inline for (.{ "\"a\\\" /* # // `", "'a\\' /* # // `" }) |line| {
+            try t.expectEqual(State.normal, lexLine(lang, line, .normal, &k));
+            try t.expectEqual(State.normal, lexLine(lang, line, .normal, null));
+            for (k[0..line.len]) |kind| try t.expectEqual(Kind.string, kind);
+        }
+    }
+    var line: [8193]u8 = undefined;
+    var kinds: [line.len]Kind = undefined;
+    line[0] = '"';
+    var i: usize = 1;
+    while (i < line.len) : (i += 2) @memcpy(line[i..][0..2], "\\\"");
+    try t.expectEqual(State.normal, lexLine(&js, &line, .normal, &kinds));
+    try t.expectEqual(State.normal, lexLine(&js, &line, .normal, null));
+    for (kinds) |kind| try t.expectEqual(Kind.string, kind);
+}
+
+test "markdown failed bracket candidates preserve later inline markup" {
+    inline for (.{ " `x` **y**", "]( `x` **y**", "] nope [ok](url) `x` **y**" }) |tail| {
+        var line: [8192 + tail.len]u8 = undefined;
+        var kinds: [line.len]Kind = undefined;
+        @memset(line[0..8192], '[');
+        @memcpy(line[8192..], tail);
+        try t.expectEqual(State.normal, lexLine(&markdown, &line, .normal, &kinds));
+        try t.expectEqual(State.normal, lexLine(&markdown, &line, .normal, null));
+        const code = std.mem.indexOf(u8, &line, "`x`").?;
+        try t.expectEqual(Kind.string, kinds[code]);
+        try t.expectEqual(Kind.keyword, kinds[line.len - 3]);
+        if (std.mem.indexOf(u8, &line, "[ok]")) |at| try t.expectEqual(Kind.function, kinds[at]);
+    }
+}
+
+test "html quoted attributes retain quote and tag destination across lines" {
+    var k: [64]Kind = undefined;
+    const cases = .{
+        .{ "<div title=\"first", State.tag_double, "\">", State.normal },
+        .{ "<div title='first", State.tag_single, "'>", State.normal },
+        .{ "<style title=\"first", State.tag_style_double, "\">", State.style },
+        .{ "<style title='first", State.tag_style_single, "'>", State.style },
+        .{ "<script title=\"first", State.tag_script_double, "\">", State.script },
+        .{ "<script title='first", State.tag_script_single, "'>", State.script },
+    };
+    inline for (cases) |case| {
+        try t.expectEqual(case[1], lexLine(&html, case[0], .normal, &k));
+        try t.expectEqual(case[1], lexLine(&html, case[0], .normal, null));
+        inline for (.{ "", "more > text", "</script> <!--" }) |line| {
+            try t.expectEqual(case[1], lexLine(&html, line, case[1], &k));
+            try t.expectEqual(case[1], lexLine(&html, line, case[1], null));
+            for (k[0..line.len]) |kind| try t.expectEqual(Kind.string, kind);
+        }
+        try t.expectEqual(case[3], lexLine(&html, case[2], case[1], &k));
+        try t.expectEqual(case[3], lexLine(&html, case[2], case[1], null));
+        try t.expectEqual(Kind.string, k[0]);
+        try t.expectEqual(Kind.text, k[1]);
+    }
+    try t.expectEqual(State.normal, lexLine(&html, "\">body</div>", .tag_double, &k));
+    try t.expectEqual(Kind.text, k[2]);
+    try t.expectEqual(Kind.keyword, k[8]);
+    try t.expectEqual(State.script, lexLine(&html, "\">const x = 1;", .tag_script_double, &k));
+    try t.expectEqual(Kind.keyword, k[2]);
+}
+
+test "html embedded closing tags require a complete name boundary" {
+    var k: [64]Kind = undefined;
+    inline for (.{ .{ State.script, "script" }, .{ State.style, "style" } }) |case| {
+        inline for (.{ "ure>", "-extra>", ":extra>", "0>" }) |suffix| {
+            const line = "</" ++ case[1] ++ suffix;
+            try t.expectEqual(case[0], lexLine(&html, line, case[0], &k));
+            try t.expectEqual(case[0], lexLine(&html, line, case[0], null));
+        }
+        inline for (.{ ">", " />", "\t>", "\x0c>" }) |suffix| {
+            const line = "</" ++ case[1] ++ suffix;
+            try t.expectEqual(State.normal, lexLine(&html, line, case[0], &k));
+            try t.expectEqual(State.normal, lexLine(&html, line, case[0], null));
+            try t.expectEqual(Kind.keyword, k[2]);
+        }
+        const split = "</" ++ case[1];
+        try t.expectEqual(State.tag, lexLine(&html, split, case[0], &k));
+        try t.expectEqual(State.tag, lexLine(&html, split, case[0], null));
+    }
+    try t.expectEqual(State.normal, lexLine(&html, "</scripture></SCRIPT>", .script, &k));
+}
+
+test "markdown fences retain delimiter length and require valid closing lines" {
+    var k: [64]Kind = undefined;
+    inline for (.{ "````lang", "~~~~lang" }) |opener| {
+        const state = lexLine(&markdown, opener, .normal, &k);
+        try t.expect(state != .normal);
+        try t.expectEqual(state, lexLine(&markdown, opener, .normal, null));
+        inline for (.{ "", "```", "~~~", "````text", "~~~~text", "    ````", "    ~~~~", "# heading" }) |line| {
+            try t.expectEqual(state, lexLine(&markdown, line, state, &k));
+            try t.expectEqual(state, lexLine(&markdown, line, state, null));
+            for (k[0..line.len]) |kind| try t.expectEqual(Kind.string, kind);
+        }
+        const wrong = if (opener[0] == '`') "~~~~~" else "`````";
+        try t.expectEqual(state, lexLine(&markdown, wrong, state, &k));
+        try t.expectEqual(state, lexLine(&markdown, wrong, state, null));
+        const close = if (opener[0] == '`') "   ````` \t\r" else "   ~~~~~ \t\r";
+        try t.expectEqual(State.normal, lexLine(&markdown, close, state, &k));
+        try t.expectEqual(State.normal, lexLine(&markdown, close, state, null));
+    }
+    inline for (.{ "    ```", "```bad`info" }) |line| {
+        try t.expectEqual(State.normal, lexLine(&markdown, line, .normal, &k));
+        try t.expectEqual(State.normal, lexLine(&markdown, line, .normal, null));
+    }
+    try t.expect(lexLine(&markdown, "~~~", .normal, null) != State.fence);
+}
+
+test "hash comments use each language boundary" {
+    var k: [64]Kind = undefined;
+    inline for (.{ &python, &ruby, &toml }) |lang| {
+        const line = "x=1#comment";
+        try t.expectEqual(State.normal, lexLine(lang, line, .normal, &k));
+        try t.expectEqual(State.normal, lexLine(lang, line, .normal, null));
+        try t.expectEqual(Kind.comment, k[3]);
+        _ = lexLine(lang, "\"#string\" #comment", .normal, &k);
+        try t.expectEqual(Kind.string, k[1]);
+        try t.expectEqual(Kind.comment, k[10]);
+    }
+    _ = lexLine(forPath("a.yaml"), "key: value#scalar #comment", .normal, &k);
+    try t.expectEqual(Kind.text, k[10]);
+    try t.expectEqual(Kind.comment, k[18]);
+    inline for (.{ &shell, &fish }) |lang| {
+        _ = lexLine(lang, "echo $# foo#bar;#comment", .normal, &k);
+        try t.expectEqual(Kind.text, k[6]);
+        try t.expectEqual(Kind.text, k[11]);
+        try t.expectEqual(Kind.comment, k[16]);
+    }
+    try t.expectEqual(&toml, forPath("a.toml"));
+    try t.expectEqual(&toml, forFence("TOML"));
+}
+
+test "shell hash boundaries respect odd and even backslash runs" {
+    var line: [64]u8 = undefined;
+    var kinds: [64]Kind = undefined;
+    const prefix = "echo foo";
+    const tail = "#bar; echo next";
+    @memcpy(line[0..prefix.len], prefix);
+    inline for (.{ &shell, &fish }) |lang| {
+        for (";|&()<> \t") |separator| {
+            for (0..6) |slashes| {
+                const boundary = prefix.len + slashes;
+                @memset(line[prefix.len..boundary], '\\');
+                line[boundary] = separator;
+                @memcpy(line[boundary + 1 ..][0..tail.len], tail);
+                const text = line[0 .. boundary + 1 + tail.len];
+                try t.expectEqual(State.normal, lexLine(lang, text, .normal, &kinds));
+                try t.expectEqual(State.normal, lexLine(lang, text, .normal, null));
+                const expected: Kind = if ((slashes & 1) == 0) .comment else .text;
+                try t.expectEqual(expected, kinds[boundary + 1]);
+                try t.expectEqual(expected, kinds[text.len - 1]);
+            }
+        }
+    }
+}
+
+test "incremental states notice fence metadata and quoted attribute edits" {
+    const cases = .{
+        .{ &markdown, "```\ncode\n```\n# after\nlast", "````", "~~~~" },
+        .{ &html, "<script title=\"open\nmiddle\n\">const x = 1;\n</script>\nlast", "<script title='open", "<style title='open" },
+    };
+    inline for (cases) |case| {
+        var b = try Buffer.init(t.allocator, case[1]);
+        defer b.deinit(t.allocator);
+        var states: std.ArrayList(State) = .empty;
+        defer states.deinit(t.allocator);
+        var cached: std.ArrayList([]Kind) = .empty;
+        defer {
+            for (cached.items) |k| t.allocator.free(k);
+            cached.deinit(t.allocator);
+        }
+        _ = try expectIncremental(case[0], &b, &states, &cached);
+        inline for (.{ case[2], case[3] }) |opener| {
+            try b.replace(t.allocator, 0, b.lineEnd(0), opener, 0, false);
+            _ = try expectIncremental(case[0], &b, &states, &cached);
+            _ = try b.undo(t.allocator);
+            _ = try expectIncremental(case[0], &b, &states, &cached);
+            _ = try b.redo(t.allocator);
+            _ = try expectIncremental(case[0], &b, &states, &cached);
+        }
+        try b.replace(t.allocator, 0, 0, "before\n", 0, false);
+        _ = try expectIncremental(case[0], &b, &states, &cached);
     }
 }

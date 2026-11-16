@@ -20,7 +20,7 @@ const bench = if (@import("build_options").bench) @import("bench.zig") else stru
 };
 
 var args: []const [:0]const u8 = &.{};
-/// Files Finder hands over before launch finishes, opened after the session.
+/// Finder request lists queued before launch, with one reply per list.
 var pending: Id = null;
 var launched = false;
 /// The Dock tile's menu, built on first use.
@@ -46,13 +46,18 @@ fn didFinishLaunching(_: Id, _: Sel, _: Id) callconv(.c) void {
         if (a.len == 0) continue;
         if (a[0] == '-') {
             i += 1;
-        } else view.openFile(a);
+        } else {
+            _ = view.openFile(a);
+        }
     }
     launched = true;
     if (pending != null) {
-        openList(pending);
-        msg(void, pending, "release", .{});
+        const requests = pending;
         pending = null;
+        for (0..msg(usize, requests, "count", .{})) |j| {
+            openList(app(), msg(Id, requests, "objectAtIndex:", .{j}));
+        }
+        msg(void, requests, "release", .{});
     }
     if (view.count() == 0) _ = view.newDoc();
     view.adoptDrafts();
@@ -62,15 +67,25 @@ fn didFinishLaunching(_: Id, _: Sel, _: Id) callconv(.c) void {
     if (!view.background and msg(Id, bundle, "bundleIdentifier", .{}) == null) msg(void, app(), "activate", .{});
 }
 
-fn openList(list: Id) void {
-    for (0..msg(usize, list, "count", .{})) |i| view.openFile(objc.utf8(msg(Id, list, "objectAtIndex:", .{i})));
+fn openList(application: Id, list: Id) void {
+    var ok = true;
+    for (0..msg(usize, list, "count", .{})) |i| {
+        if (!view.openFile(objc.utf8(msg(Id, list, "objectAtIndex:", .{i})))) ok = false;
+    }
+    msg(void, application, "replyToOpenOrPrint:", .{@as(usize, if (ok) 0 else 2)});
 }
 
-fn openFiles(_: Id, _: Sel, _: Id, list: Id) callconv(.c) void {
-    if (launched) return openList(list);
+fn openFiles(_: Id, _: Sel, application: Id, list: Id) callconv(.c) void {
+    if (launched) return openList(application, list);
     // At launch Finder's files arrive before the session is restored; they wait for it.
     if (pending == null) pending = objc.new("NSMutableArray");
-    msg(void, pending, "addObjectsFromArray:", .{list});
+    const request = msg(Id, list, "copy", .{});
+    defer msg(void, request, "release", .{});
+    if (pending == null or request == null) {
+        msg(void, application, "replyToOpenOrPrint:", .{@as(usize, 2)});
+        return;
+    }
+    msg(void, pending, "addObject:", .{request});
 }
 
 fn shouldTerminate(_: Id, _: Sel, _: Id) callconv(.c) usize {
@@ -136,7 +151,7 @@ fn dockMenu(self: Id, _: Sel, _: Id) callconv(.c) Id {
 }
 
 fn openRecent(_: Id, _: Sel, sender: Id) callconv(.c) void {
-    view.openFile(objc.utf8(msg(Id, sender, "representedObject", .{})));
+    _ = view.openFile(objc.utf8(msg(Id, sender, "representedObject", .{})));
 }
 
 pub fn main(init: std.process.Init.Minimal) void {

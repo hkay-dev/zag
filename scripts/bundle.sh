@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # bundle.sh [dev|perf|stable] [out.app]: builds Zag and wraps it as a macOS
 # .app bundle, then prints the bundle path.
 #   dev     "Zag Dev", dev.hkay.ze.dev, at zig-out/Zag Dev.app. Runs in the
@@ -36,7 +36,7 @@ cp zig-out/bin/zag "$app/Contents/MacOS/zag"
 # The icon. actool also writes a 1.9 MB Assets.car for macOS 26's glass
 # modes; Zag ships only the 37 KB AppIcon.icns (up to 256 px), which every
 # macOS shows in the same shape.
-icon_sha=$(find "$PWD/AppIcon.icon" -type f | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256 | awk '{print $1}')
+icon_sha=$(set -o pipefail; find "$PWD/AppIcon.icon" -type f -exec shasum -a 256 {} + | LC_ALL=C sort | shasum -a 256 | awk '{print $1}')
 icon_cache="zig-out/.icon-cache/$icon_sha"
 if [ ! -f "$icon_cache/AppIcon.icns" ]; then
   icon=$(mktemp -d)

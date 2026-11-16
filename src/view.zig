@@ -29,6 +29,8 @@ var tree: tree_mod.Tree = .init(gpa);
 
 /// Adopts an owned folder path; its tree rows will be read before display.
 pub fn adoptRoot(dir: []const u8) void {
+    folds = .{ .{}, .{} };
+    quick_gen +%= 1;
     if (root) |r| gpa.free(r);
     root = dir;
     tree_stale = true;
@@ -40,8 +42,8 @@ pub fn setRoot(dir: []const u8) void {
     noteRecentFolder(dir);
     // A quick open on show lists the new folder. Otherwise the old list stays
     // for a panel still sliding shut; the next ⌘P reads the folder again anyway.
-    if (quick != null) for (docs.items) |d| if (d.mode == .open) {
-        rescanQuick(dir, null);
+    for (docs.items) |d| if (d.mode == .open) {
+        rescanQuick(dir);
         break;
     };
     // The header's folder is written relative to the open folder.
@@ -49,6 +51,7 @@ pub fn setRoot(dir: []const u8) void {
     tree.closeAll(gpa);
     for (wins.items) |w| {
         w.side_y = 0;
+        w.side_t.snap(0);
         w.side_cur = null;
         // The sidebar crossfades from the old folder's rows to the new one's.
         if (sideShown(w) and msg(bool, w.window, "isVisible", .{})) msg(void, msg(Id, w.view, "layer", .{}), "addAnimation:forKey:", .{ themeFade(), objc.str("root") });
@@ -99,22 +102,31 @@ fn bgRescanWork(ctx: ?*anyopaque) callconv(.c) void {
 
 fn bgRescanDone(ctx: ?*anyopaque) callconv(.c) void {
     const job: *QuickJob = @ptrCast(@alignCast(ctx orelse return));
+    quick_busy = false;
+    defer for (docs.items) |o| if (o.mode == .open and !o.closing) refresh(o);
     defer {
-        quick_busy = false;
         gpa.free(job.dir);
         if (job.files) |*fl| fl.deinit();
         gpa.destroy(job);
     }
-    if (job.gen != quick_gen) return;
     const qr = quick_root orelse return;
-    if (!std.mem.eql(u8, qr, job.dir) or conf.show_hidden != job.show_hidden) return;
+    const r = root orelse return;
+    if (job.gen != quick_gen or !std.mem.eql(u8, qr, job.dir) or
+        !std.mem.eql(u8, r, job.dir) or conf.show_hidden != job.show_hidden)
+    {
+        for (docs.items) |o| if (o.mode == .open and !o.closing) {
+            rescanQuick(r);
+            break;
+        };
+        return;
+    }
     const scanned = job.files orelse return;
     job.files = null;
     var old_quick = quick;
     defer if (old_quick) |*oq| oq.deinit();
     quick = scanned;
     for (docs.items) |o| {
-        if (o.mode != .open) continue;
+        if (o.mode != .open or o.closing) continue;
         var saved: ?[]const u8 = null;
         if (old_quick) |*oq| {
             if (o.pick < o.npicks) {
@@ -132,35 +144,38 @@ fn bgRescanDone(ctx: ?*anyopaque) callconv(.c) void {
                 }
             }
         }
-        refresh(o);
+        showPick(o);
     }
 }
 
-/// Scans quick open again; `fresh` must not crossfade picks from the palette.
-fn rescanQuick(dir: []const u8, _: ?*Doc) void {
+/// Replaces the requested listing; the worker publishes only its generation.
+fn rescanQuick(dir: []const u8) void {
     quick_gen +%= 1;
     if (quick) |*q| q.deinit();
-    quick = finder.scan(gpa, dir, conf.show_hidden) catch null;
+    quick = null;
     if (quick_root) |r| gpa.free(r);
-    quick_root = if (quick != null) gpa.dupeSentinel(u8, dir, 0) catch null else null;
+    quick_root = gpa.dupeSentinel(u8, dir, 0) catch null;
     quick_hidden = conf.show_hidden;
-    for (docs.items) |o| if (o.mode == .open) pickFiles(o, true);
+    if (quick_root != null) bgRescanQuick(dir, conf.show_hidden);
+    for (docs.items) |o| if (o.mode == .open and !o.closing) {
+        pickFiles(o, true);
+        refresh(o);
+    };
 }
 
 /// Reads the rows again. The row under each window's mouse and its keyboard
 /// cursor stay on the same files, wherever those rows move to.
 fn rebuildTree() void {
-    var held: [8][2]?[]u8 = @splat(.{ null, null });
-    const n = @min(wins.items.len, held.len);
-    for (wins.items[0..n], held[0..n]) |w, *h| {
-        h[0] = heldRel(w.hov.row, w.hov.gen);
-        h[1] = heldRel(w.side_cur, w.side_cur_gen);
+    for (wins.items) |w| {
+        w.held_rows = .{ heldRel(w.hov.row, w.hov.gen), heldRel(w.side_cur, w.side_cur_gen) };
     }
-    defer for (held) |h| {
-        for (h) |r| if (r) |s| gpa.free(s);
-    };
     rebuildRows();
-    for (wins.items[0..n], held[0..n]) |w, h| {
+    for (wins.items) |w| {
+        const h = w.held_rows;
+        defer {
+            for (h) |r| if (r) |s| gpa.free(s);
+            w.held_rows = .{ null, null };
+        }
         if (h[0]) |rel| if (tree.rowOf(rel)) |i| {
             w.hov.row = i;
             w.hov.last = i;
@@ -255,8 +270,10 @@ var quick: ?finder.Files = null;
 /// `p` relative to the folder, when it's inside it.
 fn relOf(p: []const u8) ?[]const u8 {
     const r = root orelse return null;
-    if (p.len <= r.len + 1 or !std.mem.startsWith(u8, p, r) or p[r.len] != '/') return null;
-    return p[r.len + 1 ..];
+    if (!std.mem.startsWith(u8, p, r)) return null;
+    const start = if (std.mem.eql(u8, r, "/")) 1 else r.len + 1;
+    if (p.len <= start or p[start - 1] != '/') return null;
+    return p[start..];
 }
 
 fn revealFile(rel: []const u8) void {
@@ -1128,8 +1145,8 @@ const Page = struct {
     /// An untitled file's draft, saved as it changes, and the
     /// `buf.changes` it last saved.
     draft: ?[:0]u8 = null,
-    drafted: u64 = 0,
-    draft_armed: u64 = 0,
+    drafted: ?u64 = null,
+    draft_armed: ?u64 = null,
     /// Just read from disk, so showing it rises in; set by the loaders.
     rise: bool = false,
     /// Its sidebar row's unsaved dot, 0 to 1.
@@ -1399,10 +1416,11 @@ const Doc = struct {
     bar_vy: f64 = 0,
     bar_armed: f64 = -1,
     /// The horizontal bar: the sideways scroll it last saw, and the
-    /// longest line's length in bytes, worked out again after edits.
+    /// longest line's display columns, worked out again after edits or tab-width changes.
     bar_vx: f64 = 0,
     wide: usize = 0,
     wide_chg: u64 = std.math.maxInt(u64),
+    wide_tw: usize = 0,
     /// The pointer is near the card's right or bottom edge, which shows the bars.
     bar_hover: bool = false,
     /// A bar's knob held by the mouse, and where on the knob it was grabbed.
@@ -1488,10 +1506,9 @@ const Doc = struct {
     palette: bool = false,
     drag: Drag = .char,
     drag_from: [2]usize = .{ 0, 0 },
-    /// Syntax kinds of the lines that the last frame drew in `lex[0]`, so
-    /// a frame lexes only the lines that it didn't draw before; `lex[1]` is
-    /// the frame before, swapped in as the next one fills. Bound: the
-    /// visible lines. Dropped from the edited line down and with `states`.
+    /// Syntax kinds for the visible lines in `lex[0]`; `lex[1]` supplies
+    /// unchanged lines when rebuilding for a changed visible interval or
+    /// invalidation. Entries own offsets, not slices into growable buffers.
     lex: [2]Kinds = .{ .{}, .{} },
     /// The caret's color was set for dark mode or light.
     dark: ?bool = null,
@@ -1607,6 +1624,8 @@ const Win = struct {
     cards_only: bool = false,
     /// How far the sidebar is scrolled.
     side_y: f64 = 0,
+    /// Temporary path ownership across a shared tree rebuild.
+    held_rows: [2]?[]u8 = .{ null, null },
     /// The mouse went down outside the cards' text (the sidebar, the title
     /// band, a gap), so drags don't select text.
     side_down: bool = false,
@@ -1633,9 +1652,8 @@ const Win = struct {
     guide_t0: f64 = -1,
     /// Scroll the sidebar to the focused card's file on the next draw.
     side_find: bool = false,
-    /// The open folders pinned under the folder's name, and where each drew.
+    /// The open folders pinned under the folder's name on the last draw.
     stuck: [max_stuck]usize = undefined,
-    stuck_y: [max_stuck]f64 = undefined,
     nstuck: usize = 0,
     /// A sidebar scroll that glides, like a click on a pinned folder.
     side_t: Tween = .{ .dur = scroll_time },
@@ -1862,28 +1880,42 @@ fn pageLines(d: *const Doc) usize {
 /// right of the one on show, or else in a new window. A file that a card
 /// already holds comes forward there.
 pub fn open(path: []const u8, into: ?*Doc) void {
-    const abs = files.absolute(gpa, path) catch return;
+    _ = openInto(path, into);
+}
+
+fn openInto(path: []const u8, into: ?*Doc) bool {
+    const abs = files.absolute(gpa, path) catch return false;
     if (files.isDir(abs)) {
         setRoot(abs);
-        const d = into orelse keyDoc() orelse newDoc() orelse return;
+        const d = into orelse keyDoc() orelse newDoc() orelse return false;
         if (!sideShown(d.win)) startPrompt(d, .open);
-        return;
+        return true;
     }
     defer gpa.free(abs);
     if (holder(abs)) |h| {
+        const id = tabPage(h.d, h.j).id;
         showTab(h.d, h.j);
-        return front(h.d);
+        if (h.d.file.id != id) return false;
+        front(h.d);
+        return true;
     }
-    var pg = loadPage(abs) orelse return;
-    const d = into orelse newDoc() orelse return pg.deinit();
-    putTab(d, pg, d.at + 1);
+    var pg = loadPage(abs) orelse return false;
+    const d = into orelse newDoc() orelse {
+        pg.deinit();
+        return false;
+    };
+    if (!putTab(d, pg, d.at + 1)) {
+        pg.deinit();
+        return false;
+    }
     noteRecent(abs);
     front(d);
+    return true;
 }
 
 /// Opens into the key window's untouched card, else a new window.
-pub fn openFile(path: []const u8) void {
-    open(path, blankDoc());
+pub fn openFile(path: []const u8) bool {
+    return openInto(path, blankDoc());
 }
 
 /// The first live card and tab holding `abs`.
@@ -2052,7 +2084,8 @@ fn install(d: *Doc, pg: Page) void {
     named(d);
     if (!restoring) {
         if (rebuilt) refreshAll() else refreshWin(d.win);
-        checkOutside(d);
+        // Finish ownership transfers before a disk check can enter a modal loop.
+        objc.later(d.win.view, "checkFiles:", null, 0);
     }
 }
 
@@ -2101,6 +2134,18 @@ fn asPage(d: *const Doc) Page {
 fn tabIndex(d: *Doc, id: u32) ?usize {
     for (0..tabCount(d)) |j| if (tabPage(d, j).id == id) return j;
     return null;
+}
+
+fn pageRef(id: u32) ?TabRef {
+    for (docs.items) |d| if (!d.closing) {
+        if (tabIndex(d, id)) |j| return .{ .d = d, .j = j };
+    };
+    return null;
+}
+
+fn showing(d: *Doc, id: u32) bool {
+    const ref = pageRef(id) orelse return false;
+    return ref.d == d and ref.j == d.at;
 }
 
 /// Shows tab `j`. The file it had keeps its tab, even an empty untitled
@@ -2216,7 +2261,7 @@ fn newTab(d: *Doc) void {
         top = @max(top, @max(p.num, 1));
     }
     if (blank) pg.number(top + 1);
-    putTab(d, pg, d.at + 1);
+    if (!putTab(d, pg, d.at + 1)) pg.deinit();
 }
 
 /// Files whose tabs closed, the newest last, for Reopen Closed Tab.
@@ -2265,10 +2310,14 @@ fn closeTab(d: *Doc, at: usize) void {
         } else {
             const keep = d.file.id;
             const id = tabPage(d, j).id;
-            switch (askSaveTab(d, j)) {
+            const choice = askSaveTab(d, j);
+            const ref = pageRef(id) orelse return;
+            if (ref.d != d) return;
+            j = ref.j;
+            switch (choice) {
                 1000 => {
                     showTab(d, j);
-                    if (d.at != j or !save(d, false)) return;
+                    if (!showing(d, id) or !save(d, false)) return;
                     showTab(d, tabIndex(d, keep) orelse d.at);
                 },
                 1001 => {},
@@ -2285,7 +2334,10 @@ fn closeTab(d: *Doc, at: usize) void {
 
 /// Asks whether to save the file on show before it goes. False to keep it.
 fn keepOrDrop(d: *Doc) bool {
-    return switch (askSave(d, d.file.name(), 1)) {
+    const id = d.file.id;
+    const choice = askSave(d, d.file.name(), 1);
+    if (!showing(d, id)) return false;
+    return switch (choice) {
         1000 => save(d, false),
         1001 => true,
         else => false,
@@ -2304,8 +2356,10 @@ fn askSaveTab(d: *Doc, j: usize) isize {
     w.menu_a.aim(1, CACurrentMediaTime());
     redrawMenuMark(w);
     defer {
-        w.menu_a.aim(0, CACurrentMediaTime());
-        redrawMenuMark(w);
+        if (std.mem.indexOfScalar(*Win, wins.items, w) != null) {
+            w.menu_a.aim(0, CACurrentMediaTime());
+            redrawMenuMark(w);
+        }
     }
     return askSave(d, pg.name(), 1);
 }
@@ -2350,7 +2404,7 @@ fn split(d: *Doc, down: bool) void {
         return refresh(d);
     };
     if (tabCount(d) > 1) {
-        putTab(e, takeTab(d, d.at).?, 0);
+        _ = putTab(e, takeTab(d, d.at).?, 0);
     } else startPrompt(e, .open);
     focus(e);
 }
@@ -2371,9 +2425,13 @@ fn splitOff(d: *Doc, down: bool, before: bool, dropped: bool) ?*Doc {
     const leaf = nodeOf(w.cards, d) orelse return null;
     if (!roomFor(d, down)) return null;
     const room = if (down) d.fin.y - 3 * gap else d.fin.x - 3 * gap;
-    const e = newPane(w) orelse return null;
     const a = gpa.create(Node) catch return null;
     const b = gpa.create(Node) catch {
+        gpa.destroy(a);
+        return null;
+    };
+    const e = newPane(w) orelse {
+        gpa.destroy(b);
         gpa.destroy(a);
         return null;
     };
@@ -2425,15 +2483,13 @@ fn takeTab(d: *Doc, j: usize) ?Page {
 }
 
 /// Puts `pg` in card `e` as its tab `k` (or last) and shows it. A blank
-/// untitled file on show in `e` makes way for it. A page it can't take keeps
-/// its draft on disk.
-fn putTab(e: *Doc, pg: Page, k: usize) void {
-    if (!park(e)) {
-        var p = pg;
-        return p.deinitKeepDraft();
-    }
+/// untitled file on show in `e` makes way for it. Failure leaves ownership
+/// with the caller. Transfers reserve destination space before extraction.
+fn putTab(e: *Doc, pg: Page, k: usize) bool {
+    if (!park(e)) return false;
     e.at = @min(k, e.pages.items.len);
     install(e, pg);
+    return true;
 }
 
 /// Moves card `d`'s tab `j` to place `k` among its tabs. The other tabs
@@ -2752,11 +2808,17 @@ fn closeCard(d: *Doc) void {
     };
     if (n > 0) {
         if (n == 1) showTab(d, one);
-        switch (askSave(d, d.file.name(), n)) {
+        const id = d.file.id;
+        const choice = askSave(d, d.file.name(), n);
+        if (!showing(d, id)) return;
+        switch (choice) {
             1000 => if (!saveAll(d, false)) return,
             1001 => {},
             else => return,
         }
+        if (pageRef(id)) |ref| {
+            if (ref.d != d) return;
+        } else return;
     }
     for (0..tabCount(d)) |j| noteClosed(tabPage(d, j));
     foldCard(d);
@@ -2825,8 +2887,14 @@ pub fn count() usize {
 /// A new window with one card holding an empty untitled file.
 pub fn newDoc() ?*Doc {
     const leaf = gpa.create(Node) catch return null;
-    const w = newWin(leaf) orelse return null;
-    const d = newPane(w) orelse return null;
+    const w = newWin(leaf) orelse {
+        gpa.destroy(leaf);
+        return null;
+    };
+    const d = newPane(w) orelse {
+        abandonWin(w);
+        return null;
+    };
     leaf.* = .{ .pane = d };
     w.focus = d;
     const fr = defaultFrame();
@@ -2837,6 +2905,16 @@ pub fn newDoc() ?*Doc {
     refresh(d);
     showWin(w.window);
     return d;
+}
+
+/// Unwinds a window before it has a layout or delegate.
+fn abandonWin(w: *Win) void {
+    msg(void, w.link, "invalidate", .{});
+    setWin(w.view, null);
+    if (std.mem.indexOfScalar(*Win, wins.items, w)) |i| _ = wins.orderedRemove(i);
+    gpa.destroy(w.cards);
+    msg(void, w.window, "close", .{});
+    gpa.destroy(w);
 }
 
 /// A new window's size: a share of the main screen's room, so it's neither
@@ -2851,8 +2929,8 @@ fn defaultFrame() Rect {
 /// A window with the layout `leaf` and no card yet. The caller sets the
 /// layout and the focused card, then `finishWin`s it.
 fn newWin(leaf: *Node) ?*Win {
+    wins.ensureUnusedCapacity(gpa, 1) catch return null;
     const w = gpa.create(Win) catch return null;
-    wins.append(gpa, w) catch return null;
 
     const frame = defaultFrame();
     const style: usize = 1 | 2 | 4 | 8 | (1 << 15);
@@ -2894,6 +2972,7 @@ fn newWin(leaf: *Node) ?*Win {
     msg(void, win, "setBackgroundColor:", .{msg(Id, objc.class("NSColor"), "clearColor", .{})});
     setLights(w, if (conf.zen) 0 else 1);
     msg(void, view, "release", .{});
+    wins.appendAssumeCapacity(w);
     return w;
 }
 
@@ -2932,15 +3011,20 @@ fn finishWin(w: *Win) void {
 /// A card for window `w` with an empty untitled file and its own caret.
 /// The caller puts it in the layout.
 fn newPane(w: *Win) ?*Doc {
+    docs.ensureUnusedCapacity(gpa, 1) catch return null;
     const d = gpa.create(Doc) catch return null;
-    d.* = .{ .file = blankPage() orelse return null, .win = w };
+    const pg = blankPage() orelse {
+        gpa.destroy(d);
+        return null;
+    };
+    d.* = .{ .file = pg, .win = w };
     if (conf.focus != .off) d.focus_a.snap(1);
     d.gut.snap(gutCols(d));
-    docs.append(gpa, d) catch return null;
     d.caret = msg(Id, objc.class("CALayer"), "layer", .{});
     msg(void, d.caret, "setCornerRadius:", .{@as(f64, 1)});
     msg(void, d.caret, "setHidden:", .{true});
     msg(void, msg(Id, w.view, "layer", .{}), "addSublayer:", .{d.caret});
+    docs.appendAssumeCapacity(d);
     return d;
 }
 
@@ -3068,13 +3152,19 @@ fn settle(w: *Win, quit: bool) bool {
     // One file: show it so the question names it. More: ask from the focused card.
     const ask = if (n == 1) one.?.d else w.focus;
     if (n == 1) showTab(ask, one.?.j);
-    return switch (askSave(ask, ask.file.name(), n)) {
-        1000 => for (docs.items) |d| {
-            if (d.win == w and !d.closing and !saveAll(d, quit)) break false;
-        } else true,
-        1001 => true,
-        else => false,
+    const ids = gpa.alloc(u32, n) catch return false;
+    defer gpa.free(ids);
+    var at: usize = 0;
+    for (docs.items) |d| if (d.win == w and !d.closing) {
+        for (0..tabCount(d)) |j| if (asks(quit, tabPage(d, j))) {
+            ids[at] = tabPage(d, j).id;
+            at += 1;
+        };
     };
+    const choice = askSave(ask, ask.file.name(), n);
+    if (choice == 1001) return true;
+    if (choice != 1000) return false;
+    return savePages(ids);
 }
 
 fn asks(quit: bool, p: *const Page) bool {
@@ -3083,26 +3173,53 @@ fn asks(quit: bool, p: *const Page) bool {
 
 /// Saves the file on show, then each page `settle` asked about in tab order.
 fn saveAll(d: *Doc, quit: bool) bool {
-    if (asks(quit, &d.file) and !save(d, false)) return false;
-    // A Save As can close other tabs, so look again after each save.
-    while (askingTab(d, quit)) |j| {
-        showTab(d, j);
-        if (d.at != j or !save(d, false)) return false;
+    const ids = gpa.alloc(u32, tabCount(d)) catch return false;
+    defer gpa.free(ids);
+    var n: usize = 0;
+    if (asks(quit, &d.file)) {
+        ids[n] = d.file.id;
+        n += 1;
+    }
+    for (0..tabCount(d)) |j| if (j != d.at and asks(quit, tabPage(d, j))) {
+        ids[n] = tabPage(d, j).id;
+        n += 1;
+    };
+    return savePages(ids[0..n]);
+}
+
+fn savePages(ids: []const u32) bool {
+    for (ids) |id| {
+        // Saving one page may intentionally remove another duplicate.
+        const ref = pageRef(id) orelse continue;
+        showTab(ref.d, ref.j);
+        if (!showing(ref.d, id) or !save(ref.d, false)) return false;
     }
     return true;
 }
 
-fn askingTab(d: *Doc, quit: bool) ?usize {
-    for (0..tabCount(d)) |j| if (asks(quit, tabPage(d, j))) return j;
-    return null;
-}
-
 pub fn settleAll() bool {
-    for (wins.items) |w| if (!settle(w, true)) return false;
+    const windows = gpa.alloc(Id, wins.items.len) catch return false;
+    defer gpa.free(windows);
+    for (wins.items, windows) |w, *window| window.* = msg(Id, w.window, "retain", .{});
+    defer for (windows) |window| msg(void, window, "release", .{});
+    for (windows) |window| {
+        const w = for (wins.items) |candidate| {
+            if (candidate.window == window) break candidate;
+        } else continue;
+        if (!settle(w, true)) return false;
+    }
+    if (zoom_due) zoomWrite(@ptrFromInt(zoom_gen));
+    // A modal callback may have opened a window that has not settled yet.
+    for (wins.items) |w| if (std.mem.indexOfScalar(Id, windows, w.window) == null) return false;
+    if (!saveDrafts()) {
+        alert("Couldn't save drafts.", "Zag couldn't checkpoint every untitled file. Free disk space or restore access to the Drafts folder, then quit again.");
+        return false;
+    }
     return true;
 }
 
 fn save(d: *Doc, as: bool) bool {
+    const id = d.file.id;
     // Save As writes before the doc takes the new path, so a failed write
     // leaves it as it was.
     var fresh: ?[:0]u8 = null;
@@ -3110,7 +3227,7 @@ fn save(d: *Doc, as: bool) bool {
         const p = msg(Id, objc.class("NSSavePanel"), "savePanel", .{});
         msg(void, p, "setNameFieldStringValue:", .{objc.str(d.file.name())});
         if (root) |r| msg(void, p, "setDirectoryURL:", .{msg(Id, objc.class("NSURL"), "fileURLWithPath:", .{objc.str(r)})});
-        if (runModal(p) != 1) return false;
+        if (runModal(p) != 1 or !showing(d, id)) return false;
         const path = objc.utf8(msg(Id, msg(Id, p, "URL", .{}), "path", .{}));
         const z = gpa.dupeSentinel(u8, path, 0) catch return false;
         // Resolve a file that exists before writing, so replacing a symlink
@@ -3126,8 +3243,10 @@ fn save(d: *Doc, as: bool) bool {
         // file is just written again.
         if (!std.meta.eql(@as(?files.Stamp, now), d.file.stamp) and !askOverwrite(d)) return false;
     }
+    if (!showing(d, id)) return false;
     const to = fresh orelse d.file.path.?;
-    if (files.exists(to) and !files.writable(to) and !askReadOnly(to)) {
+    const writable = !files.exists(to) or files.writable(to) or askReadOnly(to);
+    if (!writable or !showing(d, id)) {
         if (fresh) |z| gpa.free(z);
         return false;
     }
@@ -3141,7 +3260,12 @@ fn save(d: *Doc, as: bool) bool {
         const why = std.fmt.bufPrint(&ib, "{s}.\n\n{s}", .{ osError(), to }) catch to;
         var tb: [300]u8 = undefined;
         const title = std.fmt.bufPrint(&tb, "Couldn't save {s}.", .{std.fs.path.basename(to)}) catch "Couldn't save this file.";
-        switch (askAlert(title, why, &.{ "Try Again", "Save As…", "Cancel" })) {
+        const choice = askAlert(title, why, &.{ "Try Again", "Save As…", "Cancel" });
+        if (!showing(d, id)) {
+            if (fresh) |z| gpa.free(z);
+            return false;
+        }
+        switch (choice) {
             1000 => continue,
             1001 => {
                 if (fresh) |z| gpa.free(z);
@@ -3182,7 +3306,15 @@ fn save(d: *Doc, as: bool) bool {
         } else |_| {}
     }
     d.file.ed.buf.markSaved();
-    dropDraft(&d.file.draft);
+    if (d.file.draft) |draft| {
+        const abs = files.absolute(gpa, draft) catch null;
+        defer if (abs) |p| gpa.free(p);
+        // An unresolved path is not safe to unlink after a successful save.
+        if (abs == null or std.mem.eql(u8, abs.?, d.file.path.?)) {
+            gpa.free(draft);
+            d.file.draft = null;
+        } else dropDraft(&d.file.draft);
+    }
     d.file.stamp = files.stamp(d.file.path.?);
     d.file.new_file = false;
     d.file.locked = !files.writable(d.file.path.?);
@@ -3192,6 +3324,7 @@ fn save(d: *Doc, as: bool) bool {
         // Saving the settings file names its problems again, even ones shown before.
         report_key = 0;
         loadSettings();
+        if (!showing(d, id)) return false;
     }
     // A new file shows in the tree when its folder's rows are listed; every
     // file's dot goes away.
@@ -3249,7 +3382,9 @@ fn runOpenPanel(choose_files: bool, multiple: bool) void {
     const urls = msg(Id, p, "URLs", .{});
     for (0..msg(usize, urls, "count", .{})) |i| {
         const path = objc.utf8(msg(Id, msg(Id, urls, "objectAtIndex:", .{i}), "path", .{}));
-        if (choose_files) openFile(path) else return open(path, keyDoc());
+        if (choose_files) {
+            _ = openFile(path);
+        } else return open(path, keyDoc());
     }
 }
 
@@ -3383,12 +3518,11 @@ fn placeOf(p: []const u8) ?Place {
 /// A window is its frame, then its layout, tab-separated: a split is
 /// `|r` or `|d` (side by side or one above the other) and the first
 /// card's share, followed by its two halves; a card is `#n,a,f` (n tabs,
-/// the tab on show, 1 when it has the focus) followed by its n files, an
-/// untitled one as `*` and its draft. Empty untitled tabs aren't kept.
+/// the tab on show, 1 when it has the focus) followed by its n paths.
+/// Path tokens use !1f (file) or !1d (draft), then lowercase hex bytes.
+/// Empty untitled tabs aren't kept; restore also accepts legacy raw paths.
 pub fn saveSession() void {
-    saveDrafts();
     quitting = true;
-    if (zoom_due) zoomWrite(@ptrFromInt(zoom_gen));
     for (docs.items) |d| rememberPlace(&d.file);
     if (places_due) writePlaces(null);
     const out = msg(Id, objc.class("NSMutableArray"), "array", .{});
@@ -3437,8 +3571,8 @@ fn saveLayout(w: *const Win, n: *const Node, out: *std.ArrayList(u8)) !usize {
         for (0..tabCount(d)) |j| {
             const pg = tabPage(d, j);
             if (pg.path) |p| {
-                try out.print(gpa, "\t{s}", .{p});
-            } else if (pg.draft) |p| try out.print(gpa, "\t*{s}", .{p});
+                try saveSessionPath(out, p, false);
+            } else if (pg.draft) |p| try saveSessionPath(out, p, true);
         }
         return kept;
     }
@@ -3448,6 +3582,55 @@ fn saveLayout(w: *const Win, n: *const Node, out: *std.ArrayList(u8)) !usize {
     const m: u32 = @intFromFloat(@round(std.math.clamp(n.share.to, 0, 1) * 1000));
     try out.print(gpa, "\t|{c}{d}.{d:0>3}", .{ @as(u8, if (n.down) 'd' else 'r'), m / 1000, m % 1000 });
     return try saveLayout(w, n.kids[0], out) + try saveLayout(w, n.kids[1], out);
+}
+
+fn saveSessionPath(out: *std.ArrayList(u8), path: []const u8, draft: bool) !void {
+    try out.appendSlice(gpa, if (draft) "\t!1d" else "\t!1f");
+    const hex = "0123456789abcdef";
+    try out.ensureUnusedCapacity(gpa, path.len * 2);
+    for (path) |b| {
+        out.appendAssumeCapacity(hex[b >> 4]);
+        out.appendAssumeCapacity(hex[b & 15]);
+    }
+}
+
+fn sessionPath(token: []const u8) ![:0]u8 {
+    if (!std.mem.startsWith(u8, token, "!1")) {
+        return gpa.dupeSentinel(u8, if (std.mem.startsWith(u8, token, "*")) token[1..] else token, 0);
+    }
+    if (token.len < 3 or (token[2] != 'f' and token[2] != 'd')) return error.BadSessionPath;
+    const hex = token[3..];
+    if (hex.len % 2 != 0) return error.BadSessionPath;
+    const path = try gpa.allocSentinel(u8, hex.len / 2, 0);
+    errdefer gpa.free(path);
+    for (path, 0..) |*b, i| {
+        b.* = std.fmt.parseInt(u8, hex[i * 2 ..][0..2], 16) catch return error.BadSessionPath;
+        if (b.* == 0) return error.BadSessionPath;
+    }
+    return path;
+}
+
+test "session paths round trip delimiters and retain legacy paths" {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    for ([_][]const u8{ "/tmp/a\tb\nc%*!", "/tmp/plain" }) |path| {
+        for ([_]bool{ false, true }) |draft| {
+            out.clearRetainingCapacity();
+            try saveSessionPath(&out, path, draft);
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.items, "\t"));
+            const decoded = try sessionPath(out.items[1..]);
+            defer gpa.free(decoded);
+            try std.testing.expectEqualStrings(path, decoded);
+        }
+    }
+    for ([_][]const u8{ "/tmp/old%09", "*/tmp/old%09" }) |token| {
+        const decoded = try sessionPath(token);
+        defer gpa.free(decoded);
+        try std.testing.expectEqualStrings("/tmp/old%09", decoded);
+    }
+    try std.testing.expectError(error.BadSessionPath, sessionPath("!1d0"));
+    try std.testing.expectError(error.BadSessionPath, sessionPath("!1dxx"));
+    try std.testing.expectError(error.BadSessionPath, sessionPath("!1d00"));
 }
 
 /// The last session's folder, owned by gpa, or null when it's gone or unset.
@@ -3498,17 +3681,17 @@ pub fn restoreSession() bool {
 /// A window from one session line, or none when none of its files are left.
 fn restoreWindow(frame: []const u8, it: *std.mem.SplitIterator(u8, .scalar)) ?*Win {
     const leaf = gpa.create(Node) catch return null;
-    const w = newWin(leaf) orelse return null;
+    const w = newWin(leaf) orelse {
+        gpa.destroy(leaf);
+        return null;
+    };
     var lit: ?*Doc = null;
-    const n = restoreNode(w, it, &lit) orelse {
-        // Nothing of the line is left: the window closes, holding a card for its layout.
-        // Only the delegate is set, so closing tears it down without finishWin
-        // centering it and writing that frame over the saved one.
-        const d = newPane(w) orelse return null;
-        leaf.* = .{ .pane = d };
-        w.focus = d;
-        msg(void, w.window, "setDelegate:", .{w.view});
-        msg(void, w.window, "close", .{});
+    const restored = restoreNode(w, it, &lit) catch {
+        abandonWin(w);
+        return null;
+    };
+    const n = restored orelse {
+        abandonWin(w);
         return null;
     };
     gpa.destroy(leaf);
@@ -3522,13 +3705,15 @@ fn restoreWindow(frame: []const u8, it: *std.mem.SplitIterator(u8, .scalar)) ?*W
 
 /// The cards that `it` describes next, leaving out files that are gone and
 /// cards left with none.
-fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*Node {
+fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) error{OutOfMemory}!?*Node {
     const tok = it.next() orelse return null;
     if (tok.len > 1 and tok[0] == '|') {
-        const a = restoreNode(w, it, lit);
-        const b = restoreNode(w, it, lit);
+        const a = try restoreNode(w, it, lit);
+        errdefer if (a) |node| discardRestore(node);
+        const b = try restoreNode(w, it, lit);
+        errdefer if (b) |node| discardRestore(node);
         if (a == null or b == null) return a orelse b;
-        const n = gpa.create(Node) catch return a;
+        const n = try gpa.create(Node);
         n.* = .{ .down = tok[1] == 'd', .kids = .{ a.?, b.? } };
         n.share.snap(std.math.clamp(settings.number(tok[2..]) orelse 0.5, 0.05, 0.95));
         a.?.up = n;
@@ -3539,7 +3724,9 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
     var head: [3]usize = undefined;
     var nums = std.mem.splitScalar(u8, tok[1..], ',');
     for (&head) |*v| v.* = std.fmt.parseInt(usize, nums.next() orelse "0", 10) catch 0;
-    const d = newPane(w) orelse return null;
+    const n = try gpa.create(Node);
+    errdefer gpa.destroy(n);
+    const d = newPane(w) orelse return error.OutOfMemory;
     // The window's focus is read while installing (the sidebar's scroll to
     // the file): the first card made holds it until `restoreWindow` picks
     // the lit one.
@@ -3550,8 +3737,8 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
     var on: usize = 0;
     for (0..head[0]) |i| {
         const p = it.next() orelse break;
-        const draft = p.len > 0 and p[0] == '*';
-        const saved = gpa.dupeSentinel(u8, if (draft) p[1..] else p, 0) catch continue;
+        const draft = std.mem.startsWith(u8, p, "*") or std.mem.startsWith(u8, p, "!1d");
+        const saved = sessionPath(p) catch continue;
         defer gpa.free(saved);
         // A draft from before the Drafts folder moved is read from its new place.
         var mb: [std.fs.max_path_bytes]u8 = undefined;
@@ -3578,6 +3765,7 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
     const tabs = d.pages.items.len;
     if (tabs == 0) {
         closePane(d);
+        gpa.destroy(n);
         return null;
     }
     // Keep open tabs at the front of the 100 places so parked tabs keep theirs.
@@ -3587,12 +3775,24 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) ?*
     d.file.deinit();
     swapIn(d, on);
     if (head[2] == 1) lit.* = d;
-    const n = gpa.create(Node) catch {
-        closePane(d);
-        return null;
-    };
     n.* = .{ .pane = d };
     return n;
+}
+
+/// Roll back a partially restored tree without deleting any backing drafts.
+fn discardRestore(n: *Node) void {
+    if (n.pane) |d| {
+        for (0..tabCount(d)) |j| {
+            const p = tabPage(d, j);
+            if (p.draft) |path| gpa.free(path);
+            p.draft = null;
+        }
+        closePane(d);
+    } else {
+        discardRestore(n.kids[0]);
+        discardRestore(n.kids[1]);
+    }
+    gpa.destroy(n);
 }
 
 /// Files the session restore left out because they're gone: how many, and
@@ -3628,25 +3828,40 @@ fn movedDraft(p: []const u8, buf: []u8) ?[:0]const u8 {
 
 /// Writes every untitled file that changed since its draft last did. One
 /// that's empty again loses its draft.
-fn saveDrafts() void {
-    for (docs.items) |d| for (0..tabCount(d)) |j| keepDraft(tabPage(d, j));
+fn saveDrafts() bool {
+    var ok = true;
+    for (docs.items) |d| for (0..tabCount(d)) |j| {
+        keepDraft(tabPage(d, j)) catch {
+            ok = false;
+        };
+    };
+    return ok;
 }
 
-fn keepDraft(p: *Page) void {
-    if (p.path != null or p.ed.buf.changes == p.drafted) return;
+fn keepDraft(p: *Page) !void {
+    if (p.path != null or p.drafted == p.ed.buf.changes) return;
     if (p.ed.text().len == 0) {
-        dropDraft(&p.draft);
+        if (p.draft) |path| {
+            if (std.c.unlink(path) != 0 and std.c._errno().* != @intFromEnum(std.c.E.NOENT)) return error.DeleteFailed;
+            gpa.free(path);
+            p.draft = null;
+        }
         p.drafted = p.ed.buf.changes;
         return;
     }
     if (p.draft == null) {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const dir = draftsDir(&buf) orelse return;
+        const dir = draftsDir(&buf) orelse return error.NoDraftDirectory;
         const secs: u64 = @intFromFloat(@max(msg(f64, objc.class("NSDate"), "timeIntervalSinceReferenceDate", .{}), 0));
-        p.draft = std.fmt.allocPrintSentinel(gpa, "{s}/{d}-{d}.txt", .{ dir, secs, newId() }, 0) catch return;
-        files.makeParent(p.draft.?) catch return;
+        const path = try std.fmt.allocPrintSentinel(gpa, "{s}/{d}-{d}.txt", .{ dir, secs, newId() }, 0);
+        errdefer gpa.free(path);
+        try files.makeParent(path);
+        try files.write(path, p.ed.text());
+        p.draft = path;
+    } else {
+        try files.makeParent(p.draft.?);
+        try files.write(p.draft.?, p.ed.text());
     }
-    files.write(p.draft.?, p.ed.text()) catch return;
     p.drafted = p.ed.buf.changes;
 }
 
@@ -3672,7 +3887,7 @@ fn loadDraft(abs: [:0]const u8) ?Page {
         ed.deinit(gpa);
         return null;
     };
-    var pg: Page = .{ .ed = ed, .id = newId(), .draft = own, .drafted = ed.buf.changes, .rise = true };
+    var pg: Page = .{ .ed = ed, .id = newId(), .draft = own, .drafted = ed.buf.changes, .draft_armed = ed.buf.changes, .rise = true };
     _ = pg.rename();
     return pg;
 }
@@ -3725,7 +3940,7 @@ fn recoverDrafts() usize {
             break;
         };
         if (replaceable(d)) {
-            putTab(d, pg, 0);
+            _ = putTab(d, pg, 0);
         } else {
             pg.rise = false;
             d.pages.insert(gpa, @min(d.at + n, d.pages.items.len), pg) catch {
@@ -3769,17 +3984,32 @@ fn draftHeld(abs: []const u8) bool {
 pub fn recheckAll() void {
     if (modal) return;
     recheckSettings();
-    for (docs.items) |d| checkOutside(d);
+    checkFiles(false);
     // The rows and their cached lines stay unless a read folder moved on
     // disk or the open set changed (see `Tree.fresh`).
     if (!tree.fresh()) rebuildTree();
     refreshAll();
 }
 
+/// Modal replies can add, move or close cards. Visit only the original pages.
+fn checkFiles(conf_only: bool) void {
+    if (modal) return;
+    const ids = gpa.alloc(u32, docs.items.len) catch return;
+    defer gpa.free(ids);
+    for (docs.items, ids) |d, *id| id.* = d.file.id;
+    for (ids) |id| {
+        const ref = pageRef(id) orelse continue;
+        if (ref.j != ref.d.at or (conf_only and !isConf(ref.d.file.path))) continue;
+        checkOutside(ref.d);
+    }
+}
+
 /// A clean doc reloads from disk; one with unsaved changes asks first. A
 /// deleted or binary file leaves the text as unsaved changes. A failed read
 /// leaves the old stamp, so the next check retries and Save asks first.
 fn checkOutside(d: *Doc) void {
+    if (modal or d.closing) return;
+    const id = d.file.id;
     for (d.pages.items) |*pg| checkDeleted(pg);
     const p = d.file.path orelse return;
     const now = files.stamp(p);
@@ -3798,27 +4028,30 @@ fn checkOutside(d: *Doc) void {
     }
     const bytes = files.read(gpa, p) catch return;
     defer gpa.free(bytes);
-    if (d.file.ed.buf.dirty() and !askReload(d, bytes)) {
-        d.file.stamp = now;
-        return;
-    }
     if (looksBinary(bytes)) {
-        d.file.stamp = now;
         d.file.ed.buf.markUnsaved();
         toast(d.win, "binary on disk");
         return refresh(d);
     }
-    d.file.ed.reload(gpa, bytes) catch return;
-    // A new first line (a `#!` added outside) can change the language.
-    const lang = langOf(&d.file, p);
-    if (lang != d.file.lang) {
-        d.file.lang = lang;
-        clearSyntax(d);
+    const reload = if (d.file.ed.buf.dirty()) askReload(d, bytes) orelse return else true;
+    const ref = pageRef(id) orelse return;
+    const pg = tabPage(ref.d, ref.j);
+    if (!reload) {
+        pg.stamp = now;
+        return;
     }
-    d.file.stamp = now;
-    d.file.new_file = false;
-    toast(d.win, "reloaded");
-    refresh(d);
+    pg.ed.reload(gpa, bytes) catch return;
+    // Resolve the original page again after the modal callback, not its old slot.
+    const lang = langOf(pg, pg.path orelse return);
+    if (lang != pg.lang) {
+        pg.lang = lang;
+        pg.states.clearRetainingCapacity();
+        if (ref.j == ref.d.at) clearSyntax(ref.d);
+    }
+    pg.stamp = now;
+    pg.new_file = false;
+    toast(ref.d.win, "reloaded");
+    refresh(ref.d);
 }
 
 fn looksBinary(bytes: []const u8) bool {
@@ -3840,17 +4073,22 @@ fn changedTitle(d: *Doc, buf: *[300]u8) []const u8 {
 
 /// Asks what to do about a file with unsaved changes that another app
 /// changed, saying which lines differ. Show Changes opens the version on
-/// disk beside it and keeps this one. True to reload.
-fn askReload(d: *Doc, disk: []const u8) bool {
+/// disk beside it and keeps this one. True to reload, null on a failed choice.
+fn askReload(d: *Doc, disk: []const u8) ?bool {
     // A Dev build never puts an alert in front of Harsha: it keeps its copy.
     if (background) return false;
+    const id = d.file.id;
     msg(void, d.win.window, "makeKeyAndOrderFront:", .{@as(Id, null)});
     var buf: [300]u8 = undefined;
     var ib: [300]u8 = undefined;
     const info = diffSummary(&ib, d.file.ed.text(), disk);
     switch (askAlert(changedTitle(d, &buf), info, &.{ "Keep Mine", "Reload", "Show Changes" })) {
         1001 => return true,
-        1002 => showDiskCopy(d, disk),
+        1002 => {
+            const ref = pageRef(id) orelse return null;
+            showTab(ref.d, ref.j);
+            if (!showing(ref.d, id) or !showDiskCopy(ref.d, disk)) return null;
+        },
         else => {},
     }
     return false;
@@ -3894,15 +4132,27 @@ fn diffSummary(buf: []u8, mine: []const u8, disk: []const u8) []const u8 {
 
 /// The version on disk of `d`'s file, as an untitled tab in a card split off
 /// to its right (or a tab beside it when there's no room), to compare.
-fn showDiskCopy(d: *Doc, disk: []const u8) void {
-    var ed = Editor.init(gpa, disk) catch return;
+fn showDiskCopy(d: *Doc, disk: []const u8) bool {
+    var ed = Editor.init(gpa, disk) catch return false;
     styleEditor(&ed);
     var pg: Page = .{ .ed = ed, .id = newId(), .lang = d.file.lang, .rise = true };
     const name = d.file.name();
     pg.title_len = (std.fmt.bufPrint(&pg.title, "{s} (on disk)", .{name}) catch copyTrunc(&pg.title, name)).len;
     const to = (if (roomFor(d, false)) splitOff(d, false, false, false) else null) orelse d;
-    putTab(to, pg, if (to == d) d.at + 1 else 0);
+    if (to == d) {
+        // Leave the original selected, including during the pending disk decision.
+        pg.rise = false;
+        d.pages.insert(gpa, d.at, pg) catch {
+            pg.deinit();
+            return false;
+        };
+        objc.later(d.win.view, "saveDrafts:", null, 1);
+        refreshWin(d.win);
+    } else {
+        _ = putTab(to, pg, 0);
+    }
     focus(d);
+    return true;
 }
 
 /// Saving over a file another app changed since Zag read or saved it.
@@ -3980,7 +4230,7 @@ fn loadSettings() void {
     resolveConf();
     const p = conf_path orelse return;
     const old_conf = conf;
-    conf_saved = settings.load(gpa, p);
+    conf_saved = settings.load(gpa, p) catch return;
     // A zoom still waiting to be written wins over the file's older size.
     if (zoom_due) conf_saved.size = zoom_size;
     conf_stamp = files.stamp(p);
@@ -4116,14 +4366,16 @@ fn store(opt: settings.Opt, value: []const u8) void {
     const p = conf_path orelse return;
     const before = files.stamp(p);
     settings.store(gpa, p, &conf_saved, opt, value) catch return alert("Couldn't write the settings file.", p);
+    const after = files.stamp(p);
     loadSettings();
     for (docs.items) |d| if (isConf(d.file.path)) {
         if (d.file.ed.buf.dirty() and std.meta.eql(d.file.stamp, before)) {
-            setConfLine(d, opt, value) catch {};
-            d.file.stamp = files.stamp(p);
+            setConfLine(d, opt, value) catch continue;
+            d.file.stamp = after;
             refresh(d);
-        } else checkOutside(d);
+        }
     };
+    checkFiles(true);
 }
 
 /// Sets the `opt` line in the doc's own text, replacing only the bytes that
@@ -4214,7 +4466,7 @@ pub fn openSettings() void {
     const p = conf_path orelse return;
     settings.ensure(gpa, p, &conf_saved) catch return alert("Couldn't write the settings file.", p);
     loadSettings();
-    openFile(conf_path.?);
+    _ = openFile(conf_path.?);
 }
 
 /// Zag > Reveal Config in Finder.
@@ -4242,7 +4494,7 @@ fn resetSettings() void {
     report_key = 0;
     loadSettings();
     watchConf();
-    for (docs.items) |d| if (isConf(d.file.path)) checkOutside(d);
+    checkFiles(true);
     toastFront("Settings reset to their defaults");
 }
 
@@ -4367,11 +4619,11 @@ fn startPrompt(d: *Doc, m: Mode) void {
                 setRoot(gpa.dupe(u8, std.fs.path.dirname(p) orelse "/") catch return);
                 break :blk root.?;
             };
-            if (quick != null and quick_root != null and std.mem.eql(u8, quick_root.?, r) and quick_hidden == conf.show_hidden) {
+            if (quick_root != null and std.mem.eql(u8, quick_root.?, r) and quick_hidden == conf.show_hidden and (quick != null or quick_busy)) {
                 pickFiles(d, true);
                 bgRescanQuick(r, conf.show_hidden);
             } else {
-                rescanQuick(r, if (was_palette) d else null);
+                rescanQuick(r);
             }
         },
         .command => {
@@ -4405,7 +4657,7 @@ fn caretWord(e: *const Editor) ?[2]usize {
 /// The names quick open or the palette picks from, while it's open.
 fn listing(d: *const Doc) ?[]const []const u8 {
     return switch (d.mode) {
-        .open => if (quick) |*l| l.paths.items else null,
+        .open => if (quick) |*l| l.paths.items else &.{},
         .command => cmd_names.items,
         else => null,
     };
@@ -4415,7 +4667,7 @@ fn pickFiles(d: *Doc, fresh: bool) void {
     const names = listing(d) orelse return;
     // Rows that change under the typing crossfade from the last picks.
     d.prev_picks = d.picks;
-    const live = d.pick_live and !fresh;
+    const live = d.pick_live and !fresh and !(d.mode == .open and quick == null);
     d.prev_n = if (live) d.npicks else 0;
     d.prev_none = live and d.npicks == 0;
     d.pick_t0 = CACurrentMediaTime();
@@ -4531,11 +4783,10 @@ fn addCommands(menu: Id, prefix: []const u8) void {
             std.fmt.allocPrint(a, "{s}: {s}", .{ section, title })
         else
             a.dupe(u8, title)) catch return;
-        cmd_names.append(a, name) catch return;
-        cmds.append(a, .{ .item = msg(Id, it, "retain", .{}), .act = act, .tag = tag, .keys = keysOf(a, it) catch "", .on = isChecked(it), .grey = greyed(it) }) catch {
-            msg(void, it, "release", .{});
-            return;
-        };
+        cmd_names.ensureUnusedCapacity(a, 1) catch return;
+        cmds.ensureUnusedCapacity(a, 1) catch return;
+        cmd_names.appendAssumeCapacity(name);
+        cmds.appendAssumeCapacity(.{ .item = msg(Id, it, "retain", .{}), .act = act, .tag = tag, .keys = keysOf(a, it) catch "", .on = isChecked(it), .grey = greyed(it) });
     }
 }
 
@@ -5368,6 +5619,15 @@ fn rowColOf(d: *const Doc, pos: usize) RowCol {
     return .{ .row = rowOfLine(d, i) + s.k, .col = editor.colOf(l, s.start, s.col, p, s.tw) - s.col + s.ind };
 }
 
+fn rowOf(d: *const Doc, pos: usize) usize {
+    const b = &d.file.ed.buf;
+    const i = b.lineOf(pos);
+    if (!wrapping()) return i;
+    const l = b.line(i);
+    const p = @min(pos - b.lineStart(i), l.len);
+    return rowOfLine(d, i) + segOf(d, l, p).k;
+}
+
 /// Up and down by screen rows, keeping the column.
 fn vmove(d: *Doc, delta: isize, extend: bool) void {
     const e = &d.file.ed;
@@ -5518,7 +5778,7 @@ fn trackFocus(d: *Doc) void {
 }
 
 fn untitledChanged(d: *Doc) void {
-    if (d.file.ed.buf.changes != d.file.draft_armed) {
+    if ((d.file.ed.text().len > 0 or d.file.draft != null) and d.file.ed.buf.changes != d.file.draft_armed) {
         d.file.draft_armed = d.file.ed.buf.changes;
         objc.later(d.win.view, "saveDrafts:", null, 1);
     }
@@ -5680,10 +5940,16 @@ pub const ax = struct {
         return row.dir and tree.isOpen(row.rel);
     }
 
-    /// Where row `i` last drew: pinned under the folder's name, or in the list.
+    /// Where row `i` draws now: pinned under the folder's name, or in the list.
     pub fn rowRect(w: *const Win, i: usize) Rect {
-        for (w.stuck[0..w.nstuck], w.stuck_y[0..w.nstuck]) |k, y| if (k == i) return .{ .y = y, .w = side_w, .h = side_h };
-        return .{ .y = listTop() + f(i) * side_h - w.side_y, .w = side_w, .h = side_h };
+        const now = CACurrentMediaTime();
+        const sy = sideOffset(w, now);
+        var stuck: [max_stuck]usize = undefined;
+        const n = stuckRows(sy, &stuck);
+        for (stuck[0..n], 0..) |k, slot| if (k == i) return .{ .y = pinnedY(k, slot, sy), .w = side_w, .h = side_h };
+        var vs: [2]FoldView = undefined;
+        const vn = foldViews(tree.rows.items, now, &vs);
+        return .{ .y = listTop() + f(i) * side_h - shiftOf(vs[0..vn], i) - sy, .w = side_w, .h = side_h };
     }
 
     pub fn rowUnder(w: *const Win, p: Point) ?usize {
@@ -5779,12 +6045,17 @@ fn clearSyntax(d: *Doc) void {
     for (&d.lex) |*x| x.clear();
 }
 
-/// Line `i`'s kinds for this frame, added to `lex[0]`: copied from the last
-/// frame when it drew the line, else lexed. `walk` steps through the last
-/// frame's lines, as the frame asks for lines in order. Returns the kinds'
-/// offset in `lex[0].kinds`, since a later line's append can move the buffer.
-fn lineKinds(d: *Doc, i: usize, l: []const u8, walk: *usize) ?usize {
+/// Line `i`'s kinds, reused in place when the visible interval is intact,
+/// otherwise copied from the previous cache or lexed. `walk` visits cached
+/// lines in order. Returns an offset in `lex[0].kinds`, since appends can
+/// move the buffer.
+fn lineKinds(d: *Doc, i: usize, l: []const u8, walk: *usize, reuse: bool) ?usize {
     const now = &d.lex[0];
+    if (reuse) {
+        const at = now.lines.items[walk.*].at;
+        walk.* += 1;
+        return at;
+    }
     const old = d.lex[1].lines.items;
     const at = now.kinds.items.len;
     now.lines.append(gpa, .{ .line = i, .at = at }) catch return null;
@@ -6210,9 +6481,20 @@ fn stuckRows(sy: f64, out: *[max_stuck]usize) usize {
     return n;
 }
 
+fn pinnedY(i: usize, slot: usize, sy: f64) f64 {
+    return @min(listTop() + f(slot) * side_h, listTop() + f(tree.end(i)) * side_h - sy - side_h);
+}
+
 /// The pinned folder under `y`, if any.
 fn pinnedAt(w: *const Win, y: f64) ?usize {
-    for (w.stuck[0..w.nstuck], w.stuck_y[0..w.nstuck]) |i, sy| if (y >= sy and y < sy + side_h) return i;
+    if (y < listTop() or y >= msg(Rect, w.view, "bounds", .{}).h - gap) return null;
+    const sy = sideOffset(w, CACurrentMediaTime());
+    var stuck: [max_stuck]usize = undefined;
+    const n = stuckRows(sy, &stuck);
+    for (stuck[0..n], 0..) |i, slot| {
+        const top = pinnedY(i, slot, sy);
+        if (y >= top and y < top + side_h) return i;
+    }
     return null;
 }
 
@@ -6221,13 +6503,18 @@ fn sideRow(w: *const Win, y: f64) ?usize {
     return pinnedAt(w, y) orelse listRow(w, y);
 }
 
+fn sideOffset(w: *const Win, now: f64) f64 {
+    return if (w.side_t.moving(now)) w.side_t.at(now) else w.side_y;
+}
+
 fn listRow(w: *const Win, y: f64) ?usize {
     if (y < listTop() or y >= msg(Rect, w.view, "bounds", .{}).h - gap) return null;
     // Rows after a folding folder have slid up by how far it's shut, so a
     // click lands on the row it shows, in the tree's own numbering.
-    var ly = y - listTop() + w.side_y;
+    const now = CACurrentMediaTime();
+    var ly = y - listTop() + sideOffset(w, now);
     var vs: [2]FoldView = undefined;
-    const vn = foldViews(tree.rows.items, CACurrentMediaTime(), &vs);
+    const vn = foldViews(tree.rows.items, now, &vs);
     if (vn == 2 and vs[0].rest > vs[1].rest) std.mem.swap(FoldView, &vs[0], &vs[1]);
     var cum: f64 = 0;
     for (vs[0..vn]) |v| {
@@ -6371,8 +6658,11 @@ fn startFold(i: usize) void {
 /// folder still folding finds its row again.
 fn finishFold(o: *Fold) void {
     o.closing = false;
-    tree.toggle(gpa, o.rel[0..o.len]);
-    rebuildTree();
+    o.t.snap(0);
+    if (tree.isOpen(o.rel[0..o.len])) {
+        tree.toggle(gpa, o.rel[0..o.len]);
+        rebuildTree();
+    }
     const now = CACurrentMediaTime();
     for (&folds) |*x| if (x != o) refindFold(x, now);
     for (wins.items) |w| hoverNow(w);
@@ -6476,7 +6766,7 @@ fn sideScroll(w: *Win, cur: ?[]const u8, view_h: f64, shut: f64, now: f64) f64 {
     const rows = tree.rows.items;
     // The list glides to a focused file that's out of view, once it's
     // been drawn; on the first draw it's just there.
-    const was = if (w.side_t.moving(now)) w.side_t.at(now) else w.side_y;
+    const was = sideOffset(w, now);
     var glide = false;
     if (w.side_find) {
         w.side_find = false;
@@ -6494,7 +6784,7 @@ fn sideScroll(w: *Win, cur: ?[]const u8, view_h: f64, shut: f64, now: f64) f64 {
         w.side_t.snap(was);
         w.side_t.aim(w.side_y, now);
     } else if (w.side_t.to != w.side_y) w.side_t.snap(w.side_y);
-    return if (w.side_t.moving(now)) w.side_t.at(now) else w.side_y;
+    return sideOffset(w, now);
 }
 
 /// The folder's name pinned at the top, then a row per file and open
@@ -6626,9 +6916,7 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
     while (j > 0) {
         j -= 1;
         const a = w.stuck[j];
-        const e = tree.end(a);
-        const y = @min(lt + f(j) * side_h, lt + f(e) * side_h - sy - side_h);
-        w.stuck_y[j] = y;
+        const y = pinnedY(a, j, sy);
         objc.CGContextClearRect(ctx, .{ .y = y, .w = side_w, .h = side_h });
         fillA(ctx, bg, chromeAlpha(th, dark, w.z.x), 0, y, side_w, side_h);
         if (a == w.pin_row and pin_a > 0.01) sideHoverPill(ctx, th, dark, key, pin_a * fade, y);
@@ -6699,10 +6987,11 @@ fn sideClick(w: *Win, p: Point, flags: usize) void {
     finishFolds(CACurrentMediaTime());
     const i = sideRow(w, p.y) orelse return;
     // A pinned folder scrolls back to where its rows start.
-    if (std.mem.indexOfScalar(usize, w.stuck[0..w.nstuck], i) != null and p.y < listTop() + f(w.nstuck) * side_h) {
-        w.side_t.snap(w.side_y);
+    if (pinnedAt(w, p.y) != null) {
+        const now = CACurrentMediaTime();
+        w.side_t.snap(sideOffset(w, now));
         w.side_y = f(i) * side_h;
-        w.side_t.aim(w.side_y, CACurrentMediaTime());
+        w.side_t.aim(w.side_y, now);
         return redrawSide(w);
     }
     const row = tree.rows.items[i];
@@ -6817,15 +7106,19 @@ fn sideKey(w: *Win, ev: Id) bool {
 /// Glides the sidebar's list so row `i` is in view below the pinned folders.
 fn sideShowRow(w: *Win, i: usize) void {
     const view_h = msg(Rect, w.view, "bounds", .{}).h - listTop() - gap;
-    const y = f(i) * side_h;
-    const pinned = f(w.nstuck) * side_h;
+    const now = CACurrentMediaTime();
+    var vs: [2]FoldView = undefined;
+    const vn = foldViews(tree.rows.items, now, &vs);
+    const y = f(i) * side_h - shiftOf(vs[0..vn], i);
+    var stuck: [max_stuck]usize = undefined;
+    const pinned = f(stuckRows(sideOffset(w, now), &stuck)) * side_h;
     var to = w.side_y;
     if (y < w.side_y + pinned) to = y - pinned else if (y + side_h > w.side_y + view_h) to = y + side_h - view_h;
     to = @max(0, to);
     if (to == w.side_y) return;
-    w.side_t.snap(w.side_y);
+    w.side_t.snap(sideOffset(w, now));
     w.side_y = to;
-    w.side_t.aim(to, CACurrentMediaTime());
+    w.side_t.aim(to, now);
 }
 
 // ---- text lines for the sidebar and status line ----
@@ -7202,6 +7495,7 @@ fn draw(w: *Win, ctx: Id, dirty: Rect) void {
     } else {
         w.hov.park();
         w.sel.park();
+        w.kc.park();
     }
     // In zen it fades out with the lights, on the same spring. With the
     // sidebar on but the window too narrow to show it, the button dims.
@@ -7588,8 +7882,18 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     k.tw = tw;
     k.invis = conf.show_invisibles;
     k.invis_ink = mixRgb(th.bg, th.muted, if (contrast) 0.8 else 0.55);
-    std.mem.swap(Kinds, &d.lex[0], &d.lex[1]);
-    d.lex[0].clear();
+    const reuse_kinds = reuse: {
+        const cached = d.lex[0].lines.items;
+        if (nvis == 0 or cached.len != vis[nvis - 1].line - vis[0].line + 1) break :reuse false;
+        for (cached, 0..) |entry, j| {
+            if (entry.line != vis[0].line + j) break :reuse false;
+        }
+        break :reuse true;
+    };
+    if (!reuse_kinds) {
+        std.mem.swap(Kinds, &d.lex[0], &d.lex[1]);
+        d.lex[0].clear();
+    }
     var walk: usize = 0;
     var lexed: usize = std.math.maxInt(usize);
     var kinds: ?usize = null;
@@ -7634,7 +7938,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             if (pass == 0) {
                 if (v.line != lexed) {
                     lexed = v.line;
-                    kinds = if (d.file.lang != &syntax.plain and v.line < d.file.states.items.len) lineKinds(d, v.line, l, &walk) else null;
+                    kinds = if (d.file.lang != &syntax.plain and v.line < d.file.states.items.len) lineKinds(d, v.line, l, &walk, reuse_kinds) else null;
                 }
                 v.kinds = kinds;
             }
@@ -7802,9 +8106,7 @@ fn drawGutter(d: *Doc, k: *Ink, th: *const Theme, vis: []const VRow, first: usiz
 const WideSnap = struct { touched: usize, touched_end: usize, shifted: bool, shift_at: usize, delta: ?isize };
 
 fn lineWide(l: []const u8, tw: usize) usize {
-    var tabs: usize = 0;
-    while (tabs < l.len and l[tabs] == '\t') tabs += 1;
-    return l.len + tabs * (tw - 1);
+    return editor.colOf(l, 0, 0, l.len, tw);
 }
 
 fn scanWide(d: *Doc, from: usize, to: usize, tw: usize) void {
@@ -7822,21 +8124,22 @@ fn drawBar(d: *Doc, ctx: Id, th: *const Theme, card: Rect, snap: WideSnap, now: 
     const bar_room = textH(d);
     const range = scrollRange(d);
     const bar_span = range[1] - range[0];
-    // How far the text scrolls sideways: the longest line in bytes (leading
-    // tabs at full width), measured again after edits.
+    // How far the text scrolls sideways: the longest line in display columns,
+    // measured again after edits or tab-width changes.
     const textw = card.x + card.w - pad_x - (gap + padL(d));
     if (wrapping()) {
         d.wide_chg = std.math.maxInt(u64);
         d.hmax = 0;
     } else {
         const b = &d.file.ed.buf;
-        if (d.wide_chg != b.changes or d.wide_id != d.file.id) {
-            const tw = d.file.ed.tabWidth();
+        const tw = d.file.ed.tabWidth();
+        if (d.wide_chg != b.changes or d.wide_id != d.file.id or d.wide_tw != tw) {
             const prev_chg = d.wide_chg;
             const same_file = d.wide_id == d.file.id and prev_chg != std.math.maxInt(u64);
             d.wide_chg = b.changes;
             d.wide_id = d.file.id;
-            var full = !same_file;
+            var full = !same_file or d.wide_tw != tw;
+            d.wide_tw = tw;
             if (!full and snap.touched < b.lines()) {
                 const end = @min(snap.touched_end, b.lines());
                 if (!snap.shifted) {
@@ -7926,7 +8229,7 @@ fn drawPanel(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, card
         d.pick_s.snap(d.pick_s.to);
         d.pe.phover = null;
     }
-    if (ph > 0.5 and (d.palette or quick != null)) {
+    if (ph > 0.5) {
         const px = card.x + 6;
         const pw = card.w - 12;
         // Nothing of the page shows beside or just above the inset panel.
@@ -7994,7 +8297,9 @@ fn drawPanel(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, card
             const lone: f64 = if (d.npicks > 0) 1 - swap else if (crossing and !d.prev_none) swap else 1;
             const t = std.math.clamp((now - d.rows_t0) / row_fade, 0, 1);
             const a = t * t * (3 - 2 * t);
-            panelNone(ctx, th, px + 14, top, a * lone, (1 - a) * 2);
+            if (!d.palette and (quick_busy or quick == null)) {
+                _ = rowText(ctx, if (quick_busy) "Scanning files…" else "Couldn't load files", panel_font, mixRgb(th.panel, th.muted, a * lone), px + 14, top + (1 - a) * 2, 1e5);
+            } else panelNone(ctx, th, px + 14, top, a * lone, (1 - a) * 2);
         }
         objc.CGContextRestoreGState(ctx);
     }
@@ -8052,10 +8357,14 @@ fn drawPrompt(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, ka: f64, 
         d.held_mode = d.mode;
         d.held_id = d.file.id;
         d.held_which = fieldIndex(d);
-        d.held.clearRetainingCapacity();
-        d.held.appendSlice(gpa, d.prompt.items) catch {};
-        d.held_with.clearRetainingCapacity();
-        d.held_with.appendSlice(gpa, d.with.items) catch {};
+        if (!std.mem.eql(u8, d.held.items, d.prompt.items)) {
+            d.held.clearRetainingCapacity();
+            d.held.appendSlice(gpa, d.prompt.items) catch {};
+        }
+        if (!std.mem.eql(u8, d.held_with.items, d.with.items)) {
+            d.held_with.clearRetainingCapacity();
+            d.held_with.appendSlice(gpa, d.with.items) catch {};
+        }
     }
     const slide = d.pbar.at(now);
     if (!prompting and slide <= 0.002) {
@@ -8194,6 +8503,10 @@ fn drawPrompt(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, ka: f64, 
 /// Quick open's and the palette's tally: "3 of 120 matches" while typing
 /// narrows the list, else "3 of 4,512 files" or commands.
 fn listTally(d: *const Doc, buf: []u8) []const u8 {
+    if (d.mode == .open and d.npicks == 0) {
+        if (quick_busy) return "scanning files…";
+        if (quick == null) return "couldn't load files";
+    }
     if (d.npicks == 0) return "no matches";
     const all = (listing(d) orelse return "").len;
     var g: [32]u8 = undefined;
@@ -8222,6 +8535,10 @@ fn drawTicks(d: *Doc, ctx: Id, th: *const Theme, card: Rect, q: []const u8, cur:
     h.update(std.mem.asBytes(&d.file.ed.buf.changes));
     h.update(std.mem.asBytes(&rows));
     h.update(std.mem.asBytes(&d.file.id));
+    const tw = d.file.ed.tabWidth();
+    h.update(std.mem.asBytes(&d.file.ed.buf.wraps_cols));
+    h.update(std.mem.asBytes(&tw));
+    h.update(&.{ @as(u8, @intFromBool(wrapping())), @as(u8, @intFromBool(conf.hanging_indent)) });
     const key = h.final();
     if (key != d.ticks_key) {
         d.ticks_key = key;
@@ -8230,7 +8547,7 @@ fn drawTicks(d: *Doc, ctx: Id, th: *const Theme, card: Rect, q: []const u8, cur:
         var from: usize = 0;
         while (d.ticks.items.len < max_ticks) {
             const p = editor.nextMatch(t, q, from, t.len, find_opts) orelse break;
-            const r: u32 = @intCast(rowColOf(d, p).row);
+            const r: u32 = @intCast(rowOf(d, p));
             const n = d.ticks.items.len;
             if (n == 0 or d.ticks.items[n - 1] != r) d.ticks.append(gpa, r) catch break;
             from = p + q.len;
@@ -8243,7 +8560,7 @@ fn drawTicks(d: *Doc, ctx: Id, th: *const Theme, card: Rect, q: []const u8, cur:
     const all = f(@max(rows, 1));
     const ta: f64 = if (contrast) 1 else 0.8;
     for (d.ticks.items) |r| fillA(ctx, th.match, ta * a, x, snapPx(y0 + span * f(r) / all), bar_w, 2);
-    if (cur) |c| fillA(ctx, th.caret, a, x - 1, snapPx(y0 + span * f(rowColOf(d, c[0]).row) / all) - 0.5, bar_w + 2, 3);
+    if (cur) |c| fillA(ctx, th.caret, a, x - 1, snapPx(y0 + span * f(rowOf(d, c[0])) / all) - 0.5, bar_w + 2, 3);
 }
 
 fn drawHint(d: *Doc, ctx: Id, th: *const Theme, k: *Ink, card: Rect, now: f64) void {
@@ -9182,8 +9499,9 @@ fn moveTab(from: *Doc, j: usize, dr: Drop) void {
     const last = tabCount(from) == 1;
     if (last and dr.card == from) return;
     const to = landing(dr) orelse return;
+    if (!replaceable(to)) to.pages.ensureUnusedCapacity(gpa, 1) catch return;
     const pg = takeTab(from, j) orelse return;
-    putTab(to, pg, dr.k);
+    _ = putTab(to, pg, dr.k);
     if (last) foldCard(from);
     focus(to);
     to.ring_t0 = CACurrentMediaTime();
@@ -9203,7 +9521,7 @@ fn placeFile(w: *Win, path: [:0]const u8, dr: Drop) void {
     }
     var pg = loadPage(path) orelse return;
     const to = landing(dr) orelse return pg.deinit();
-    putTab(to, pg, dr.k);
+    if (!putTab(to, pg, dr.k)) return pg.deinit();
     noteRecent(path);
     focus(to);
     to.ring_t0 = CACurrentMediaTime();
@@ -9661,7 +9979,7 @@ fn cardDown(d: *Doc, p: Point, ev: Id) void {
     if (listing(d) != null) {
         const top = d.plist_top;
         if (p.y >= top and p.y < top + f(panelRows(d)) * prow) {
-            d.pick = @min(@as(usize, @intFromFloat(@max((p.y - top + d.plist.to) / prow, 0))), d.npicks -| 1);
+            d.pick = @min(@as(usize, @intFromFloat(@max((p.y - top + d.plist.at(CACurrentMediaTime())) / prow, 0))), d.npicks -| 1);
             // ⌘-click opens the file in a new tab and ⌥-click in a split, like ⌘Return and ⌥Return.
             const flags = msg(usize, ev, "modifierFlags", .{});
             if (d.mode == .open and flags & objc.cmd_key != 0) {
@@ -9899,7 +10217,7 @@ fn hoverAt(w: *Win, p: Point) void {
         // The quick open or palette row under the mouse.
         var row: ?usize = null;
         if (d == over and w.tdrag == null and listing(d) != null and lp.y >= d.plist_top and lp.y < d.plist_top + f(panelRows(d)) * prow) {
-            const r: usize = @intFromFloat(@max((lp.y - d.plist_top + d.plist.to) / prow, 0));
+            const r: usize = @intFromFloat(@max((lp.y - d.plist_top + d.plist.at(CACurrentMediaTime())) / prow, 0));
             if (r < d.npicks) row = r;
         }
         if (row != d.pe.phover) {
@@ -10232,7 +10550,7 @@ fn resetCursorRects(self: Id, _: Sel) callconv(.c) void {
     if (sideShown(w)) {
         _ = msg(isize, self, "addToolTipRect:owner:userData:", .{ Rect{ .x = 8, .y = top_h, .w = side_w - 16, .h = side_h }, self, @as(?*anyopaque, null) });
         if (w.hov.row) |i| if (w.hov.gen == tree_gen) {
-            const y = listTop() + f(i) * side_h - w.side_y;
+            const y = ax.rowRect(w, i).y;
             if (y >= listTop()) _ = msg(isize, self, "addToolTipRect:owner:userData:", .{ Rect{ .y = y, .w = side_w - edge_grab, .h = side_h }, self, @as(?*anyopaque, null) });
         };
     }
@@ -10698,7 +11016,7 @@ fn duplicateTab(d: *Doc, j: usize) void {
     styleEditor(&ed);
     var pg: Page = .{ .ed = ed, .id = newId(), .lang = src.lang, .lang_i = src.lang_i };
     _ = pg.rename();
-    putTab(d, pg, j + 1);
+    if (!putTab(d, pg, j + 1)) pg.deinit();
 }
 
 fn openInNewTab(_: Id, _: Sel, _: Id) callconv(.c) void {
@@ -10769,10 +11087,15 @@ fn sideCreate(folder: bool) void {
     const name = askName(if (folder) "New Folder" else "New File", info, if (folder) "untitled folder" else "untitled.txt", "Create") orelse return;
     var pb: [std.fs.max_path_bytes]u8 = undefined;
     const p = joinPath(&pb, dir, name) orelse return;
-    if (files.exists(p)) return alert(if (folder) "Something with that name is already there." else "A file with that name is already there.", p);
     if (folder) {
-        if (std.c.mkdir(p, 0o755) != 0) return failed("Couldn't make the folder.", p);
-    } else files.write(p, "") catch return failed("Couldn't make the file.", p);
+        if (std.c.mkdir(p, 0o755) != 0) {
+            if (std.c._errno().* == @intFromEnum(std.c.E.EXIST)) return alert("Something with that name is already there.", p);
+            return failed("Couldn't make the folder.", p);
+        }
+    } else files.create(p) catch |err| {
+        if (err == error.PathAlreadyExists) return alert("A file with that name is already there.", p);
+        return failed("Couldn't make the file.", p);
+    };
     sideChanged(p);
     if (!folder and ax.winAlive(w.?)) open(p, w.?.focus);
 }
@@ -10787,8 +11110,10 @@ fn sideRename(_: Id, _: Sel, _: Id) callconv(.c) void {
     if (std.mem.eql(u8, name, base)) return;
     var pb: [std.fs.max_path_bytes]u8 = undefined;
     const p = joinPath(&pb, std.fs.path.dirname(old) orelse "/", name) orelse return;
-    if (files.exists(p)) return alert("Something with that name is already there.", p);
-    if (std.c.rename(old, p) != 0) return failed("Couldn't rename it.", old);
+    files.renameNoReplace(old, p) catch |err| {
+        if (err == error.PathAlreadyExists) return alert("Something with that name is already there.", p);
+        return failed("Couldn't rename it.", old);
+    };
     movedPath(old, p);
     sideChanged(p);
 }
@@ -10844,13 +11169,14 @@ fn sideDuplicate(_: Id, _: Sel, _: Id) callconv(.c) void {
 fn sideTrash(_: Id, _: Sel, _: Id) callconv(.c) void {
     const p = menuFile();
     if (!trash(p)) return failed("Couldn't move it to the Trash.", p);
-    for (docs.items) |d| checkOutside(d);
+    checkFiles(false);
     sideChanged(null);
 }
 
 /// The side menu's Collapse All: every open folder shuts, and the list
 /// crossfades to its top.
 fn collapseAll(_: Id, _: Sel, _: Id) callconv(.c) void {
+    folds = .{ .{}, .{} };
     tree.closeAll(gpa);
     for (wins.items) |w| {
         w.side_y = 0;
@@ -11162,12 +11488,13 @@ fn mergeWindows(d: *Doc) void {
     for (others[0..n]) |w| {
         for (docs.items) |x| if (x.win == w and !x.closing) {
             while (!(tabCount(x) == 1 and isBlank(x))) {
-                var pg = takeTab(x, 0) orelse break;
+                if (!replaceable(d)) d.pages.ensureUnusedCapacity(gpa, 1) catch return;
+                var pg = takeTab(x, 0) orelse return;
                 if (pg.path == null and pg.ed.text().len == 0) {
                     pg.deinit();
                     continue;
                 }
-                putTab(d, pg, tabCount(d));
+                _ = putTab(d, pg, tabCount(d));
             }
         };
         // Only blank cards are left, so closing asks nothing.
@@ -11186,12 +11513,12 @@ fn tabToNewWindow(d: *Doc) void {
 fn tabOut(d: *Doc, j: usize) void {
     const last = tabCount(d) == 1;
     if (last and d.win.cards.pane != null) return;
-    const pg = takeTab(d, j) orelse return;
-    const nd = newDoc() orelse {
-        var p = pg;
-        return p.deinitKeepDraft();
+    const nd = newDoc() orelse return;
+    const pg = takeTab(d, j) orelse {
+        msg(void, nd.win.window, "close", .{});
+        return;
     };
-    putTab(nd, pg, 0);
+    _ = putTab(nd, pg, 0);
     if (last) foldCard(d);
 }
 
@@ -11575,6 +11902,8 @@ pub fn setup() void {
     resolveConf();
     if (conf_path) |p| settings.prepare(gpa, p);
     loadSettings();
+    // A failed first read still needs default fonts, glyphs and theme resources.
+    if (font == null) applySettings(conf);
     panelFonts();
     watchConf();
     const c = objc.ClassBuilder.begin("NSView", "ZeView");
@@ -11616,6 +11945,7 @@ pub fn setup() void {
     c.method("holdRedraw:", @ptrCast(&holdRedraw), "v@:@");
     c.method("dragScroll:", @ptrCast(&dragScroll), "v@:@");
     c.method("saveDrafts:", appAction(saveDrafts, .{}), "v@:@");
+    c.method("checkFiles:", appAction(checkFiles, .{false}), "v@:@");
     c.method("changeFont:", @ptrCast(&changeFont), "v@:@");
     c.method("menuForEvent:", @ptrCast(&menuForEvent), "@@:@");
     c.method("openInNewWindow:", @ptrCast(&openInNewWindow), "v@:@");

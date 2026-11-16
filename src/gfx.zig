@@ -39,20 +39,19 @@ pub const Tween = struct {
     }
 
     pub fn aim(w: *Tween, to: f64, now: f64) void {
+        w.aimOver(to, w.dur, now);
+    }
+
+    pub fn aimOver(w: *Tween, to: f64, dur: f64, now: f64) void {
         if (to == w.to) return;
         const v = w.speed(now);
         w.from = w.at(now);
+        w.dur = dur;
         w.to = to;
         w.t0 = now;
         const ease = 3 * (to - w.from) / w.dur;
         // Slower keeps its speed; faster is capped so it doesn't overshoot.
         w.v0 = if (v == 0 or ((v > 0) == (ease > 0) and @abs(v) > @abs(ease))) ease else v;
-    }
-
-    pub fn aimOver(w: *Tween, to: f64, dur: f64, now: f64) void {
-        if (to == w.to) return;
-        w.dur = dur;
-        w.aim(to, now);
     }
 
     pub fn snap(w: *Tween, to: f64) void {
