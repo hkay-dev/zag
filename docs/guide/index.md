@@ -72,8 +72,10 @@ window's title bar" setting says).
 
 ## Command palette
 
-**View > Command Palette…** (⌘K) lists every command in Zag's menus above the prompt line, the
-View menu's first. **Help > Keyboard Shortcuts** opens the same list. The list is an inset
+**View > Command Palette…** (⌘K) lists Zag's menu commands above the prompt line, the View
+menu's first. It leaves out Open Recent, the Services submenu and the Window menu's list of open
+windows, and a command that two menus share shows once. **Help > Keyboard Shortcuts** opens the
+same list. The list is an inset
 rounded panel with a soft shadow above it, set in the Mac's system font like a menu. Each command
 shows its shortcut on the right, lined up like the Mac's menus, and a checkmark in a column on
 the left when it's on. The picked row has the same soft fill as the sidebar's selection, the row
