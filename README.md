@@ -1,26 +1,26 @@
 # Zag
 
-Zag is a small native text editor for macOS on Apple Silicon, written from scratch in Zig. The 0.1.0 executable is 436,560 bytes (about 426 KiB, signature included), the compressed `.dmg` is 366,969 bytes (about 358 KiB), and Zag links only Apple's system frameworks (`AppKit`, `QuartzCore`, `CoreText`, `CoreGraphics`, `CoreFoundation`) and `libc`.
+Zag is a text editor for Macs with Apple Silicon, written from scratch in Zig. Zag draws text with Core Text, reads and writes files through `libc`, and links only Apple's system frameworks (`AppKit`, `QuartzCore`, `CoreText`, `CoreGraphics`, `CoreFoundation`) and `libc`. The 0.1.0 executable is 436,560 bytes, and the disk image that you download is 366,969 bytes.
 
 ![Zag](docs/assets/zag-hero.png)
 
-## Highlights
+## What Zag does
 
-- **Tiny and instant.** Zag draws straight onto a `CGContext` with `CoreText` glyph runs on a monospace grid and reads and writes files directly through `libc`, with no embedded runtime, webview, or third-party dependencies.
-- **Cards, splits, and tabs.** Split any window side by side (`⌘D`) or top and bottom (`⇧⌘D`), drag tabs to reorder or split cards, and browse open folders in the collapsible file sidebar (`⌘\`).
-- **Animated motion.** Caret glides, spring-driven tab and sidebar highlights, smooth split folds, and theme crossfades animate every layout change.
-- **Quick Open and Command Palette.** Jump to any file in the open folder with fuzzy matching (`⌘P`) or run any menu command from the keyboard (`⌘K`).
-- **Live Markdown Preview.** Render the active Markdown file in a companion preview window (`⇧⌘M`) with synchronized scrolling, lists, code blocks, links, and tables.
-- **Focused writing modes.** Turn on Typewriter Scrolling, Focus dimming (line, sentence, or paragraph), Zen Mode (`⌃⌘Z`), or Late-Night Focus (`⌃⌘N`).
-- **Atomic saves and autosaved drafts.** Zag writes a sibling temporary file, copies permissions, extended attributes, and Finder tags, `fsync`s, and swaps atomically. Zag autosaves untitled tabs to `~/Library/Application Support/zag/Drafts` and restores open windows and tabs on launch.
+- Open files in tabs, and split a window side by side (`⌘D`) or top and bottom (`⇧⌘D`). Drag a tab to move it or to split it into its own card. Press `⌘\` to show the open folder in a sidebar.
+- Press `⌘P` to find a file in the open folder by typing part of its name, or `⌘K` to run any menu command from the keyboard.
+- Press `⇧⌘M` to open a Markdown preview in a second window. The preview scrolls with the source and shows lists, code blocks, links and tables.
+- Turn on typewriter scrolling, focus dimming by line, sentence or paragraph, Zen Mode (`⌃⌘Z`) or Late-Night Focus (`⌃⌘N`) when you write prose.
+- Zag highlights syntax in 25 languages and file formats. [CHANGELOG.md](CHANGELOG.md) lists them.
+- Zag animates the caret, the tab and sidebar highlights, split folds and theme changes.
+- When you save, Zag writes a temporary file next to the original, copies the original's permissions, extended attributes and Finder tags, calls `fsync` and swaps the two files. Zag autosaves untitled tabs to `~/Library/Application Support/zag/Drafts` and reopens your windows and tabs the next time you start it.
 
 ## Install
 
-Requires **macOS 15 (Sequoia) or newer** on **Apple Silicon (`arm64`)**.
+Zag needs macOS 15 (Sequoia) or newer on Apple Silicon.
 
 1. Download `Zag-0.1.0-arm64.dmg` from the [latest release](https://github.com/hkay-dev/zag/releases/latest).
-2. Open the disk image and drag **Zag** into **Applications**.
-3. If macOS Gatekeeper blocks the first launch of an unnotarized build, clear the quarantine attribute once in Terminal and open Zag:
+2. Open the disk image and drag Zag into Applications.
+3. Apple hasn't notarized this build, so macOS may refuse to open it the first time. If that happens, run these two commands once in Terminal.
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Zag.app
@@ -29,23 +29,23 @@ open /Applications/Zag.app
 
 ## Build from source
 
-Requires **Zig 0.17.0+** and Xcode Command Line Tools (with `xcrun actool` from Xcode when compiling `AppIcon.icon` for the `.app` bundle).
+You need Zig 0.17.0 or newer and the Xcode Command Line Tools. `scripts/bundle.sh` compiles the app icon with `xcrun actool`, which comes with the full Xcode.
 
 ```sh
-# Build the stripped ReleaseSmall binary (zig-out/bin/zag)
+# Build the release binary at zig-out/bin/zag
 zig build --release
 
-# Run the editing, buffer, syntax, tree, finder, file, and settings tests
+# Run the tests
 zig build test
 
-# Build Zag.app (zig-out/Zag.app)
+# Build zig-out/Zag.app
 ./scripts/bundle.sh stable
 
-# Build the compressed macOS disk image (zig-out/Zag-0.1.0-arm64.dmg)
+# Build the disk image at zig-out/Zag-0.1.0-arm64.dmg
 ./scripts/dmg.sh
 ```
 
-By default on outside machines, `scripts/bundle.sh` and `scripts/dmg.sh` apply an ad-hoc code signature (`-`). Pass `CODESIGN_IDENTITY` to sign with an Apple Developer ID or local certificate:
+`bundle.sh` and `dmg.sh` sign the app with an ad-hoc signature. To sign it with your own certificate, set `CODESIGN_IDENTITY`.
 
 ```sh
 CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/dmg.sh
@@ -77,16 +77,16 @@ CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/dmg.s
 
 ## Settings and themes
 
-Press `⌘,` to open `~/.config/zag/config.toml` inside Zag. Zag watches the file and applies saved edits right away across every open window.
+Press `⌘,` to open `~/.config/zag/config.toml` in Zag. Zag watches that file and applies each save to every open window.
 
-Built-in light themes include **Paper** (default), **Ayu Light**, **One Light**, **Solarized Light**, and **Gruvbox Light**. Built-in dark themes include **Ink** (default), **Ayu Dark**, **One Dark**, **Solarized Dark**, **Gruvbox Dark**, and **Black** (OLED). Override any individual theme slot with `light.<slot> = "#RRGGBB"` or `dark.<slot> = "#RRGGBB"`.
+The light themes are Paper (the default), Ayu Light, One Light, Solarized Light and Gruvbox Light. The dark themes are Ink (the default), Ayu Dark, One Dark, Solarized Dark, Gruvbox Dark and Black. To change one color in a theme, set `light.<slot> = "#RRGGBB"` or `dark.<slot> = "#RRGGBB"`.
 
-Read the full user manual in [docs/guide/index.md](docs/guide/index.md). Design notes on binary size and animation appear in [docs/decisions/tiny-binary.md](docs/decisions/tiny-binary.md) and [docs/decisions/motion.md](docs/decisions/motion.md).
+The [user guide](docs/guide/index.md) covers every command and setting. [tiny-binary.md](docs/decisions/tiny-binary.md) lists the choices behind the binary's size, and [motion.md](docs/decisions/motion.md) describes how Zag animates.
 
-## Acknowledgments
+## Credits
 
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for acknowledgments and inspirations.
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) credits Zikky and the color palettes that Zag's themes borrow from.
 
 ## License
 
-MIT License. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
