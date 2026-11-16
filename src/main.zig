@@ -158,10 +158,13 @@ pub fn main(init: std.process.Init.Minimal) void {
     args = init.args.toSlice(view.gpa) catch &.{};
     const pool = objc.objc_autoreleasePoolPush();
     const nsapp = app();
-    // A Dev build (bundle id ending in `.dev`) runs in the background: no
-    // Dock tile or menu bar, and it never comes forward.
+    // Dev and Perf builds run in the background: no Dock tile or menu bar,
+    // and neither comes forward.
     const id = msg(Id, msg(Id, objc.class("NSBundle"), "mainBundle", .{}), "bundleIdentifier", .{});
-    if (id != null) view.background = std.mem.endsWith(u8, objc.utf8(id), ".dev");
+    if (id != null) {
+        const bundle_id = objc.utf8(id);
+        view.background = std.mem.endsWith(u8, bundle_id, ".dev") or std.mem.endsWith(u8, bundle_id, ".perf");
+    }
     _ = msg(bool, nsapp, "setActivationPolicy:", .{@as(isize, if (view.background) 1 else 0)});
     // No window tabs, so ⌃Tab reaches Zag's own tabs.
     msg(void, objc.class("NSWindow"), "setAllowsAutomaticWindowTabbing:", .{false});
@@ -183,7 +186,6 @@ pub fn main(init: std.process.Init.Minimal) void {
     d.method(clear_recent, view.appAction(view.clearRecent, .{}), "v@:@");
     view.bindApp(d);
     d.method("applicationDidBecomeActive:", @ptrCast(&becameActive), "v@:@");
-    d.method("applicationWillTerminate:", view.appAction(view.saveSession, .{}), "v@:@");
     d.method("validateMenuItem:", @ptrCast(&view.validate), "c@:@");
     d.method("menuNeedsUpdate:", @ptrCast(&fillRecent), "v@:@");
     d.method("contrastChanged:", @ptrCast(&view.contrastChanged), "v@:@");

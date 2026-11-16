@@ -37,10 +37,14 @@ pub fn build(b: *std.Build) void {
     exe.headerpad_size = 0;
     b.installArtifact(exe);
 
-    const tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/tests.zig"),
-        .target = b.graph.host,
-        .link_libc = true,
-    }) });
+    const tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests.zig"),
+            .target = b.graph.host,
+            .link_libc = true,
+        }),
+        .filters = b.option([]const []const u8, "test-filter", "Run tests whose names contain a filter") orelse &.{},
+    });
+    tests.root_module.linkSystemLibrary("objc", .{});
     b.step("test", "Run the editing tests").dependOn(&b.addRunArtifact(tests).step);
 }

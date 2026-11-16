@@ -53,8 +53,7 @@ var decos: [512]Deco = undefined;
 var deco_max_end: [decos.len]u32 = undefined;
 var deco_n: usize = 0;
 /// Where each heading starts in the rendered text, for `#heading` links.
-var heads: [256]u32 = undefined;
-var head_n: usize = 0;
+var heads: std.ArrayList(usize) = .empty;
 /// A kind per byte of one code line.
 var kinds_buf: [4096]syntax.Kind = undefined;
 
@@ -80,7 +79,8 @@ fn closed(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     text = null;
     fade = false;
     deco_n = 0;
-    head_n = 0;
+    heads.deinit(std.heap.c_allocator);
+    heads = .empty;
 }
 pub fn shownFor(id: u32) bool {
     return window != null and seen_id == id;
@@ -323,11 +323,9 @@ fn note(kind: @FieldType(Deco, "kind"), id: usize, key: usize, start: usize, end
     deco_n += 1;
 }
 /// Colors a fenced code block's text by syntax.zig's lexer for the block's language `hint`.
-fn paint(part: Id, hint: Id, key_color: Id) void {
+fn paint(part: Id, hint: Id, key_color: Id, kind_colors: *const [7]Id) void {
     const lang = syntax.forFence(objc.utf8(hint));
     const bytes = objc.utf8(msg(Id, part, "string", .{}));
-    var kind_colors: [7]Id = undefined;
-    for (0..7) |ki| kind_colors[ki] = color(theme.kinds[ki]);
     var state: syntax.State = .normal;
     // `u` counts UTF-16 units, the attributed string's indexes.
     var u: usize = 0;
@@ -373,7 +371,9 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
     const fg, const link, const muted, const panel = .{ color(theme.fg), color(theme.kinds[@intFromEnum(syntax.Kind.function)]), color(theme.muted), color(theme.panel) };
     const text_out = msg(Id, out, "mutableString", .{});
     deco_n = 0;
-    head_n = 0;
+    heads.clearRetainingCapacity();
+    var kind_colors: [7]Id = undefined;
+    var colored = false;
     var i: usize = 0;
     var previous: usize = 0;
     // The table being rendered and its current cell: identities, where each starts in `out`,
@@ -502,7 +502,13 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
         if (linked) ink = link;
         attr(part, key_font, font(base, inline_intent & 3 | header), all);
         attr(part, key_color, ink, all);
-        if (code_id != 0) paint(part, hint, key_color);
+        if (code_id != 0) {
+            if (!colored) {
+                for (0..7) |ki| kind_colors[ki] = color(theme.kinds[ki]);
+                colored = true;
+            }
+            paint(part, hint, key_color, &kind_colors);
+        }
         if (linked) attr(part, key_line, msg(Id, objc.class("NSNumber"), "numberWithInteger:", .{@as(isize, 1)}), all);
         attr(part, key_style, style(flags), all);
         msg(void, part, "removeAttribute:range:", .{ key_intent, all });
@@ -522,9 +528,12 @@ fn render(_: Id, _: objc.Sel, _: Id) callconv(.c) void {
         if (code_id != 0) note(.code, code_id, flags, start, end);
         if (quote_id != 0) note(.quote, quote_id, flags, start, end);
         if (rule) note(.rule, 0, flags, start, end);
-        if (heading and fresh and head_n < heads.len) {
-            heads[head_n] = @intCast(start);
-            head_n += 1;
+        if (heading and fresh) {
+            heads.append(std.heap.c_allocator, start) catch {
+                msg(void, window, "close", .{});
+                view.alert("Zag couldn't render the preview", "Zag ran out of memory while indexing headings. Close other documents, then reopen Markdown Preview.");
+                return;
+            };
         }
         previous = block;
         i += r.len;
@@ -733,6 +742,29 @@ test "preview context searches include bytes around eligible anchors" {
     try std.testing.expectEqual(@as(?usize, null), contextAnchor("aTARGETz", "TARGET", 1, 2, 4, false));
 }
 
+test "preview offsets count supplementary scalars before a heading" {
+    const value = "p\u{1D11E}\nTarget\n";
+    try std.testing.expectEqual(@as(usize, 4), utf16Offset(value[0..6]));
+    try std.testing.expectEqual(@as(usize, 6), byteOffset(value, 4));
+    // An offset inside a surrogate pair rounds down to the scalar's lead byte.
+    try std.testing.expectEqual(@as(usize, 1), byteOffset(value, 2));
+    try std.testing.expectEqual(@as(usize, 5), byteOffset(value, 3));
+    try std.testing.expectEqual(value.len, byteOffset(value, 100));
+}
+
+test "preview anchors preserve unchanged text and adjacent edits" {
+    const value = "p\u{1D11E}\nTarget\n";
+    try std.testing.expectEqual([3]usize{ 1, 3, 4 }, mapAnchors(value, value, .{ 1, 3, 4 }));
+    try std.testing.expectEqual([3]usize{ 6, 12, 6 }, mapAnchors("leftTARGETright", "left++TARGETright", .{ 4, 10, 4 }));
+    try std.testing.expectEqual([3]usize{ 4, 10, 4 }, mapAnchors("left++TARGETright", "leftTARGETright", .{ 6, 12, 6 }));
+}
+
+test "preview repeated context chooses the nearest occurrence and first tie" {
+    const value = "TARGET----TARGET";
+    try std.testing.expectEqual(@as(?usize, 10), contextAnchor("xxxxxxxxTARGETz", value, 8, 0, value.len, false));
+    try std.testing.expectEqual(@as(?usize, 0), contextAnchor("xxxxxTARGETz", value, 5, 0, value.len, false));
+}
+
 /// The layout fragment holding character `offset`, or null.
 fn fragmentAt(tlm: Id, tcs: Id, offset: usize) Id {
     const place = msg(Id, tcs, "locationFromLocation:withOffset:", .{ msg(Id, msg(Id, tcs, "documentRange", .{}), "location", .{}), @as(isize, @intCast(offset)) });
@@ -819,7 +851,7 @@ fn jump(fragment: Id) bool {
     const want = slug(objc.utf8(msg(Id, fragment, "stringByRemovingPercentEncoding", .{}) orelse fragment), &want_buf);
     const s = msg(Id, msg(Id, text, "textStorage", .{}), "string", .{});
     const len = msg(usize, s, "length", .{});
-    for (heads[0..head_n]) |h| {
+    for (heads.items) |h| {
         if (h >= len) continue;
         const r = msg(Range, s, "paragraphRangeForRange:", .{Range{ .loc = h, .len = 0 }});
         var buf: [256]u8 = undefined;

@@ -675,8 +675,8 @@ The Zag menu also has:
 
 - **Reveal Config in Finder** shows `config.toml` in Finder.
 - **Reload Settings** reads the file again and names any problems again.
-- **Reset Settings to Defaults…** asks first, moves your `config.toml` to the Trash and writes a
-  new one with every setting at its default.
+- **Reset Settings to Defaults…** asks first, copies your `config.toml` to the Trash and replaces
+  the original with a new one with every setting at its default.
 
 Changing a theme, Appearance, Focus, Auto-Close Brackets, the colors, the caret's line band, the
 marks and guides, the word count or what saving does leaves your scroll where it is, even when

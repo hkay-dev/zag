@@ -33,13 +33,16 @@ pub const Files = struct {
 
 /// Lists files under `root`, relative to it. `include_hidden` lists dotfiles
 /// and dot folders such as `.gitignore` and `.github/`, but never `.git`.
+/// Root open/setup failures return OpenDirectoryFailed; root enumeration failures
+/// return ReadDirectoryFailed. Unreadable descendants are skipped. Errno is not
+/// preserved across cleanup; callers consume the error value, not thread errno.
 pub fn scan(gpa: Allocator, root: []const u8, include_hidden: bool) !Files {
     var f: Files = .{ .gpa = gpa, .arena = .init(gpa) };
     errdefer f.deinit();
     const root_z = try gpa.dupeSentinel(u8, root, 0);
     defer gpa.free(root_z);
     const root_fd = c.open(root_z.ptr, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true });
-    if (root_fd < 0) return f;
+    if (root_fd < 0) return error.OpenDirectoryFailed;
     defer _ = c.close(root_fd);
     var pending: std.ArrayList(Pending) = .empty;
     defer {
@@ -56,7 +59,7 @@ pub fn scan(gpa: Allocator, root: []const u8, include_hidden: bool) !Files {
     }
     const home = isHome(root);
     var live: usize = 0;
-    while (pending.items.len > 0 and f.paths.items.len < max_files) {
+    scan_loop: while (pending.items.len > 0 and f.paths.items.len < max_files) {
         const index = pending.items.len - 1;
         const p = pending.items[index];
         const consumed = p.consumed orelse {
@@ -79,26 +82,37 @@ pub fn scan(gpa: Allocator, root: []const u8, include_hidden: bool) !Files {
             }
             const fd = openRelative(root_fd, p.rel);
             if (fd < 0) {
+                if (p.rel.len == 0) return error.OpenDirectoryFailed;
                 gpa.free(pending.pop().?.rel);
                 continue;
             }
             const opened = c.fdopendir(fd) orelse {
                 _ = c.close(fd);
+                if (p.rel.len == 0) return error.OpenDirectoryFailed;
                 gpa.free(pending.pop().?.rel);
                 continue;
             };
+            dir = opened;
+            pending.items[index].dir = opened;
+            live += 1;
             // A spilled frame replays its prefix instead of reusing opaque
             // telldir cookies from a closed DIR stream.
             var skipped: usize = 0;
             while (skipped < consumed) : (skipped += 1) {
-                if (c.readdir(opened) == null) break;
+                c._errno().* = 0;
+                if (c.readdir(opened) == null) {
+                    if (c._errno().* != 0 and p.rel.len == 0) return error.ReadDirectoryFailed;
+                    _ = c.closedir(opened);
+                    pending.items[index].dir = null;
+                    pending.items[index].consumed = null;
+                    live -= 1;
+                    continue :scan_loop;
+                }
             }
-            dir = opened;
-            pending.items[index].dir = opened;
-            live += 1;
         }
         // walk may grow pending, so reacquire the parent by index afterward.
-        const next = try walk(&f, gpa, dir.?, p.rel, consumed, &pending, home and p.rel.len == 0, include_hidden);
+        const next = walk(&f, gpa, dir.?, p.rel, consumed, &pending, home and p.rel.len == 0, include_hidden) catch |err|
+            if (err == error.ReadDirectoryFailed and p.rel.len != 0) null else return err;
         pending.items[index].consumed = next;
         if (next == null) {
             _ = c.closedir(dir.?);
@@ -147,8 +161,13 @@ fn walk(f: *Files, gpa: Allocator, dir: *c.DIR, rel: []const u8, consumed: usize
     var queued: usize = 0;
     // Batch size bounds storage, not traversal: no directory-only branch is
     // dropped to satisfy the file cap or the pending-path budget.
-    while (c.readdir(dir)) |ent| {
-        if (f.paths.items.len >= max_files) return null;
+    while (f.paths.items.len < max_files) {
+        // readdir leaves errno unchanged at EOF, including errors from stat.
+        c._errno().* = 0;
+        const ent = c.readdir(dir) orelse {
+            if (c._errno().* != 0) return error.ReadDirectoryFailed;
+            return null;
+        };
         read += 1;
         const name = ent.name[0..ent.namlen];
         if (name.len == 0 or isAlwaysSkipped(name) or (name[0] == '.' and !include_hidden)) continue;
@@ -308,6 +327,49 @@ pub fn best(paths: []const []const u8, q: []const u8, boosts: []const Boost, out
 
 const t = std.testing;
 
+test "missing and non-directory roots fail instead of publishing empty scans" {
+    var buf: [64]u8 = undefined;
+    const root = try std.fmt.bufPrintSentinel(&buf, "/tmp/ze-finder-missing-{d}", .{c.getpid()}, 0);
+    try t.expect(c.mkdir(root, 0o700) == 0);
+    defer _ = c.rmdir(root);
+    const missing = try dupeRel(t.allocator, root, "missing");
+    defer t.allocator.free(missing);
+    try t.expectError(error.OpenDirectoryFailed, scan(t.allocator, missing, false));
+    const fd = c.open(missing, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true }, @as(c.mode_t, 0o600));
+    try t.expect(fd >= 0);
+    _ = c.close(fd);
+    defer _ = c.unlink(missing);
+    try t.expectError(error.OpenDirectoryFailed, scan(t.allocator, missing, false));
+}
+
+test "directory reading clears stale errno at EOF and reports read failure" {
+    var buf: [64]u8 = undefined;
+    const root = try std.fmt.bufPrintSentinel(&buf, "/tmp/ze-finder-reader-{d}", .{c.getpid()}, 0);
+    try t.expect(c.mkdir(root, 0o700) == 0);
+    defer _ = c.rmdir(root);
+    var partial: Files = .{ .gpa = t.allocator, .arena = .init(t.allocator) };
+    defer partial.deinit();
+    var pending: std.ArrayList(Pending) = .empty;
+    defer pending.deinit(t.allocator);
+    for ([_]bool{ false, true }) |fail| {
+        const fd = c.open(root, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true });
+        try t.expect(fd >= 0);
+        const dir = c.fdopendir(fd) orelse {
+            _ = c.close(fd);
+            return error.OpenDirectoryFailed;
+        };
+        defer _ = c.closedir(dir);
+        if (fail) {
+            // No descriptor is opened between this close and closedir.
+            try t.expect(c.close(fd) == 0);
+            try t.expectError(error.ReadDirectoryFailed, walk(&partial, t.allocator, dir, "", 0, &pending, false, false));
+        } else {
+            c._errno().* = @intFromEnum(c.E.NOENT);
+            try t.expect((try walk(&partial, t.allocator, dir, "", 0, &pending, false, false)) == null);
+        }
+    }
+}
+
 test "queued paths reopen components without following symlink ancestors" {
     var buf: [64]u8 = undefined;
     const root = try std.fmt.bufPrintSentinel(&buf, "/tmp/ze-finder-test-{d}", .{c.getpid()}, 0);
@@ -326,6 +388,16 @@ test "queued paths reopen components without following symlink ancestors" {
     defer _ = c.unlinkat(real_fd, "child", c.AT.REMOVEDIR);
     try t.expect(c.symlinkat("real", root_fd, "alias") == 0);
     defer _ = c.unlinkat(root_fd, "alias", 0);
+    const marker_fd = c.openat(real_fd, "marker", .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true }, @as(c.mode_t, 0o600));
+    try t.expect(marker_fd >= 0);
+    _ = c.close(marker_fd);
+    defer _ = c.unlinkat(real_fd, "marker", 0);
+    try t.expect(c.symlinkat("real/marker", root_fd, "file-link") == 0);
+    defer _ = c.unlinkat(root_fd, "file-link", 0);
+    try t.expect(c.symlinkat("missing", root_fd, "dangling") == 0);
+    defer _ = c.unlinkat(root_fd, "dangling", 0);
+    try t.expect(c.symlinkat(".", real_fd, "cycle") == 0);
+    defer _ = c.unlinkat(real_fd, "cycle", 0);
 
     const rel = try dupeRel(t.allocator, "real", "child");
     defer t.allocator.free(rel);
@@ -340,7 +412,14 @@ test "queued paths reopen components without following symlink ancestors" {
 
     var found = try scan(t.allocator, root, false);
     defer found.deinit();
-    try t.expectEqual(@as(usize, 0), found.paths.items.len);
+    try t.expectEqual(@as(usize, 2), found.paths.items.len);
+    for ([_][]const u8{ "real/marker", "file-link" }) |want| {
+        var count: usize = 0;
+        for (found.paths.items) |path| {
+            if (std.mem.eql(u8, want, path)) count += 1;
+        }
+        try t.expectEqual(@as(usize, 1), count);
+    }
 }
 
 test "wide directory-only parents resume bounded batches and visit every child" {
@@ -403,6 +482,68 @@ test "wide directory-only parents resume bounded batches and visit every child" 
             }
         }
         try t.expect(matched);
+    }
+}
+
+test "deep batched directories spill and replay cursors without losing or duplicating files" {
+    const depth = live_cursors + 2;
+    var buf: [64]u8 = undefined;
+    const root = try std.fmt.bufPrintSentinel(&buf, "/tmp/ze-finder-deep-{d}", .{c.getpid()}, 0);
+    try t.expect(c.mkdir(root, 0o700) == 0);
+    defer _ = c.rmdir(root);
+    const flags: c.O = .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true };
+    var dirs: [depth + 1]c.fd_t = undefined;
+    dirs[0] = c.open(root, flags);
+    try t.expect(dirs[0] >= 0);
+    var opened: usize = 1;
+    var name_buf: [64]u8 = undefined;
+    defer {
+        while (opened > 0) {
+            opened -= 1;
+            const fd = dirs[opened];
+            _ = c.unlinkat(fd, "a-before", 0);
+            _ = c.unlinkat(fd, "z-after", 0);
+            for (0..walk_batch) |i| {
+                const name = std.fmt.bufPrintSentinel(&name_buf, "d{d:0>2}", .{i}, 0) catch unreachable;
+                _ = c.unlinkat(fd, name, c.AT.REMOVEDIR);
+            }
+            _ = c.close(fd);
+        }
+    }
+    for (0..depth + 1) |level| {
+        const before = c.openat(dirs[level], "a-before", .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true }, @as(c.mode_t, 0o600));
+        try t.expect(before >= 0);
+        _ = c.close(before);
+        if (level < depth) {
+            // Every ancestor suspends at a full batch, irrespective of readdir
+            // order. A single-child chain would close cursors before descending.
+            for (0..walk_batch) |i| {
+                const name = try std.fmt.bufPrintSentinel(&name_buf, "d{d:0>2}", .{i}, 0);
+                try t.expect(c.mkdirat(dirs[level], name, 0o700) == 0);
+            }
+            dirs[level + 1] = c.openat(dirs[level], "d00", flags);
+            try t.expect(dirs[level + 1] >= 0);
+            opened += 1;
+        }
+        const after = c.openat(dirs[level], "z-after", .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true }, @as(c.mode_t, 0o600));
+        try t.expect(after >= 0);
+        _ = c.close(after);
+    }
+    var found = try scan(t.allocator, root, false);
+    defer found.deinit();
+    try t.expectEqual(@as(usize, 2 * (depth + 1)), found.paths.items.len);
+    var path_buf: [depth * 4 + 16]u8 = undefined;
+    for (0..depth + 1) |level| {
+        for (0..level) |i| @memcpy(path_buf[i * 4 ..][0..4], "d00/");
+        for ([_][]const u8{ "a-before", "z-after" }) |name| {
+            @memcpy(path_buf[level * 4 ..][0..name.len], name);
+            const want = path_buf[0 .. level * 4 + name.len];
+            var count: usize = 0;
+            for (found.paths.items) |path| {
+                if (std.mem.eql(u8, want, path)) count += 1;
+            }
+            try t.expectEqual(@as(usize, 1), count);
+        }
     }
 }
 

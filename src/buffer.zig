@@ -38,7 +38,17 @@ pub const Buffer = struct {
     wraps_cols: usize = 0,
     wraps_from: usize = std.math.maxInt(usize),
 
+    /// Byte and UTF-16 line offsets must fit in u32, including EOF after a newline.
+    const max_bytes: usize = std.math.maxInt(u32);
+
+    fn prospectiveLength(current: usize, removed: usize, added: usize) error{BufferTooLarge}!usize {
+        const result = @addWithOverflow(current - removed, added);
+        if (result[1] != 0 or result[0] > max_bytes) return error.BufferTooLarge;
+        return result[0];
+    }
+
     pub fn init(gpa: Allocator, bytes: []const u8) !Buffer {
+        _ = try prospectiveLength(0, 0, bytes.len);
         return initOwned(gpa, try gpa.dupe(u8, bytes));
     }
 
@@ -46,6 +56,7 @@ pub const Buffer = struct {
     pub fn initOwned(gpa: Allocator, bytes: []u8) !Buffer {
         var b: Buffer = .{ .text = .fromOwnedSlice(bytes) };
         errdefer b.deinit(gpa);
+        _ = try prospectiveLength(0, 0, bytes.len);
         try b.fillStarts(gpa);
         return b;
     }
@@ -135,7 +146,9 @@ pub const Buffer = struct {
 
     /// Replaces `start..end` with `new` and records it for undo. With `join`,
     /// typing or deleting next to the last edit extends it instead.
+    /// Returns BufferTooLarge before allocating or changing state if indexes would overflow.
     pub fn replace(b: *Buffer, gpa: Allocator, start: usize, end: usize, new: []const u8, caret: usize, join: bool) !void {
+        const new_len = try prospectiveLength(b.text.items.len, end - start, new.len);
         if (start == end and new.len == 0) return;
         // Never extend an edit that is the saved state, or undo would step past it.
         if (join and b.undos.items.len > 0 and b.top() != b.saved) {
@@ -143,14 +156,14 @@ pub const Buffer = struct {
             const insert = start == end and last.old.len == 0 and start == last.pos + last.new.len;
             const prepend = new.len == 0 and last.new.len == 0 and end == last.pos;
             const append = new.len == 0 and last.new.len == 0 and start == last.pos;
-            if (!insert and !prepend and !append) return b.record(gpa, start, end, new, caret);
+            if (!insert and !prepend and !append) return b.record(gpa, start, end, new, caret, new_len);
             // Text growth can move a replacement borrowed from this buffer.
             const new_offset: ?usize = if (insert and @intFromPtr(new.ptr) >= @intFromPtr(b.text.items.ptr) and
                 @intFromPtr(new.ptr) < @intFromPtr(b.text.items.ptr) + b.text.items.len)
                 @intFromPtr(new.ptr) - @intFromPtr(b.text.items.ptr)
             else
                 null;
-            const change = try b.prepareSplice(gpa, start, end, new);
+            const change = try b.prepareSplice(gpa, start, end, new, new_len);
             var replacement: []const u8 = "";
             if (insert) {
                 const previous_len = last.new.len;
@@ -168,16 +181,16 @@ pub const Buffer = struct {
             b.redos.clearRetainingCapacity();
             return;
         }
-        try b.record(gpa, start, end, new, caret);
+        try b.record(gpa, start, end, new, caret, new_len);
     }
 
-    fn record(b: *Buffer, gpa: Allocator, start: usize, end: usize, new: []const u8, caret: usize) !void {
+    fn record(b: *Buffer, gpa: Allocator, start: usize, end: usize, new: []const u8, caret: usize, new_len: usize) !void {
         const old = try gpa.dupe(u8, b.text.items[start..end]);
         errdefer gpa.free(old);
         const replacement = try gpa.dupe(u8, new);
         errdefer gpa.free(replacement);
         try b.undos.ensureUnusedCapacity(gpa, 1);
-        const change = try b.prepareSplice(gpa, start, end, replacement);
+        const change = try b.prepareSplice(gpa, start, end, replacement, new_len);
         b.seq += 1;
         b.undos.appendAssumeCapacity(.{
             .pos = start,
@@ -195,8 +208,9 @@ pub const Buffer = struct {
     pub fn undo(b: *Buffer, gpa: Allocator) !?Edit {
         if (b.undos.items.len == 0) return null;
         const e = b.undos.items[b.undos.items.len - 1];
+        const new_len = try prospectiveLength(b.text.items.len, e.new.len, e.old.len);
         try b.redos.ensureUnusedCapacity(gpa, 1);
-        const change = try b.prepareSplice(gpa, e.pos, e.pos + e.new.len, e.old);
+        const change = try b.prepareSplice(gpa, e.pos, e.pos + e.new.len, e.old, new_len);
         _ = b.undos.pop();
         b.redos.appendAssumeCapacity(e);
         b.splice(gpa, e.pos, e.pos + e.new.len, e.old, change);
@@ -206,8 +220,9 @@ pub const Buffer = struct {
     pub fn redo(b: *Buffer, gpa: Allocator) !?Edit {
         if (b.redos.items.len == 0) return null;
         const e = b.redos.items[b.redos.items.len - 1];
+        const new_len = try prospectiveLength(b.text.items.len, e.old.len, e.new.len);
         try b.undos.ensureUnusedCapacity(gpa, 1);
-        const change = try b.prepareSplice(gpa, e.pos, e.pos + e.old.len, e.new);
+        const change = try b.prepareSplice(gpa, e.pos, e.pos + e.old.len, e.new, new_len);
         _ = b.redos.pop();
         b.undos.appendAssumeCapacity(e);
         b.splice(gpa, e.pos, e.pos + e.old.len, e.new, change);
@@ -216,15 +231,15 @@ pub const Buffer = struct {
 
     const Splice = struct { first: usize, last: usize, added: usize };
 
-    /// Reserves authoritative storage without changing any logical state.
-    fn prepareSplice(b: *Buffer, gpa: Allocator, start: usize, end: usize, new: []const u8) !Splice {
+    /// Reserves authoritative storage for a checked byte length without changing logical state.
+    fn prepareSplice(b: *Buffer, gpa: Allocator, start: usize, end: usize, new: []const u8, new_len: usize) !Splice {
         const first = b.lineOf(start);
         const last = b.lineOf(end);
         const added = std.mem.count(u8, new, "\n");
         const line_count = b.lines() - (last - first) + added;
         try b.starts.ensureTotalCapacity(gpa, line_count);
         if (b.wraps.items.len > 0) try b.wraps.ensureTotalCapacity(gpa, line_count);
-        try b.text.ensureTotalCapacity(gpa, b.text.items.len - (end - start) + new.len);
+        try b.text.ensureTotalCapacity(gpa, new_len);
         return .{ .first = first, .last = last, .added = added };
     }
 
@@ -699,4 +714,77 @@ test "joined typing can borrow replacement bytes from the buffer" {
     try t.expectEqualStrings("xxabab", b.text.items);
     _ = try b.undo(t.allocator);
     try t.expectEqualStrings("ab", b.text.items);
+}
+
+test "buffer prospective lengths fit u32 indexes without arithmetic overflow" {
+    const max = Buffer.max_bytes;
+    try t.expectEqual(@as(usize, 0), try Buffer.prospectiveLength(0, 0, 0));
+    try t.expectEqual(max, try Buffer.prospectiveLength(0, 0, max));
+    try t.expectEqual(max, try Buffer.prospectiveLength(max - 1, 0, 1));
+    try t.expectEqual(max, try Buffer.prospectiveLength(max, 1, 1));
+    try t.expectEqual(max, try Buffer.prospectiveLength(max, max, max));
+    try t.expectEqual(max - 1, try Buffer.prospectiveLength(max, 1, 0));
+    try t.expectError(error.BufferTooLarge, Buffer.prospectiveLength(0, 0, max + 1));
+    try t.expectError(error.BufferTooLarge, Buffer.prospectiveLength(max, 0, 1));
+    try t.expectError(error.BufferTooLarge, Buffer.prospectiveLength(1, 0, std.math.maxInt(usize)));
+    try t.expectError(error.BufferTooLarge, Buffer.prospectiveLength(max, 1, std.math.maxInt(usize)));
+}
+
+test "buffer initialization rejects oversized bytes before allocation or access" {
+    var failing = t.FailingAllocator.init(t.allocator, .{ .fail_index = 0 });
+    // Only the length is read: no multi-gigabyte allocation or payload access.
+    const oversized = @as([*]const u8, "x".ptr)[0 .. Buffer.max_bytes + 1];
+    try t.expectError(error.BufferTooLarge, Buffer.init(failing.allocator(), oversized));
+    try t.expect(!failing.has_induced_failure);
+}
+
+test "buffer oversized replacements preserve indexes history caches and dirty state" {
+    for ([_]AtomicPath{ .record, .fallback, .typing }) |path| {
+        for ([_]bool{ false, true }) |caches| {
+            var before = try atomicFixture(path, caches);
+            defer before.deinit(t.allocator);
+            var b = try atomicFixture(path, caches);
+            defer b.deinit(t.allocator);
+            for ([_]usize{ Buffer.max_bytes, Buffer.max_bytes + 1, std.math.maxInt(usize) }) |len| {
+                var failing = t.FailingAllocator.init(t.allocator, .{ .fail_index = 0 });
+                // Borrow the buffer pointer to cover rejection before alias handling.
+                const oversized = b.text.items.ptr[0..len];
+                const end: usize = if (path == .typing) 1 else 2;
+                try t.expectError(error.BufferTooLarge, b.replace(failing.allocator(), 1, end, oversized, 2, path != .record));
+                try t.expect(!failing.has_induced_failure);
+                try expectBufferState(&before, &b);
+            }
+            try atomicOperation(&b, t.allocator, path);
+            _ = try b.undo(t.allocator);
+            _ = try b.redo(t.allocator);
+            try expectStarts(&b);
+        }
+    }
+}
+
+test "buffer oversized history restores reject before allocation or stack transfer" {
+    for ([_]AtomicPath{ .undo, .redo }) |path| {
+        var before = try atomicFixture(path, true);
+        defer before.deinit(t.allocator);
+        var b = try atomicFixture(path, true);
+        defer b.deinit(t.allocator);
+        var failing = t.FailingAllocator.init(t.allocator, .{ .fail_index = 0 });
+        // Valid history cannot exceed the limit. Inject only its payload length
+        // to exercise the guard without allocating or reading oversized bytes.
+        const payload = if (path == .undo)
+            &b.undos.items[b.undos.items.len - 1].old
+        else
+            &b.redos.items[b.redos.items.len - 1].new;
+        const original = payload.*;
+        payload.len = Buffer.max_bytes + 1;
+        const result = if (path == .undo) b.undo(failing.allocator()) else b.redo(failing.allocator());
+        const rejected_len = payload.len;
+        payload.* = original;
+        try t.expectError(error.BufferTooLarge, result);
+        try t.expectEqual(Buffer.max_bytes + 1, rejected_len);
+        try t.expect(!failing.has_induced_failure);
+        try expectBufferState(&before, &b);
+        try atomicOperation(&b, t.allocator, path);
+        try expectStarts(&b);
+    }
 }

@@ -82,8 +82,8 @@ pub const Editor = struct {
     }
 
     pub fn select(e: *Editor, anchor: usize, cur: usize) void {
-        e.anchor = anchor;
-        e.cur = cur;
+        e.anchor = charStart(e.text(), anchor);
+        e.cur = charStart(e.text(), cur);
         e.want = null;
         e.typing = false;
     }
@@ -178,22 +178,23 @@ pub const Editor = struct {
     }
 
     fn delete(e: *Editor, gpa: Allocator, unit: Unit, fwd: bool) !void {
+        var r = e.sel();
         if (!e.hasSel()) {
             const row = e.buf.lineOf(e.cur);
             const edge = if (fwd) e.buf.lineEnd(row) else e.buf.lineStart(row);
             const step: Motion = if (fwd) .right else .left;
-            e.anchor = switch (unit) {
+            const end = switch (unit) {
                 .char => e.target(step),
                 .word => e.target(if (fwd) .word_right else .word_left),
                 .line => if (e.cur != edge) edge else e.target(step),
             };
+            r = .{ @min(e.cur, end), @max(e.cur, end) };
         }
-        try e.cut(gpa, unit == .char);
+        try e.cut(gpa, r, unit == .char);
     }
 
-    /// Deletes the selection.
-    fn cut(e: *Editor, gpa: Allocator, join: bool) !void {
-        const r = e.sel();
+    /// Deletes a range, publishing the caret only after the edit succeeds.
+    fn cut(e: *Editor, gpa: Allocator, r: [2]usize, join: bool) !void {
         if (r[0] == r[1]) return;
         try e.buf.replace(gpa, r[0], r[1], "", e.cur, join and e.typing);
         e.select(r[0], r[0]);
@@ -201,7 +202,7 @@ pub const Editor = struct {
     }
 
     pub fn deleteSelection(e: *Editor, gpa: Allocator) !void {
-        try e.cut(gpa, false);
+        try e.cut(gpa, e.sel(), false);
     }
 
     /// Tab: indents the selected lines, or inserts an indent at the caret.
@@ -503,8 +504,7 @@ pub const Editor = struct {
         const t = e.text();
         if (e.hasSel() or e.cur == 0 or e.cur >= t.len) return false;
         if (closerOf(t[e.cur - 1]) != t[e.cur]) return false;
-        e.select(e.cur + 1, e.cur - 1);
-        try e.cut(gpa, false);
+        try e.cut(gpa, .{ e.cur - 1, e.cur + 1 }, false);
         return true;
     }
 
@@ -512,7 +512,6 @@ pub const Editor = struct {
     pub fn replaceOne(e: *Editor, gpa: Allocator, q: []const u8, with: []const u8, opts: SearchOpts) !bool {
         const s = e.sel();
         if (q.len == 0 or s[1] - s[0] != q.len or !matches(e.text(), s[0], q, opts.sensitive(q), opts.whole_word)) return false;
-        e.typing = false;
         try e.insert(gpa, with);
         return true;
     }
@@ -762,9 +761,10 @@ pub const SearchOpts = struct {
 /// Whether `q` matches `t` at `i`, and with `whole`, also sits on word
 /// boundaries on each side that starts or ends with a word character.
 pub fn matches(t: []const u8, i: usize, q: []const u8, sensitive: bool, whole: bool) bool {
-    if (i + q.len > t.len) return false;
+    if (i > t.len or q.len > t.len - i) return false;
     const sub = t[i .. i + q.len];
     if (!(if (sensitive) std.mem.eql(u8, sub, q) else std.ascii.eqlIgnoreCase(sub, q))) return false;
+    if (charStart(t, i) != i or charStart(t, i + q.len) != i + q.len) return false;
     if (!whole or q.len == 0) return true;
     const z = i + q.len;
     if (class(q[0]) == 0 and i > 0 and class(t[i - 1]) == 0) return false;
@@ -1948,4 +1948,246 @@ test "indentMarks detects tab, two-space, and four-space lines and stops early" 
     try t_.expectEqual(@as(u4, 2), cells("ü", 0, 0, default_tab_width).cp_len);
     try t_.expectEqual(@as(u4, 3), cells("漢", 0, 0, default_tab_width).cp_len);
     try t_.expectEqual(@as(u4, 4), cells("😀", 0, 0, default_tab_width).cp_len);
+}
+
+test "editor regression: malformed find queries never split valid scalars" {
+    const Case = struct { query: []const u8, scalar: []const u8 };
+    for ([_]Case{
+        .{ .query = "\xA2", .scalar = "¢" },
+        .{ .query = "\xC2", .scalar = "¢" },
+        .{ .query = "\x82", .scalar = "€" },
+        .{ .query = "\xE2\x82", .scalar = "€" },
+        .{ .query = "\x9F\x98", .scalar = "😀" },
+        .{ .query = "\xF0\x9F\x98", .scalar = "😀" },
+    }) |c| {
+        const before = try std.mem.concat(gpa_t, u8, &.{ c.query, " ", c.scalar, " ", c.query });
+        defer gpa_t.free(before);
+        const after = try std.mem.concat(gpa_t, u8, &.{ "X ", c.scalar, " X" });
+        defer gpa_t.free(after);
+        const last = before.len - c.query.len;
+        for ([_]SearchOpts.CaseMode{ .smart, .sensitive, .insensitive }) |mode| {
+            for ([_]bool{ false, true }) |whole| {
+                const opts: SearchOpts = .{ .case_mode = mode, .whole_word = whole };
+                try t_.expectEqual(@as(?usize, null), searchWith(c.scalar, c.query, 0, false, opts));
+                try t_.expectEqual(@as(?usize, null), searchWith(c.scalar, c.query, c.scalar.len, true, opts));
+                try t_.expectEqual([2]usize{ 0, 0 }, countMatches(c.scalar, c.query, c.scalar.len, opts));
+                try t_.expectEqual(@as(?usize, last), nextMatch(before, c.query, c.query.len, before.len, opts));
+                try t_.expectEqual(@as(?usize, last), searchWith(before, c.query, c.query.len, false, opts));
+                try t_.expectEqual(@as(?usize, 0), searchWith(before, c.query, last, true, opts));
+                try t_.expectEqual(@as(?usize, 0), searchWith(before, c.query, before.len, false, opts));
+                try t_.expectEqual(@as(?usize, last), searchWith(before, c.query, 0, true, opts));
+                try t_.expectEqual([2]usize{ 1, 2 }, countMatches(before, c.query, last, opts));
+                var e = try Editor.init(gpa_t, before);
+                defer e.deinit(gpa_t);
+                try t_.expect(e.find(c.query, c.query.len, false, opts));
+                try t_.expectEqual([2]usize{ last, before.len }, e.sel());
+                try t_.expect(try e.replaceOne(gpa_t, c.query, "X", opts));
+                try t_.expectEqualStrings(before[0..last], e.text()[0..last]);
+                try t_.expectEqualStrings("X", e.text()[last..]);
+                _ = try e.undo(gpa_t);
+                try t_.expectEqualStrings(before, e.text());
+                _ = try e.redo(gpa_t);
+                try t_.expectEqualStrings(before[0..last], e.text()[0..last]);
+                try t_.expectEqualStrings("X", e.text()[last..]);
+                _ = try e.undo(gpa_t);
+                try t_.expectEqual(@as(usize, 2), try e.replaceAll(gpa_t, c.query, "X", &.{}, opts));
+                try t_.expectEqualStrings(after, e.text());
+                _ = try e.undo(gpa_t);
+                try t_.expectEqualStrings(before, e.text());
+                _ = try e.redo(gpa_t);
+                try t_.expectEqualStrings(after, e.text());
+            }
+        }
+        var valid = try Editor.init(gpa_t, c.scalar);
+        defer valid.deinit(gpa_t);
+        const interior = std.mem.indexOf(u8, c.scalar, c.query).?;
+        // Exercise Replace One's predicate independently of select's normalization.
+        valid.anchor = interior;
+        valid.cur = interior + c.query.len;
+        try t_.expect(!try valid.replaceOne(gpa_t, c.query, "X", .{}));
+        try t_.expectEqual(@as(usize, 0), try valid.replaceAll(gpa_t, c.query, "X", &.{}, .{}));
+        try t_.expectEqualStrings(c.scalar, valid.text());
+        try t_.expectEqual(@as(usize, 0), valid.buf.undos.items.len);
+    }
+}
+
+test "editor regression: splice seams normalize carets without changing history bytes" {
+    const Op = enum { forward, backward, cut, reverse_cut, pair, replace_one, replace_all, insert, replace_byte };
+    for ([_][]const u8{ "¢", "€", "😀" }) |scalar| {
+        for (1..scalar.len) |split| {
+            for ([_]Op{ .forward, .backward, .cut, .reverse_cut, .pair, .replace_one, .replace_all, .insert, .replace_byte }) |op| {
+                const adds_byte = op == .insert or op == .replace_byte;
+                const middle: []const u8 = if (op == .pair) "()" else if (op == .insert) "" else "x";
+                const before = try std.mem.concat(gpa_t, u8, &.{ scalar[0..split], middle, scalar[split + @intFromBool(adds_byte) ..] });
+                defer gpa_t.free(before);
+                var e = try Editor.init(gpa_t, before);
+                defer e.deinit(gpa_t);
+                e.select(split, split);
+                switch (op) {
+                    .forward => try e.deleteForward(gpa_t, .char),
+                    .backward => {
+                        e.select(split + 1, split + 1);
+                        try e.deleteBack(gpa_t, .char);
+                    },
+                    .cut, .reverse_cut => {
+                        e.select(split + @intFromBool(op == .reverse_cut), split + @intFromBool(op == .cut));
+                        try e.deleteSelection(gpa_t);
+                    },
+                    .pair => {
+                        e.select(split + 1, split + 1);
+                        try t_.expect(try e.deletePair(gpa_t));
+                    },
+                    .replace_one, .replace_byte => {
+                        e.select(split, split + 1);
+                        try t_.expect(try e.replaceOne(gpa_t, "x", if (adds_byte) scalar[split .. split + 1] else "", .{}));
+                    },
+                    .replace_all => try t_.expectEqual(@as(usize, 1), try e.replaceAll(gpa_t, "x", "", &.{}, .{})),
+                    .insert => try e.insert(gpa_t, scalar[split .. split + 1]),
+                }
+                const caret: usize = if (adds_byte and split + 1 == scalar.len) scalar.len else 0;
+                try t_.expectEqualStrings(scalar, e.text());
+                try t_.expectEqual([2]usize{ caret, caret }, e.sel());
+                const step = e.buf.undos.items[0];
+                try t_.expectEqual(split, step.pos);
+                try t_.expectEqualStrings(middle, step.old);
+                try t_.expectEqualStrings(if (adds_byte) scalar[split .. split + 1] else "", step.new);
+                _ = try e.undo(gpa_t);
+                try t_.expectEqualStrings(before, e.text());
+                try t_.expectEqual(e.cur, charStart(e.text(), e.cur));
+                try t_.expectEqual(e.anchor, charStart(e.text(), e.anchor));
+                _ = try e.redo(gpa_t);
+                try t_.expectEqualStrings(scalar, e.text());
+                try t_.expectEqual([2]usize{ caret, caret }, e.sel());
+                try e.insert(gpa_t, "z");
+                const typed = try std.mem.concat(gpa_t, u8, &.{ scalar[0..caret], "z", scalar[caret..] });
+                defer gpa_t.free(typed);
+                try t_.expectEqualStrings(typed, e.text());
+                _ = try e.undo(gpa_t);
+                try t_.expectEqualStrings(scalar, e.text());
+                _ = try e.undo(gpa_t);
+                try t_.expectEqualStrings(before, e.text());
+            }
+        }
+    }
+}
+
+test "editor regression: deletion and replacement allocation failures preserve command state" {
+    const Cases = struct {
+        const Op = enum { insert, typing, paired, wrap, pair, back, forward, back_selection, forward_selection, selection, line, one, one_empty, all, all_empty, joined_back, joined_forward, undo, redo };
+
+        fn fixture(op: Op, typing: bool) !Editor {
+            var e = try Editor.init(gpa_t, "() abc\r\nxyz q\r\n");
+            errdefer e.deinit(gpa_t);
+            e.select(3, 3);
+            try e.insert(gpa_t, "q");
+            if (op == .joined_back) {
+                e.select(5, 5);
+                try e.deleteBack(gpa_t, .char);
+            } else if (op == .joined_forward) {
+                e.select(4, 4);
+                try e.deleteForward(gpa_t, .char);
+            }
+            // Retain both a prior undo step and an abandoned redo branch.
+            e.select(e.text().len, e.text().len);
+            try e.insert(gpa_t, "!");
+            _ = try e.undo(gpa_t);
+            switch (op) {
+                .pair => e.select(1, 1),
+                .paired => e.select(2, 2),
+                .selection, .back_selection, .forward_selection, .one, .one_empty, .wrap => e.select(4, 3),
+                else => e.select(4, 4),
+            }
+            e.want = 7;
+            e.typing = typing;
+            inline for (.{ "text", "starts", "undos", "redos" }) |field| {
+                const list = &@field(e.buf, field);
+                list.* = .fromOwnedSlice(try list.toOwnedSlice(gpa_t));
+            }
+            return e;
+        }
+
+        fn apply(e: *Editor, gpa: Allocator, op: Op, unit: Editor.Unit) !void {
+            const replacement = "replacement\nwith\nseveral\nnew\nlines\nand a longer final line";
+            switch (op) {
+                .insert => try e.insert(gpa, replacement),
+                .typing => try e.insert(gpa, "z"),
+                .paired, .wrap => try e.typePaired(gpa, "("),
+                .pair => try t_.expect(try e.deletePair(gpa)),
+                .back, .back_selection, .joined_back => try e.deleteBack(gpa, unit),
+                .forward, .forward_selection, .joined_forward => try e.deleteForward(gpa, unit),
+                .selection => try e.deleteSelection(gpa),
+                .line => try e.deleteLine(gpa),
+                .one, .one_empty => try t_.expect(try e.replaceOne(gpa, "q", if (op == .one) replacement else "", .{})),
+                .all, .all_empty => try t_.expectEqual(@as(usize, 2), try e.replaceAll(gpa, "q", if (op == .all) replacement else "", &.{}, .{})),
+                .undo => _ = try e.undo(gpa),
+                .redo => _ = try e.redo(gpa),
+            }
+        }
+
+        fn expectState(want: *const Editor, got: *const Editor) !void {
+            try t_.expectEqualStrings(want.text(), got.text());
+            inline for (.{ "cur", "anchor", "want", "typing" }) |field| {
+                try t_.expectEqual(@field(want, field), @field(got, field));
+            }
+            try t_.expectEqualSlices(u32, want.buf.starts.items, got.buf.starts.items);
+            inline for (.{ "undos", "redos" }) |field| {
+                const expected = @field(want.buf, field).items;
+                const actual = @field(got.buf, field).items;
+                try t_.expectEqual(expected.len, actual.len);
+                for (expected, actual) |a, b| {
+                    try t_.expectEqual(a.pos, b.pos);
+                    try t_.expectEqualStrings(a.old, b.old);
+                    try t_.expectEqualStrings(a.new, b.new);
+                    try t_.expectEqual(a.before, b.before);
+                    try t_.expectEqual(a.seq, b.seq);
+                }
+            }
+            inline for (.{
+                "seq", "saved", "changes", "touched", "touched_end", "lines_shifted",
+                "shift_at", "line_delta", "words", "wraps_cols", "wraps_from",
+            }) |field| {
+                try t_.expectEqual(@field(want.buf, field), @field(got.buf, field));
+            }
+            try t_.expectEqual(want.buf.dirty(), got.buf.dirty());
+        }
+    };
+    for ([_]Cases.Op{ .insert, .typing, .paired, .wrap, .pair, .back, .forward, .back_selection, .forward_selection, .selection, .line, .one, .one_empty, .all, .all_empty, .joined_back, .joined_forward, .undo, .redo }) |op| {
+        for ([_]Editor.Unit{ .char, .word, .line }) |unit| {
+            if (unit != .char and op != .back and op != .forward) continue;
+            for ([_]bool{ false, true }) |typing| {
+                var failures: usize = 0;
+                var fail_index: usize = 0;
+                while (true) : (fail_index += 1) {
+                    var control = try Cases.fixture(op, typing);
+                    defer control.deinit(gpa_t);
+                    var e = try Cases.fixture(op, typing);
+                    defer e.deinit(gpa_t);
+                    var failing = t_.FailingAllocator.init(gpa_t, .{ .fail_index = fail_index, .resize_fail_index = 0 });
+                    Cases.apply(&e, failing.allocator(), op, unit) catch |err| {
+                        try t_.expectEqual(error.OutOfMemory, err);
+                        try t_.expect(failing.has_induced_failure);
+                        try Cases.expectState(&control, &e);
+                        // A failed selection expansion must not consume the next key,
+                        // and a failed typing reset must not change its undo group.
+                        try control.insert(gpa_t, "z");
+                        try e.insert(gpa_t, "z");
+                        try Cases.expectState(&control, &e);
+                        _ = try control.undo(gpa_t);
+                        _ = try e.undo(gpa_t);
+                        try Cases.expectState(&control, &e);
+                        _ = try control.redo(gpa_t);
+                        _ = try e.redo(gpa_t);
+                        try Cases.expectState(&control, &e);
+                        failures += 1;
+                        continue;
+                    };
+                    try t_.expect(!failing.has_induced_failure);
+                    try Cases.apply(&control, gpa_t, op, unit);
+                    try Cases.expectState(&control, &e);
+                    break;
+                }
+                try t_.expect(failures > 0);
+            }
+        }
+    }
 }

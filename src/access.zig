@@ -526,7 +526,7 @@ fn caretLine(self: Id, _: Sel) callconv(.c) isize {
 
 fn visibleRange(self: Id, _: Sel) callconv(.c) Range {
     const d = docOf(self) orelse return .{};
-    const v = ax.visible(d);
+    const v = ax.visible(d) orelse return .{};
     return toRange(&d.file.ed.buf, v[0], @max(v[0], v[1]));
 }
 
@@ -562,9 +562,9 @@ fn frameForRange(self: Id, _: Sel, r: Range) callconv(.c) Rect {
     const d = docOf(self) orelse return .{};
     const t = d.file.ed.text();
     const b = toBytes(&d.file.ed.buf, r);
-    const a = ax.cell(d, b[0]);
+    const a = ax.cell(d, b[0]) orelse return .{};
     if (b[1] == b[0]) return screen(d.win.view, a);
-    const z = ax.cell(d, editor.prevChar(t, b[1]));
+    const z = ax.cell(d, editor.prevChar(t, b[1])) orelse return .{};
     if (z.y == a.y) return screen(d.win.view, .{ .x = a.x, .y = a.y, .w = @max(z.x + z.w - a.x, a.w), .h = a.h });
     const tr = ax.textRect(d);
     return screen(d.win.view, .{ .x = tr.x, .y = a.y, .w = tr.w, .h = z.y + z.h - a.y });
@@ -577,7 +577,7 @@ fn charRange(d: *Doc, pos: usize) Range {
 /// The character under screen point `p`.
 fn rangeForPosition(self: Id, _: Sel, p: Point) callconv(.c) Range {
     const d = docOf(self) orelse return .{};
-    return charRange(d, ax.posAtPoint(d, fromScreen(d.win.view, p)));
+    return charRange(d, ax.posAtPoint(d, fromScreen(d.win.view, p)) orelse return .{});
 }
 
 /// The whole character that unit `i` falls in.

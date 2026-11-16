@@ -37,6 +37,8 @@ pub const Tree = struct {
     unreadable: bool = false,
     /// The last `rebuild` hit `max_rows`; unread expanded folders may contain more rows.
     truncated: bool = false,
+    /// All required reads and allocations succeeded, including deliberate truncation.
+    complete: bool = false,
 
     pub fn init(gpa: Allocator) Tree {
         return .{ .arena = .init(gpa) };
@@ -110,10 +112,11 @@ pub const Tree = struct {
         t.read_open = t.open.items.len;
         t.unreadable = false;
         t.truncated = false;
+        t.complete = false;
         var path: std.ArrayList(u8) = .empty;
         defer path.deinit(gpa);
         path.appendSlice(gpa, root) catch return;
-        t.list(gpa, &path, root.len + 1, 0) catch {};
+        t.complete = t.list(gpa, &path, root.len + 1, 0) catch return;
     }
 
     /// True when no folder the last `rebuild` read has changed since (its
@@ -121,7 +124,7 @@ pub const Tree = struct {
     /// the rows still match the disk. One stat per read folder, bounded by
     /// the open folders; `rebuild` resets it.
     pub fn fresh(t: *const Tree) bool {
-        if (t.read_open != t.open.items.len) return false;
+        if (!t.complete or t.read_open != t.open.items.len) return false;
         for (t.read.items) |d| {
             const now = files.stamp(d.path);
             if (now == null or d.stamp == null or !std.meta.eql(now.?, d.stamp.?)) return false;
@@ -137,23 +140,24 @@ pub const Tree = struct {
 
     const Entry = struct { name: []const u8, dir: bool };
 
-    fn list(t: *Tree, gpa: Allocator, path: *std.ArrayList(u8), rel: usize, depth: u16) !void {
+    fn list(t: *Tree, gpa: Allocator, path: *std.ArrayList(u8), rel: usize, depth: u16) !bool {
         const remaining = max_rows - t.rows.items.len;
         if (remaining == 0) {
             t.truncated = true;
-            return;
+            return true;
         }
         const a = t.arena.allocator();
         try path.append(gpa, 0);
         const dir = c.opendir(@ptrCast(path.items.ptr));
         path.items.len -= 1;
         const dh = dir orelse {
-            try t.read.append(a, .{ .path = try a.dupeSentinel(u8, path.items, 0), .stamp = null });
             if (depth == 0) t.unreadable = true;
-            return;
+            try t.read.append(a, .{ .path = try a.dupeSentinel(u8, path.items, 0), .stamp = null });
+            return false;
         };
         var entries: std.ArrayList(Entry) = .empty;
         var emitted: usize = 0;
+        var complete = true;
         defer {
             for (entries.items[emitted..]) |e| gpa.free(e.name);
             entries.deinit(gpa);
@@ -163,8 +167,14 @@ pub const Tree = struct {
             const fd = dirfd(dh);
             var st: c.Stat = undefined;
             const stamp: ?files.Stamp = if (c.fstat(fd, &st) == 0) files.stampOf(st) else null;
+            if (stamp == null) complete = false;
             try t.read.append(a, .{ .path = try a.dupeSentinel(u8, path.items, 0), .stamp = stamp });
-            while (c.readdir(dh)) |ent| {
+            while (true) {
+                c._errno().* = 0;
+                const ent = c.readdir(dh) orelse {
+                    if (c._errno().* != 0) complete = false;
+                    break;
+                };
                 const name = ent.name[0..ent.namlen];
                 if (name.len == 0) continue;
                 if (name[0] == '.') {
@@ -176,7 +186,11 @@ pub const Tree = struct {
                     // A link to a folder shows as a folder, and a filesystem
                     // that doesn't report types gets a stat.
                     var est: c.Stat = undefined;
-                    is_dir = c.fstatat(fd, @ptrCast(&ent.name), &est, 0) == 0 and est.mode & c.S.IFMT == c.S.IFDIR;
+                    if (c.fstatat(fd, @ptrCast(&ent.name), &est, 0) == 0) {
+                        is_dir = est.mode & c.S.IFMT == c.S.IFDIR;
+                    } else {
+                        complete = false;
+                    }
                 }
                 if (try retain(&entries, gpa, .{ .name = name, .dir = is_dir }, remaining)) t.truncated = true;
             }
@@ -186,7 +200,7 @@ pub const Tree = struct {
         for (entries.items) |e| {
             if (t.rows.items.len >= max_rows) {
                 t.truncated = true;
-                return;
+                return complete;
             }
             path.shrinkRetainingCapacity(len);
             try path.append(gpa, '/');
@@ -198,11 +212,12 @@ pub const Tree = struct {
             if (e.dir and t.isOpen(r)) {
                 if (t.rows.items.len == max_rows) {
                     t.truncated = true;
-                    return;
+                    return complete;
                 }
-                try t.list(gpa, path, rel, depth + 1);
+                complete = try t.list(gpa, path, rel, depth + 1) and complete;
             }
         }
+        return complete;
     }
 
     /// Retain only the first `cap` entries in a max-heap. Read every entry
@@ -338,7 +353,7 @@ test "folders first, names ignore case, hidden files skipped, open folders list 
     for (made) |rel| {
         const z = try std.fmt.bufPrintSentinel(&p, "{s}/{s}", .{ root, rel }, 0);
         try files.makeParent(z);
-        try files.write(z, "");
+        _ = try files.write(z, "");
     }
     defer for (made ++ [_][]const u8{ "zeta/new.txt", "zeta", "Alpha", "" }) |rel| {
         const z = std.fmt.bufPrintSentinel(&p, "{s}/{s}", .{ root, rel }, 0) catch continue;
@@ -361,7 +376,7 @@ test "folders first, names ignore case, hidden files skipped, open folders list 
     // A read folder that changes makes the rows stale; a new open folder too.
     try t.expect(tr.fresh());
     const z = try std.fmt.bufPrintSentinel(&p, "{s}/zeta/new.txt", .{root}, 0);
-    try files.write(z, "");
+    _ = try files.write(z, "");
     try t.expect(!tr.fresh());
     tr.rebuild(t.allocator, root);
     try t.expect(tr.fresh());
@@ -377,11 +392,122 @@ test "folders first, names ignore case, hidden files skipped, open folders list 
         var path: std.ArrayList(u8) = .empty;
         defer path.deinit(t.allocator);
         try path.appendSlice(t.allocator, root);
-        try capped.list(t.allocator, &path, root.len + 1, 0);
+        capped.read_open = capped.open.items.len;
+        capped.complete = try capped.list(t.allocator, &path, root.len + 1, 0);
+        try t.expect(capped.complete);
+        try t.expect(capped.fresh());
         try t.expect(capped.truncated);
         try t.expectEqual(@as(usize, max_rows), capped.rows.items.len);
         try t.expectEqual(remaining, capped.read.items.len);
         if (remaining > 0) try t.expectEqualStrings("Alpha", capped.rows.items[max_rows - remaining].rel);
         if (remaining == 2) try t.expectEqualStrings("Alpha/y.md", capped.rows.items[max_rows - 1].rel);
     }
+}
+
+test "root entry and child allocation failures remain stale and recover" {
+    const t = std.testing;
+    var buf: [80]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buf, "/tmp/ze-tree-allocation-test-{d}", .{c.getpid()});
+    var p: [128]u8 = undefined;
+    const leaf = try std.fmt.bufPrintSentinel(&p, "{s}/child/leaf", .{root}, 0);
+    try files.makeParent(leaf);
+    _ = try files.write(leaf, "");
+    defer for ([_][]const u8{ "child/leaf", "child", "" }) |rel| {
+        const z = std.fmt.bufPrintSentinel(&p, "{s}/{s}", .{ root, rel }, 0) catch continue;
+        if (c.unlink(z) != 0) _ = c.rmdir(z);
+    };
+
+    var root_failed = false;
+    var entry_failed = false;
+    var child_failed = false;
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        // Disable in-place growth so every allocation failure is reproducible.
+        var failing = t.FailingAllocator.init(t.allocator, .{
+            .fail_index = fail_index,
+            .resize_fail_index = 0,
+        });
+        const gpa = failing.allocator();
+        var tr: Tree = .init(gpa);
+        defer tr.deinit(t.allocator);
+        tr.toggle(t.allocator, "child");
+        try t.expect(!tr.fresh());
+        tr.rebuild(gpa, root);
+        if (!failing.has_induced_failure) {
+            try t.expect(tr.complete);
+            try t.expect(tr.fresh());
+            break;
+        }
+        try t.expect(!tr.complete);
+        try t.expect(!tr.fresh());
+        if (fail_index == 0) {
+            root_failed = true;
+            try t.expectEqual(@as(usize, 0), tr.read.items.len);
+            try t.expectEqual(@as(usize, 0), tr.rows.items.len);
+        }
+        if (tr.read.items.len == 1 and tr.rows.items.len == 0) entry_failed = true;
+        if (tr.read.items.len == 2 and tr.rows.items.len == 1) child_failed = true;
+
+        failing.fail_index = std.math.maxInt(usize);
+        tr.rebuild(gpa, root);
+        try t.expect(tr.complete);
+        try t.expect(tr.fresh());
+        try t.expectEqual(@as(usize, 2), tr.rows.items.len);
+        try t.expectEqualStrings("child", tr.rows.items[0].rel);
+        try t.expectEqualStrings("child/leaf", tr.rows.items[1].rel);
+
+        // A warm successful tree must also lose freshness on the next failure.
+        failing.fail_index = failing.alloc_index;
+        tr.rebuild(gpa, root);
+        try t.expect(!tr.complete);
+        try t.expect(!tr.fresh());
+        failing.fail_index = std.math.maxInt(usize);
+        tr.rebuild(gpa, root);
+        try t.expect(tr.complete);
+        try t.expect(tr.fresh());
+        try t.expectEqual(@as(usize, 2), tr.rows.items.len);
+    }
+    try t.expect(root_failed);
+    try t.expect(entry_failed);
+    try t.expect(child_failed);
+}
+
+test "failed root reads and entry stats remain stale and recover" {
+    const t = std.testing;
+    var buf: [80]u8 = undefined;
+    const root = try std.fmt.bufPrintSentinel(&buf, "/tmp/ze-tree-read-test-{d}", .{c.getpid()}, 0);
+    var tr: Tree = .init(t.allocator);
+    defer tr.deinit(t.allocator);
+    tr.rebuild(t.allocator, root);
+    try t.expect(tr.unreadable);
+    try t.expect(!tr.complete);
+    try t.expect(!tr.fresh());
+
+    try t.expect(c.mkdir(root, 0o700) == 0);
+    defer _ = c.rmdir(root);
+    tr.rebuild(t.allocator, root);
+    try t.expect(!tr.unreadable);
+    try t.expect(tr.complete);
+    try t.expect(tr.fresh());
+    try t.expectEqual(@as(usize, 0), tr.rows.items.len);
+
+    const fd = c.open(root, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true });
+    try t.expect(fd >= 0);
+    defer _ = c.close(fd);
+    try t.expect(c.symlinkat("missing", fd, "link") == 0);
+    defer _ = c.unlinkat(fd, "link", 0);
+    tr.rebuild(t.allocator, root);
+    try t.expect(!tr.complete);
+    try t.expect(!tr.fresh());
+    try t.expectEqual(@as(usize, 1), tr.rows.items.len);
+    try t.expectEqualStrings("link", tr.rows.items[0].rel);
+
+    var p: [128]u8 = undefined;
+    const target = try std.fmt.bufPrintSentinel(&p, "{s}/missing", .{root}, 0);
+    _ = try files.write(target, "");
+    defer _ = c.unlink(target);
+    tr.rebuild(t.allocator, root);
+    try t.expect(tr.complete);
+    try t.expect(tr.fresh());
+    try t.expectEqual(@as(usize, 2), tr.rows.items.len);
 }

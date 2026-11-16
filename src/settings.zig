@@ -785,11 +785,14 @@ pub fn path(gpa: Allocator) ![:0]u8 {
     return std.fmt.allocPrintSentinel(gpa, "{s}/.config/zag/config.toml", .{home}, 0);
 }
 
+/// Parsed settings and the revision of the bytes that produced them.
+pub const Snapshot = struct { value: Settings, stamp: files.Stamp };
+
 /// Reads the file at `p`; failures leave the caller's last settings intact.
-pub fn load(gpa: Allocator, p: [:0]const u8) !Settings {
-    const text = try files.read(gpa, p);
-    defer gpa.free(text);
-    return parse(text);
+pub fn load(gpa: Allocator, p: [:0]const u8) !Snapshot {
+    const snapshot = try files.read(gpa, p);
+    defer gpa.free(snapshot.bytes);
+    return .{ .value = parse(snapshot.bytes), .stamp = snapshot.stamp };
 }
 
 /// Creates the file from `s` when missing.
@@ -798,28 +801,54 @@ pub fn ensure(gpa: Allocator, p: [:0]const u8, s: *const Settings) !void {
     try files.makeParent(p);
     const text = try render(gpa, s);
     defer gpa.free(text);
-    try files.write(p, text);
+    _ = try files.write(p, text);
 }
 
 /// At launch: creates the file and adds the options it lacks. Existing lines
 /// and comments stay as they are; a file that can't be read is left alone.
-pub fn prepare(gpa: Allocator, p: [:0]const u8) void {
-    ensure(gpa, p, &.{}) catch return;
-    const text = files.read(gpa, p) catch return;
-    defer gpa.free(text);
-    const next = (withMissing(gpa, text) catch return) orelse return;
+pub fn prepare(gpa: Allocator, p: [:0]const u8) !void {
+    try ensure(gpa, p, &.{});
+    const snapshot = try files.read(gpa, p);
+    defer gpa.free(snapshot.bytes);
+    const next = (try withMissing(gpa, snapshot.bytes)) orelse return;
     defer gpa.free(next);
-    files.write(p, next) catch {};
+    _ = try files.write(p, next);
 }
 
-/// Rewrites one line of the file, creating it as `ensure` does first if needed.
-pub fn store(gpa: Allocator, p: [:0]const u8, s: *const Settings, opt: Opt, value: []const u8) !void {
-    try ensure(gpa, p, s);
-    const text = try files.read(gpa, p);
+/// The input revision and committed settings, without another pathname read.
+pub const Change = struct { before: ?files.Stamp, after: Snapshot };
+
+/// Rewrites one line, creating a complete file from `s` when missing.
+/// A failure before the atomic write leaves the existing file untouched.
+pub fn store(gpa: Allocator, p: [:0]const u8, s: *const Settings, opt: Opt, value: []const u8) !Change {
+    var before: ?files.Stamp = null;
+    const text = if (files.read(gpa, p)) |snapshot| blk: {
+        before = snapshot.stamp;
+        break :blk snapshot.bytes;
+    } else |err| switch (err) {
+        error.FileNotFound => blk: {
+            try files.makeParent(p);
+            break :blk try render(gpa, s);
+        },
+        else => return err,
+    };
     defer gpa.free(text);
     const next = try setLine(gpa, text, opt, value);
     defer gpa.free(next);
-    try files.write(p, next);
+    const stamp = try files.write(p, next);
+    return .{ .before = before, .after = .{ .value = parse(next), .stamp = stamp } };
+}
+
+/// Archives the old file through `trash`, then atomically installs defaults.
+/// Failure leaves the current config in place and can leave an extra copy
+/// in the Trash. Successful publication returns the writer's receipt;
+/// an uncertain postpublication revision uses its conservative earlier stamp.
+pub fn reset(gpa: Allocator, p: [:0]const u8, trash: *const fn ([]const u8) bool) !Snapshot {
+    const text = try render(gpa, &.{});
+    defer gpa.free(text);
+    try files.makeParent(p);
+    const stamp = try files.writeTrashing(p, text, trash);
+    return .{ .value = .{}, .stamp = stamp };
 }
 
 const t = std.testing;
@@ -1070,4 +1099,205 @@ test "complete settings preparation does not allocate" {
 
 test "settings load reports read failures instead of defaults" {
     try t.expectError(error.NotAFile, load(t.allocator, "/"));
+}
+
+extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
+
+const TestConfig = struct {
+    dir: [24:0]u8 = "/tmp/zag-settings-XXXXXX".*,
+    buf: [std.c.PATH_MAX]u8 = undefined,
+
+    fn init() !TestConfig {
+        var tmp: TestConfig = .{};
+        _ = mkdtemp(&tmp.dir) orelse return error.MakeDirFailed;
+        _ = try std.fmt.bufPrintSentinel(&tmp.buf, "{s}/config.toml", .{tmp.dir}, 0);
+        return tmp;
+    }
+
+    fn path(tmp: *const TestConfig) [:0]const u8 {
+        const len = std.mem.sliceTo(&tmp.buf, 0).len;
+        return tmp.buf[0..len :0];
+    }
+
+    fn deinit(tmp: *const TestConfig) void {
+        _ = std.c.unlink(tmp.path());
+        _ = std.c.rmdir(&tmp.dir);
+    }
+
+    fn expectText(tmp: *const TestConfig, text: []const u8) !void {
+        const snapshot = try files.read(t.allocator, tmp.path());
+        defer t.allocator.free(snapshot.bytes);
+        try t.expectEqualStrings(text, snapshot.bytes);
+    }
+};
+
+test "settings snapshots describe the parsed and committed bytes" {
+    const tmp = try TestConfig.init();
+    defer tmp.deinit();
+    const first = try files.write(tmp.path(), "size = 18\nwrap = false # mine\n");
+    const loaded = try load(t.allocator, tmp.path());
+    try t.expectEqual(@as(f64, 18), loaded.value.size);
+    try t.expectEqualDeep(first, loaded.stamp);
+    const changed = try store(t.allocator, tmp.path(), &loaded.value, .wrap, "true");
+    try t.expectEqualDeep(@as(?files.Stamp, first), changed.before);
+    try t.expect(changed.after.value.wrap);
+    try t.expectEqual(@as(f64, 18), changed.after.value.size);
+    const disk = try load(t.allocator, tmp.path());
+    try t.expectEqualDeep(changed.after.stamp, disk.stamp);
+    try tmp.expectText("size = 18\nwrap = true # mine\n");
+}
+
+test "settings preparation and store report unreadable input" {
+    try t.expectError(error.NotAFile, prepare(t.allocator, "/"));
+    try t.expectError(error.NotAFile, store(t.allocator, "/", &.{}, .wrap, "true"));
+}
+
+test "settings preparation reports failed parent creation" {
+    const tmp = try TestConfig.init();
+    defer tmp.deinit();
+    _ = try files.write(tmp.path(), "original");
+    var buf: [std.c.PATH_MAX]u8 = undefined;
+    const child = try std.fmt.bufPrintSentinel(&buf, "{s}/config.toml", .{tmp.path()}, 0);
+    try t.expectError(error.MakeDirFailed, prepare(t.allocator, child));
+    try tmp.expectText("original");
+}
+
+fn storeAllocationFailure(gpa: Allocator) !void {
+    const tmp = try TestConfig.init();
+    defer tmp.deinit();
+    const original = "size = 18\nwrap = false # mine\n";
+    _ = try files.write(tmp.path(), original);
+    const result = store(gpa, tmp.path(), &.{}, .wrap, "true") catch |err| {
+        try tmp.expectText(original);
+        return err;
+    };
+    try t.expect(result.after.value.wrap);
+    try tmp.expectText("size = 18\nwrap = true # mine\n");
+}
+
+test "settings store allocation failures preserve the current file" {
+    try t.checkAllAllocationFailures(t.allocator, storeAllocationFailure, .{});
+}
+
+fn prepareAllocationFailure(gpa: Allocator) !void {
+    const tmp = try TestConfig.init();
+    defer tmp.deinit();
+    const original = "# mine\nsize = 18\n";
+    _ = try files.write(tmp.path(), original);
+    prepare(gpa, tmp.path()) catch |err| {
+        try tmp.expectText(original);
+        return err;
+    };
+    const snapshot = try files.read(t.allocator, tmp.path());
+    defer t.allocator.free(snapshot.bytes);
+    try t.expect(std.mem.startsWith(u8, snapshot.bytes, original));
+    try t.expect((try withMissing(gpa, snapshot.bytes)) == null);
+}
+
+test "settings preparation allocation failures preserve the current file" {
+    try t.checkAllAllocationFailures(t.allocator, prepareAllocationFailure, .{});
+}
+
+test "settings write failures preserve the current file" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    const tmp = try TestConfig.init();
+    defer tmp.deinit();
+    const original = "size = 18\nwrap = false\n";
+    _ = try files.write(tmp.path(), original);
+    try t.expectEqual(@as(c_int, 0), std.c.chmod(&tmp.dir, 0o500));
+    defer _ = std.c.chmod(&tmp.dir, 0o700);
+    try t.expectError(error.WriteFailed, store(t.allocator, tmp.path(), &.{}, .wrap, "true"));
+    try t.expectError(error.WriteFailed, prepare(t.allocator, tmp.path()));
+    try tmp.expectText(original);
+}
+
+const TestTrash = struct {
+    var destination: [:0]const u8 = "";
+    var block_path: ?[:0]const u8 = null;
+
+    fn move(p: []const u8) bool {
+        var buf: [std.c.PATH_MAX]u8 = undefined;
+        const source = std.fmt.bufPrintSentinel(&buf, "{s}", .{p}, 0) catch return false;
+        if (std.c.rename(source, destination) != 0) return false;
+        if (block_path) |path_to_block| return std.c.chmod(path_to_block, 0) == 0;
+        return true;
+    }
+
+    fn reject(_: []const u8) bool {
+        return false;
+    }
+};
+
+test "settings reset rejects failed archiving without replacing config" {
+    const tmp = try TestConfig.init();
+    defer tmp.deinit();
+    _ = try files.write(tmp.path(), "size = 18\n# mine\n");
+    try t.expectError(error.TrashFailed, reset(t.allocator, tmp.path(), TestTrash.reject));
+    try tmp.expectText("size = 18\n# mine\n");
+}
+
+fn resetAllocationFailure(gpa: Allocator) !void {
+    const tmp = try TestConfig.init();
+    defer tmp.deinit();
+    var buf: [std.c.PATH_MAX]u8 = undefined;
+    const archived = try std.fmt.bufPrintSentinel(&buf, "{s}/trashed.toml", .{tmp.dir}, 0);
+    TestTrash.destination = archived;
+    defer _ = std.c.unlink(archived);
+    const original = "size = 18\n# mine\n";
+    _ = try files.write(tmp.path(), original);
+    const result = reset(gpa, tmp.path(), TestTrash.move) catch |err| {
+        try tmp.expectText(original);
+        try t.expect(!files.exists(archived));
+        return err;
+    };
+    const old = try files.read(t.allocator, archived);
+    defer t.allocator.free(old.bytes);
+    try t.expectEqualStrings(original, old.bytes);
+    try t.expectEqual(default_size, result.value.size);
+    const loaded = try load(t.allocator, tmp.path());
+    try t.expectEqual(default_size, loaded.value.size);
+    try t.expectEqualDeep(result.stamp, loaded.stamp);
+}
+
+test "settings reset archives old bytes and preserves config on allocation failures" {
+    try t.checkAllAllocationFailures(t.allocator, resetAllocationFailure, .{});
+}
+
+test "settings reset replacement failure preserves config and archived bytes" {
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+    const tmp = try TestConfig.init();
+    defer tmp.deinit();
+    var buf: [std.c.PATH_MAX]u8 = undefined;
+    const archived = try std.fmt.bufPrintSentinel(&buf, "{s}/trashed.toml", .{tmp.dir}, 0);
+    TestTrash.destination = archived;
+    defer _ = std.c.unlink(archived);
+    TestTrash.block_path = tmp.path();
+    defer {
+        TestTrash.block_path = null;
+        _ = std.c.chmod(tmp.path(), 0o600);
+    }
+    const original = "size = 18\n# mine\n";
+    _ = try files.write(tmp.path(), original);
+    try t.expectError(error.WriteFailed, reset(t.allocator, tmp.path(), TestTrash.move));
+    try t.expectEqual(@as(c_int, 0), std.c.chmod(tmp.path(), 0o600));
+    try tmp.expectText(original);
+    const old = try files.read(t.allocator, archived);
+    defer t.allocator.free(old.bytes);
+    try t.expectEqualStrings(original, old.bytes);
+}
+
+fn storeMissingAllocationFailure(gpa: Allocator) !void {
+    const tmp = try TestConfig.init();
+    defer tmp.deinit();
+    const result = store(gpa, tmp.path(), &.{ .size = 18 }, .wrap, "true") catch |err| {
+        try t.expect(!files.exists(tmp.path()));
+        return err;
+    };
+    try t.expectEqual(@as(?files.Stamp, null), result.before);
+    try t.expectEqual(@as(f64, 18), result.after.value.size);
+    try t.expect(result.after.value.wrap);
+}
+
+test "settings store creates no partial config on allocation failures" {
+    try t.checkAllAllocationFailures(t.allocator, storeMissingAllocationFailure, .{});
 }

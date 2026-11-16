@@ -60,7 +60,7 @@ These references identify the audit's implementation groups. The parent subseque
 
 | Group | References |
 |---|---|
-| Rendering and motion | zag#render7pth, zag#z0qq, zag#4cam, zag#w58p, zag#x62r, zag#5t9g |
+| Rendering and motion | zag#7pth, zag#z0qq, zag#4cam, zag#w58p, zag#x62r, zag#5t9g |
 | Draft persistence | zag#c325 |
 | Document ownership | zag#avv9 |
 | Session encoding | zag#epnb |
@@ -266,7 +266,7 @@ These findings came from the delivered EditorAudit. The examples describe source
 | Syntax-cache hits copied entire logical lines | `src/view.zig:7591-7592,5786-5800,7637`; invalidation `src/syntax.zig:253-301`. Every redraw swapped/cleared caches and copied cached kinds even when text and the visible logical-line interval were unchanged. A small visible fragment of a large wrapped line could trigger a whole-line copy. | Reuse the current cache when invalidation and interval permit; preserve rebuild fallback and offset-based entries. Runtime benefit remained unmeasured. zag#nqdb; guide `598-616`; zag#x62r. |
 | Prompt draws recopied unchanged snapshots | `src/view.zig:8051-8058,7331`: active draws cleared/appended both field snapshots, although fade-out needed only the retained last contents. | Guard refresh by content equality while retaining outgoing mode/file identity. No new prompt state machine. zag#7yvx, zag#wykz. |
 
-The parent grouped these repairs under zag#render7pth, zag#z0qq, zag#4cam, zag#w58p, zag#x62r and zag#5t9g. The table does not claim those repairs passed verification.
+The parent grouped these repairs under zag#7pth, zag#z0qq, zag#4cam, zag#w58p, zag#x62r and zag#5t9g. The table does not claim those repairs passed verification.
 
 ## Confirmed defects and limits: navigation and discovery
 

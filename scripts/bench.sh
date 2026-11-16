@@ -32,11 +32,18 @@ homedata=${ZE_BENCH_HOME_DATA:-$HOME/.local/share/zig-editor-perf/home}
 # containers), Documents, Development with node_modules, a hidden .cache.
 # Seeded, so every machine and every run gets the same tree.
 make_home() {
-  rm -rf "$homedata"
-  mkdir -p "$homedata"
   python3 - "$homedata" <<'PY'
 import os, random, sys
-root = sys.argv[1]
+root = os.path.normpath(sys.argv[1])
+if os.path.islink(root):
+    sys.exit("bench.sh: refusing symlink fixture root: " + root)
+if os.path.lexists(root):
+    marker = os.path.join(root, ".done")
+    if os.path.isdir(root) and os.path.isfile(marker) and not os.path.islink(marker):
+        sys.exit(0)
+    sys.exit("bench.sh: refusing existing unmarked fixture root (even if empty): " + root)
+# A failed generation leaves its unmarked directory intact for inspection.
+os.makedirs(root)
 rng = random.Random(1105)
 words = ("cache data store index logs tmp session state blob chunk asset image font plugin module config "
          "prefs sync backup thumb media video audio text docs notes draft report mail contact event model "
@@ -86,13 +93,27 @@ case ${1:-} in
   run|session)
     mode=$1 app=$2 out=$3 n=${4:-1}
     files="$data/src/view.zig:$data/src/editor.zig:$data/src/buffer.zig:$data/src/syntax.zig:$data/src/settings.zig"
-    if [ ! -d "$data/src" ]; then
-      mkdir -p "$data"
-      git archive 7132176 src | tar -x -C "$data"
+    if [ "$mode" = run ]; then
+      while [ "$data" != / ] && [ "${data%/}" != "$data" ]; do data=${data%/}; done
+      if [ -L "$data" ]; then
+        echo "bench.sh: refusing symlink fixture root: $data" >&2
+        exit 1
+      fi
+      if [ ! -e "$data" ]; then
+        mkdir -p "$(dirname "$data")"
+        mkdir "$data"
+        git archive 7132176 src | tar -x -C "$data"
+      fi
+      for name in view editor buffer syntax settings; do
+        if [ ! -f "$data/src/$name.zig" ]; then
+          echo "bench.sh: missing or nonregular benchmark input: $data/src/$name.zig" >&2
+          exit 1
+        fi
+      done
+      make_home
     fi
     mkdir -p "$out"
     out=$(cd "$out" && pwd -P)
-    [ "$mode" = run ] && [ ! -e "$homedata/.done" ] && make_home
     i=0
     while [ "$i" -lt "$n" ]; do
       home=$(mktemp -d /tmp/ze-bench-home.XXXXXX)

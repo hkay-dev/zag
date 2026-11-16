@@ -6,4 +6,5 @@ test {
     _ = @import("finder.zig");
     _ = @import("tree.zig");
     _ = @import("settings.zig");
+    _ = @import("preview.zig");
 }

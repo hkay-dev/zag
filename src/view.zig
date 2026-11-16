@@ -199,6 +199,10 @@ fn heldRel(row: ?usize, gen: u32) ?[]u8 {
 fn rebuildRows() void {
     tree_stale = false;
     const r = root orelse return;
+    defer {
+        const now = CACurrentMediaTime();
+        for (&folds) |*o| refindFold(o, now);
+    }
     const Kept = struct { rel: []const u8, i: usize };
     var kept: std.ArrayList(Kept) = .empty;
     defer kept.deinit(gpa);
@@ -589,6 +593,8 @@ const Ink = struct {
     /// Which spaces and tabs draw as faint dots and arrows, in `invis_ink`.
     invis: settings.Invisibles = .none,
     invis_ink: Rgb = .{ 0, 0, 0 },
+    /// The trailing boundary of the logical line, prepared once for its visible rows.
+    trail: usize = 0,
 
     fn put(k: *Ink, g: Fallback, color: Rgb, x: f64, y: f64) void {
         if (k.n == k.glyphs.len or g.font != k.font or !std.mem.eql(f64, &color, &k.color)) {
@@ -624,8 +630,6 @@ const Ink = struct {
     }
 
     fn runCut(k: *Ink, s: []const u8, from: usize, to: usize, col0: usize, kinds: ?[]const syntax.Kind, th: *const Theme, color: Rgb, x: f64, y: f64, skip: usize, max: usize, cut_out: ?*Cut) usize {
-        // Trailing marks start after the last character that isn't a space or tab.
-        const trail = if (k.invis == .trailing) std.mem.trimEnd(u8, s, " \t\r").len else 0;
         var col = col0;
         var i = from;
         if (cut_out) |ct| {
@@ -641,7 +645,7 @@ const Ink = struct {
             };
             if (rel >= skip + max) break;
             const blank = s[i] == ' ' or s[i] == '\t';
-            const mark = blank and k.invis != .none and (k.invis == .all or i >= trail);
+            const mark = blank and k.invis != .none and (k.invis == .all or i >= k.trail);
             if (rel >= skip and (mark or (!blank and s[i] >= 0x20 and s[i] != 0x7f))) {
                 const kind: syntax.Kind = if (kinds) |ks| ks[i] else .text;
                 var paint = if (mark) k.invis_ink else if (kinds != null) th.kinds[@intFromEnum(kind)] else color;
@@ -1208,20 +1212,14 @@ const Page = struct {
         return if (p.path == null) p.ed.text().len > 0 else p.ed.buf.dirty();
     }
 
-    /// Closing its tab: an untitled file's draft goes too.
+    /// Releases page ownership; logical close already handled draft removal.
     fn deinit(p: *Page) void {
         p.ed.deinit(gpa);
         p.states.deinit(gpa);
         if (p.path) |s| gpa.free(s);
-        dropDraft(&p.draft);
+        if (p.draft) |s| gpa.free(s);
     }
 
-    /// Dropping it while an untitled file's draft stays on disk.
-    fn deinitKeepDraft(p: *Page) void {
-        if (p.draft) |s| gpa.free(s);
-        p.draft = null;
-        p.deinit();
-    }
 };
 
 pub const TabRef = struct { d: *Doc, j: usize };
@@ -1528,6 +1526,9 @@ const Doc = struct {
     /// The bracket pair beside the caret, for the caret and change count it was found at.
     br: ?[2]usize = null,
     br_at: [2]u64 = @splat(std.math.maxInt(u64)),
+    /// A complete caret row result leaves the viewport's segment cache alone.
+    row_key: ?CaretRowKey = null,
+    row_value: RowCol = undefined,
     /// What the caret last stood for: mode, then row and column or prompt width.
     spot: [3]usize = .{ std.math.maxInt(usize), 0, 0 },
     shown: bool = false,
@@ -1652,9 +1653,6 @@ const Win = struct {
     guide_t0: f64 = -1,
     /// Scroll the sidebar to the focused card's file on the next draw.
     side_find: bool = false,
-    /// The open folders pinned under the folder's name on the last draw.
-    stuck: [max_stuck]usize = undefined,
-    nstuck: usize = 0,
     /// A sidebar scroll that glides, like a click on a pinned folder.
     side_t: Tween = .{ .dur = scroll_time },
     /// How far the sidebar has slid in, 0 to 1, and the cards' left edge
@@ -1879,11 +1877,7 @@ fn pageLines(d: *const Doc) usize {
 /// Opens `path` (a file or a folder). A file shows in `into`, in a new tab
 /// right of the one on show, or else in a new window. A file that a card
 /// already holds comes forward there.
-pub fn open(path: []const u8, into: ?*Doc) void {
-    _ = openInto(path, into);
-}
-
-fn openInto(path: []const u8, into: ?*Doc) bool {
+pub fn open(path: []const u8, into: ?*Doc) bool {
     const abs = files.absolute(gpa, path) catch return false;
     if (files.isDir(abs)) {
         setRoot(abs);
@@ -1915,7 +1909,7 @@ fn openInto(path: []const u8, into: ?*Doc) bool {
 
 /// Opens into the key window's untouched card, else a new window.
 pub fn openFile(path: []const u8) bool {
-    return openInto(path, blankDoc());
+    return open(path, blankDoc());
 }
 
 /// The first live card and tab holding `abs`.
@@ -1956,19 +1950,17 @@ fn focus(d: *Doc) void {
 /// Reads a file into a page, at the caret and scroll it had last time. A
 /// path with no file yet opens empty, as a new file.
 fn loadPage(abs: [:0]const u8) ?Page {
-    var missing = false;
-    const bytes = files.read(gpa, abs) catch |err| switch (err) {
-        error.FileNotFound => blk: {
-            missing = true;
-            break :blk gpa.alloc(u8, 0) catch return null;
-        },
+    const snapshot: ?files.Snapshot = files.read(gpa, abs) catch |err| switch (err) {
+        error.FileNotFound => null,
         else => {
             var ib: [std.fs.max_path_bytes + 160]u8 = undefined;
-            const why = if (err == error.NotAFile) "It isn't a regular file" else if (err == error.FileTooBig) "It's bigger than 1 GB" else osError();
+            const why = if (err == error.NotAFile) "It isn't a regular file" else if (err == error.FileTooBig) "It's bigger than 1 GB" else if (err == error.UnstableSnapshot) "The file changed while Zag read it" else osError();
             alert("Couldn't open this file.", std.fmt.bufPrint(&ib, "{s}.\n\n{s}", .{ why, abs }) catch abs);
             return null;
         },
     };
+    const missing = snapshot == null;
+    const bytes = if (snapshot) |s| s.bytes else gpa.alloc(u8, 0) catch return null;
     if (looksBinary(bytes)) {
         gpa.free(bytes);
         alert("This looks like a binary file.", abs);
@@ -1987,7 +1979,7 @@ fn loadPage(abs: [:0]const u8) ?Page {
         ed.select(c, c);
         sy = pl.sy;
     }
-    return .{ .ed = ed, .path = z, .lang = syntax.detect(abs, firstLine(t)), .stamp = files.stamp(abs), .sy = sy, .id = newId(), .rise = true, .new_file = missing, .locked = !missing and !files.writable(abs) };
+    return .{ .ed = ed, .path = z, .lang = syntax.detect(abs, firstLine(t)), .stamp = if (snapshot) |s| s.stamp else null, .sy = sy, .id = newId(), .rise = true, .new_file = missing, .locked = !missing and !files.writable(abs) };
 }
 
 /// The text's first line, which `syntax.detect` reads for a `#!` or `<?php`.
@@ -2034,6 +2026,7 @@ fn replaceable(d: *const Doc) bool {
 /// instead. False when it can't.
 fn park(d: *Doc) bool {
     if (replaceable(d)) {
+        if (!discardDraft(&d.file)) return false;
         d.file.deinit();
         return true;
     }
@@ -2052,6 +2045,8 @@ fn install(d: *Doc, pg: Page) void {
     for (&d.lex) |*x| x.clear();
     d.vfirst.clearRetainingCapacity();
     d.wrap_ptr = 0;
+    d.br_at = @splat(std.math.maxInt(u64));
+    d.row_key = null;
     d.mode = .edit;
     d.ys.snap(d.file.sy);
     d.xs.snap(d.file.sx);
@@ -2281,7 +2276,8 @@ fn reopenTab(d: *Doc) void {
     while (closed.pop()) |p| {
         defer gpa.free(p);
         if (!files.exists(p)) continue;
-        return open(p, d);
+        _ = open(p, d);
+        return;
     }
     toast(d.win, "no closed tabs");
 }
@@ -2298,7 +2294,6 @@ fn closeTab(d: *Doc, at: usize) void {
         endSiblingFold(d);
         if (d.win.cards.pane != null) return msg(void, d.win.window, "performClose:", .{@as(Id, null)});
         if (d.file.loses() and !keepOrDrop(d)) return;
-        noteClosed(&d.file);
         return foldCard(d);
     }
     var j = at;
@@ -2327,6 +2322,7 @@ fn closeTab(d: *Doc, at: usize) void {
         }
         if (tabCount(d) == 1) return closeTab(d, j);
     }
+    if (!discardDraft(tabPage(d, j))) return;
     var pg = takeTab(d, j) orelse return;
     noteClosed(&pg);
     pg.deinit();
@@ -2534,6 +2530,9 @@ fn foldCard(d: *Doc) void {
     const leaf = nodeOf(w.cards, d) orelse return;
     const up = leaf.up orelse return;
     if (up.going != null) return;
+    for (0..tabCount(d)) |j| if (!discardDraft(tabPage(d, j))) return;
+    cancelCardDrag(d);
+    for (0..tabCount(d)) |j| noteClosed(tabPage(d, j));
     const g: u1 = if (up.kids[0] == leaf) 0 else 1;
     up.going = g;
     up.share.c = 2 * @sqrt(up.share.k);
@@ -2620,10 +2619,28 @@ fn freeNodes(n: *Node) void {
     gpa.destroy(n);
 }
 
-/// Lets go of a card that's out of its window's layout, or whose window closed.
+/// Cancels borrowed document pointers before logical or physical closure.
+fn cancelCardDrag(d: *Doc) void {
+    for (wins.items) |w| {
+        if (w.tdrag) |drag| {
+            if (drag.from == d or (if (drag.drop) |drop| drop.card == d else false)) {
+                endDrag(w);
+                aimPreview(w, CACurrentMediaTime());
+                refreshWin(w);
+            }
+        }
+        if (w.fly) |fly| if (fly.card == d) endFly(w);
+        if (w.menu_card == d) {
+            w.menu_card = null;
+            w.menu_a.snap(0);
+        }
+    }
+}
+
+/// Releases a card after its layout or window removed it.
 fn closePane(d: *Doc) void {
+    cancelCardDrag(d);
     rememberPlace(&d.file);
-    dropDissolve(d);
     msg(void, d.caret, "removeFromSuperlayer", .{});
     access.drop(d);
     if (std.mem.indexOfScalar(*Doc, docs.items, d)) |i| _ = docs.orderedRemove(i);
@@ -2820,7 +2837,6 @@ fn closeCard(d: *Doc) void {
             if (ref.d != d) return;
         } else return;
     }
-    for (0..tabCount(d)) |j| noteClosed(tabPage(d, j));
     foldCard(d);
 }
 
@@ -3099,7 +3115,7 @@ fn askAlertWith(title: []const u8, info: []const u8, buttons: []const []const u8
     return r;
 }
 
-fn alert(text: []const u8, detail: []const u8) void {
+pub fn alert(text: []const u8, detail: []const u8) void {
     _ = askAlert(text, detail, &.{});
 }
 
@@ -3209,12 +3225,18 @@ pub fn settleAll() bool {
         if (!settle(w, true)) return false;
     }
     if (zoom_due) zoomWrite(@ptrFromInt(zoom_gen));
+    if (zoom_due) return false;
     // A modal callback may have opened a window that has not settled yet.
     for (wins.items) |w| if (std.mem.indexOfScalar(Id, windows, w.window) == null) return false;
-    if (!saveDrafts()) {
-        alert("Couldn't save drafts.", "Zag couldn't checkpoint every untitled file. Free disk space or restore access to the Drafts folder, then quit again.");
+    if (!saveDrafts(true)) {
+        alert("Couldn't save drafts.", "Zag couldn't checkpoint every untitled file or remove a saved file's old draft. Free disk space or restore access to the Drafts folder, then quit again.");
         return false;
     }
+    saveSession() catch {
+        alert("Couldn't save the session.", "Zag couldn't save every window. Free memory or disk space and restore access to preferences, then quit again.");
+        return false;
+    };
+    quitting = true;
     return true;
 }
 
@@ -3250,12 +3272,22 @@ fn save(d: *Doc, as: bool) bool {
         if (fresh) |z| gpa.free(z);
         return false;
     }
-    if (conf.trim_trailing_whitespace) d.file.ed.trimTrailingWhitespace(gpa) catch {};
-    if (conf.ensure_final_newline) d.file.ed.ensureFinalNewline(gpa) catch {};
+    if (conf.trim_trailing_whitespace) d.file.ed.trimTrailingWhitespace(gpa) catch {
+        if (fresh) |z| gpa.free(z);
+        refresh(d);
+        alert("Couldn't prepare this file for saving.", "Zag couldn't trim trailing whitespace. The file on disk has not changed.");
+        return false;
+    };
+    if (conf.ensure_final_newline) d.file.ed.ensureFinalNewline(gpa) catch {
+        if (fresh) |z| gpa.free(z);
+        refresh(d);
+        alert("Couldn't prepare this file for saving.", "Zag couldn't add the final newline. The file on disk has not changed.");
+        return false;
+    };
     // A failed write says what the system said, and offers to try again or
     // to save somewhere else.
-    while (true) {
-        if (files.write(to, d.file.ed.text())) |_| break else |_| {}
+    const written = while (true) {
+        if (files.write(to, d.file.ed.text())) |stamp| break stamp else |_| {}
         var ib: [std.fs.max_path_bytes + 160]u8 = undefined;
         const why = std.fmt.bufPrint(&ib, "{s}.\n\n{s}", .{ osError(), to }) catch to;
         var tb: [300]u8 = undefined;
@@ -3276,7 +3308,8 @@ fn save(d: *Doc, as: bool) bool {
                 return false;
             },
         }
-    }
+    };
+    var copies_closed = true;
     if (fresh) |z| {
         // Resolve after writing so a new file in a linked folder has a real path too.
         const abs = files.absolute(gpa, z) catch {
@@ -3287,7 +3320,7 @@ fn save(d: *Doc, as: bool) bool {
         preview.rename(d.file.id, abs);
         if (d.file.path) |old| gpa.free(old);
         d.file.path = abs;
-        dropCopies(d, abs);
+        copies_closed = dropCopies(d, abs);
         d.file.lang = langOf(&d.file, abs);
         clearSyntax(d);
         named(d);
@@ -3306,24 +3339,27 @@ fn save(d: *Doc, as: bool) bool {
         } else |_| {}
     }
     d.file.ed.buf.markSaved();
-    if (d.file.draft) |draft| {
-        const abs = files.absolute(gpa, draft) catch null;
-        defer if (abs) |p| gpa.free(p);
-        // An unresolved path is not safe to unlink after a successful save.
-        if (abs == null or std.mem.eql(u8, abs.?, d.file.path.?)) {
-            gpa.free(draft);
-            d.file.draft = null;
-        } else dropDraft(&d.file.draft);
-    }
-    d.file.stamp = files.stamp(d.file.path.?);
+    var draft_cleanup_failed = false;
+    removeDraft(&d.file.draft, d.file.path) catch {
+        draft_cleanup_failed = true;
+    };
+    d.file.stamp = written;
     d.file.new_file = false;
     d.file.locked = !files.writable(d.file.path.?);
     toast(d.win, "saved");
     noteRecent(d.file.path.?);
+    if (draft_cleanup_failed) {
+        alert("Zag saved the file but couldn't remove its draft.", "A recovery copy may remain in the Drafts folder.");
+        if (!showing(d, id)) return true;
+    }
+    if (!copies_closed) {
+        alert("Zag saved the file but couldn't close every duplicate tab.", "A duplicate tab still owns its recovery copy. Close that tab to retry.");
+        if (!showing(d, id)) return true;
+    }
     if (isConf(d.file.path)) {
         // Saving the settings file names its problems again, even ones shown before.
         report_key = 0;
-        loadSettings();
+        _ = loadSettings();
         if (!showing(d, id)) return false;
     }
     // A new file shows in the tree when its folder's rows are listed; every
@@ -3341,10 +3377,13 @@ fn save(d: *Doc, as: bool) bool {
 /// Closes every other tab that holds `abs`, which Save As just wrote over
 /// from `keep`, without asking: what it showed is gone from disk. A card's
 /// last tab folds the card away, or closes the window when it's the only card.
-fn dropCopies(keep: *Doc, abs: []const u8) void {
+fn dropCopies(keep: *Doc, abs: []const u8) bool {
     while (copyOf(abs, keep)) |h| {
+        const p = tabPage(h.d, h.j);
+        removeDraft(&p.draft, p.path) catch return false;
+        p.drafted = null;
         const last = tabCount(h.d) == 1;
-        var pg = takeTab(h.d, h.j) orelse return;
+        var pg = takeTab(h.d, h.j) orelse return false;
         pg.deinit();
         if (!last) continue;
         if (h.d.win.cards.pane != null) {
@@ -3355,6 +3394,7 @@ fn dropCopies(keep: *Doc, abs: []const u8) void {
             if (h.d.win == keep.win) focus(keep);
         }
     }
+    return true;
 }
 
 /// The first live tab holding `abs`, skipping `keep`'s active file when given.
@@ -3384,7 +3424,10 @@ fn runOpenPanel(choose_files: bool, multiple: bool) void {
         const path = objc.utf8(msg(Id, msg(Id, urls, "objectAtIndex:", .{i}), "path", .{}));
         if (choose_files) {
             _ = openFile(path);
-        } else return open(path, keyDoc());
+        } else {
+            _ = open(path, keyDoc());
+            return;
+        }
     }
 }
 
@@ -3521,38 +3564,64 @@ fn placeOf(p: []const u8) ?Place {
 /// the tab on show, 1 when it has the focus) followed by its n paths.
 /// Path tokens use !1f (file) or !1d (draft), then lowercase hex bytes.
 /// Empty untitled tabs aren't kept; restore also accepts legacy raw paths.
-pub fn saveSession() void {
-    quitting = true;
-    for (docs.items) |d| rememberPlace(&d.file);
+fn saveSession() !void {
+    for (docs.items) |d| if (!d.closing) rememberPlace(&d.file);
     if (places_due) writePlaces(null);
     const out = msg(Id, objc.class("NSMutableArray"), "array", .{});
+    if (out == null) return error.OutOfMemory;
     const order = msg(Id, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "orderedWindows", .{});
+    if (order == null) return error.OutOfMemory;
     var line: std.ArrayList(u8) = .empty;
     defer line.deinit(gpa);
     // Back to front, so the front window opens last and stays in front.
     // Windows AppKit leaves out of `orderedWindows` (hidden or minimized
     // ones, if it does) go first.
     for (wins.items) |wn| {
-        if (msg(usize, order, "indexOfObject:", .{wn.window}) == std.math.maxInt(isize)) saveWin(wn, &line, out);
+        if (msg(usize, order, "indexOfObject:", .{wn.window}) == std.math.maxInt(isize)) try saveWin(wn, &line, out);
     }
     var i = msg(usize, order, "count", .{});
     while (i > 0) {
         i -= 1;
         const w = msg(Id, order, "objectAtIndex:", .{i});
-        for (wins.items) |wn| if (wn.window == w) saveWin(wn, &line, out);
+        for (wins.items) |wn| if (wn.window == w) try saveWin(wn, &line, out);
     }
-    msg(void, defaults(), "setObject:forKey:", .{ out, objc.str("session") });
-    if (root) |r| {
-        msg(void, defaults(), "setObject:forKey:", .{ objc.str(r), objc.str("root") });
-    } else msg(void, defaults(), "removeObjectForKey:", .{objc.str("root")});
+    const root_name = if (root) |r| objc.str(r) else null;
+    if (root != null and root_name == null) return error.OutOfMemory;
+    const session_key = objc.str("session");
+    const root_key = objc.str("root");
+    if (session_key == null or root_key == null) return error.OutOfMemory;
+    const def = defaults();
+    const old_session = msg(Id, msg(Id, def, "objectForKey:", .{session_key}), "retain", .{});
+    const old_root = msg(Id, msg(Id, def, "objectForKey:", .{root_key}), "retain", .{});
+    defer msg(void, old_session, "release", .{});
+    defer msg(void, old_root, "release", .{});
+    msg(void, def, "setObject:forKey:", .{ out, session_key });
+    if (root_name != null) {
+        msg(void, def, "setObject:forKey:", .{ root_name, root_key });
+    } else msg(void, def, "removeObjectForKey:", .{root_key});
+    if (!msg(bool, def, "synchronize", .{})) {
+        if (old_session != null) {
+            msg(void, def, "setObject:forKey:", .{ old_session, session_key });
+        } else msg(void, def, "removeObjectForKey:", .{session_key});
+        if (old_root != null) {
+            msg(void, def, "setObject:forKey:", .{ old_root, root_key });
+        } else msg(void, def, "removeObjectForKey:", .{root_key});
+        return error.SessionWriteFailed;
+    }
 }
 
 /// One window's session line.
-fn saveWin(wn: *Win, line: *std.ArrayList(u8), out: Id) void {
+fn saveWin(wn: *Win, line: *std.ArrayList(u8), out: Id) !void {
     line.clearRetainingCapacity();
-    line.appendSlice(gpa, objc.utf8(msg(Id, wn.window, "stringWithSavedFrame", .{}))) catch return;
-    const kept = saveLayout(wn, wn.cards, line) catch return;
-    if (kept > 0) msg(void, out, "addObject:", .{objc.str(line.items)});
+    const frame = msg(Id, wn.window, "stringWithSavedFrame", .{});
+    if (frame == null) return error.OutOfMemory;
+    try line.appendSlice(gpa, objc.utf8(frame));
+    const kept = try saveLayout(wn, wn.cards, line);
+    if (kept > 0) {
+        const text = objc.str(line.items);
+        if (text == null) return error.OutOfMemory;
+        msg(void, out, "addObject:", .{text});
+    }
 }
 
 /// Writes `n`'s part of the session line. Returns how many files it kept.
@@ -3755,7 +3824,7 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) er
         pg.rise = false;
         d.pages.append(gpa, pg) catch {
             // A draft that can't open stays on disk for `adoptDrafts`.
-            pg.deinitKeepDraft();
+            pg.deinit();
             continue;
         };
         if (i == head[1] or d.pages.items.len == 1) on = d.pages.items.len - 1;
@@ -3782,11 +3851,6 @@ fn restoreNode(w: *Win, it: *std.mem.SplitIterator(u8, .scalar), lit: *?*Doc) er
 /// Roll back a partially restored tree without deleting any backing drafts.
 fn discardRestore(n: *Node) void {
     if (n.pane) |d| {
-        for (0..tabCount(d)) |j| {
-            const p = tabPage(d, j);
-            if (p.draft) |path| gpa.free(path);
-            p.draft = null;
-        }
         closePane(d);
     } else {
         discardRestore(n.kids[0]);
@@ -3828,24 +3892,24 @@ fn movedDraft(p: []const u8, buf: []u8) ?[:0]const u8 {
 
 /// Writes every untitled file that changed since its draft last did. One
 /// that's empty again loses its draft.
-fn saveDrafts() bool {
+fn saveDrafts(final: bool) bool {
     var ok = true;
-    for (docs.items) |d| for (0..tabCount(d)) |j| {
-        keepDraft(tabPage(d, j)) catch {
+    for (docs.items) |d| if (!d.closing) for (0..tabCount(d)) |j| {
+        keepDraft(tabPage(d, j), final) catch {
             ok = false;
         };
     };
     return ok;
 }
 
-fn keepDraft(p: *Page) !void {
-    if (p.path != null or p.drafted == p.ed.buf.changes) return;
+fn keepDraft(p: *Page, final: bool) !void {
+    if (p.path != null) {
+        if (final) try removeDraft(&p.draft, p.path);
+        return;
+    }
+    if (!final and p.drafted == p.ed.buf.changes) return;
     if (p.ed.text().len == 0) {
-        if (p.draft) |path| {
-            if (std.c.unlink(path) != 0 and std.c._errno().* != @intFromEnum(std.c.E.NOENT)) return error.DeleteFailed;
-            gpa.free(path);
-            p.draft = null;
-        }
+        try removeDraft(&p.draft, p.path);
         p.drafted = p.ed.buf.changes;
         return;
     }
@@ -3856,23 +3920,71 @@ fn keepDraft(p: *Page) !void {
         const path = try std.fmt.allocPrintSentinel(gpa, "{s}/{d}-{d}.txt", .{ dir, secs, newId() }, 0);
         errdefer gpa.free(path);
         try files.makeParent(path);
-        try files.write(path, p.ed.text());
+        _ = try files.write(path, p.ed.text());
         p.draft = path;
     } else {
         try files.makeParent(p.draft.?);
-        try files.write(p.draft.?, p.ed.text());
+        _ = try files.write(p.draft.?, p.ed.text());
     }
     p.drafted = p.ed.buf.changes;
 }
 
-/// Deletes a draft once its text is saved to a file or its tab is closed.
-/// Not while quitting, though: AppKit closes the windows on the way out,
-/// and their drafts are for next time.
-fn dropDraft(draft: *?[:0]u8) void {
+/// Removes a checkpoint unless a named save made it the destination itself.
+/// Resolution failure preserves ownership so a later cleanup can retry safely.
+fn removeDraft(draft: *?[:0]u8, destination: ?[:0]const u8) !void {
     const p = draft.* orelse return;
-    if (!quitting) _ = std.c.unlink(p);
+    if (destination) |named_path| {
+        const resolved = try files.absolute(gpa, p);
+        defer gpa.free(resolved);
+        if (std.mem.eql(u8, resolved, named_path)) {
+            gpa.free(p);
+            draft.* = null;
+            return;
+        }
+    }
+    if (std.c.unlink(p) != 0 and std.c._errno().* != @intFromEnum(std.c.E.NOENT)) return error.DeleteFailed;
     gpa.free(p);
     draft.* = null;
+}
+
+extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
+
+test "draft cleanup preserves its named destination and unresolved ownership" {
+    var dir = "/tmp/zag-draft-cleanup-XXXXXX".*;
+    try std.testing.expect(mkdtemp(&dir) != null);
+    defer _ = std.c.rmdir(&dir);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "{s}/saved.txt", .{&dir}, 0);
+    defer _ = std.c.unlink(path);
+    _ = try files.write(path, "saved text");
+    const destination = try files.absolute(gpa, path);
+    defer gpa.free(destination);
+    var draft: ?[:0]u8 = try gpa.dupeSentinel(u8, path, 0);
+    defer if (draft) |p| gpa.free(p);
+    try removeDraft(&draft, destination);
+    try std.testing.expect(draft == null);
+    const snapshot = try files.read(gpa, destination);
+    defer gpa.free(snapshot.bytes);
+    try std.testing.expectEqualStrings("saved text", snapshot.bytes);
+
+    var loop_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const loop = try std.fmt.bufPrintSentinel(&loop_buf, "{s}/loop", .{&dir}, 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.symlink("loop", loop));
+    defer _ = std.c.unlink(loop);
+    draft = try gpa.dupeSentinel(u8, loop, 0);
+    const owned = draft.?.ptr;
+    try std.testing.expectError(error.SymlinkLoop, removeDraft(&draft, destination));
+    try std.testing.expect(draft.?.ptr == owned);
+    try std.testing.expectEqualStrings(loop, draft.?);
+}
+
+fn discardDraft(p: *Page) bool {
+    removeDraft(&p.draft, p.path) catch {
+        alert("Couldn't discard this draft.", "Zag couldn't remove its checkpoint. Restore access to the Drafts folder, then close the tab again.");
+        return false;
+    };
+    p.drafted = null;
+    return true;
 }
 
 /// Set once the session is saved on the way out.
@@ -3880,8 +3992,8 @@ var quitting = false;
 
 /// An untitled tab with the text of the draft at `abs`.
 fn loadDraft(abs: [:0]const u8) ?Page {
-    const bytes = files.read(gpa, abs) catch return null;
-    var ed = Editor.initOwned(gpa, bytes) catch return null;
+    const snapshot = files.read(gpa, abs) catch return null;
+    var ed = Editor.initOwned(gpa, snapshot.bytes) catch return null;
     styleEditor(&ed);
     const own = gpa.dupeSentinel(u8, abs, 0) catch {
         ed.deinit(gpa);
@@ -3936,15 +4048,18 @@ fn recoverDrafts() usize {
         if (draftHeld(abs)) continue;
         var pg = loadDraft(abs) orelse continue;
         const d = keyDoc() orelse (if (wins.items.len > 0) wins.items[wins.items.len - 1].focus else newDoc()) orelse {
-            pg.deinitKeepDraft();
+            pg.deinit();
             break;
         };
         if (replaceable(d)) {
-            _ = putTab(d, pg, 0);
+            if (!putTab(d, pg, 0)) {
+                pg.deinit();
+                continue;
+            }
         } else {
             pg.rise = false;
             d.pages.insert(gpa, @min(d.at + n, d.pages.items.len), pg) catch {
-                pg.deinitKeepDraft();
+                pg.deinit();
                 continue;
             };
             refreshWin(d.win);
@@ -4026,7 +4141,8 @@ fn checkOutside(d: *Doc) void {
         toast(d.win, "deleted on disk");
         return refresh(d);
     }
-    const bytes = files.read(gpa, p) catch return;
+    const snapshot = files.read(gpa, p) catch return;
+    const bytes = snapshot.bytes;
     defer gpa.free(bytes);
     if (looksBinary(bytes)) {
         d.file.ed.buf.markUnsaved();
@@ -4037,7 +4153,7 @@ fn checkOutside(d: *Doc) void {
     const ref = pageRef(id) orelse return;
     const pg = tabPage(ref.d, ref.j);
     if (!reload) {
-        pg.stamp = now;
+        pg.stamp = snapshot.stamp;
         return;
     }
     pg.ed.reload(gpa, bytes) catch return;
@@ -4045,10 +4161,10 @@ fn checkOutside(d: *Doc) void {
     const lang = langOf(pg, pg.path orelse return);
     if (lang != pg.lang) {
         pg.lang = lang;
-        pg.states.clearRetainingCapacity();
+        if (syntax.needsState(lang)) pg.states.clearRetainingCapacity() else pg.states.clearAndFree(gpa);
         if (ref.j == ref.d.at) clearSyntax(ref.d);
     }
-    pg.stamp = now;
+    pg.stamp = snapshot.stamp;
     pg.new_file = false;
     toast(ref.d.win, "reloaded");
     refresh(ref.d);
@@ -4135,7 +4251,7 @@ fn diffSummary(buf: []u8, mine: []const u8, disk: []const u8) []const u8 {
 fn showDiskCopy(d: *Doc, disk: []const u8) bool {
     var ed = Editor.init(gpa, disk) catch return false;
     styleEditor(&ed);
-    var pg: Page = .{ .ed = ed, .id = newId(), .lang = d.file.lang, .rise = true };
+    var pg: Page = .{ .ed = ed, .id = newId(), .lang = d.file.lang, .rise = true, .hand = true };
     const name = d.file.name();
     pg.title_len = (std.fmt.bufPrint(&pg.title, "{s} (on disk)", .{name}) catch copyTrunc(&pg.title, name)).len;
     const to = (if (roomFor(d, false)) splitOff(d, false, false, false) else null) orelse d;
@@ -4226,14 +4342,20 @@ fn resolveConf() void {
 }
 
 /// Reads the settings file and applies it to every window.
-fn loadSettings() void {
+fn loadSettings() bool {
     resolveConf();
-    const p = conf_path orelse return;
+    const p = conf_path orelse return false;
+    const snapshot = settings.load(gpa, p) catch return false;
+    acceptSettings(snapshot);
+    return true;
+}
+
+fn acceptSettings(snapshot: settings.Snapshot) void {
     const old_conf = conf;
-    conf_saved = settings.load(gpa, p) catch return;
+    conf_saved = snapshot.value;
     // A zoom still waiting to be written wins over the file's older size.
     if (zoom_due) conf_saved.size = zoom_size;
-    conf_stamp = files.stamp(p);
+    conf_stamp = snapshot.stamp;
     applySettings(old_conf);
     reportSettings();
 }
@@ -4308,6 +4430,12 @@ fn applySettings(old_conf: settings.Settings) void {
         tree.show_hidden = conf.show_hidden;
         tree_stale = true;
         if (root != null and !restoring) rebuildTree();
+        quick_gen +%= 1;
+        quick_hidden = !conf.show_hidden;
+        if (root) |r| for (docs.items) |d| if (d.mode == .open and !d.closing) {
+            rescanQuick(r);
+            break;
+        };
     }
     // The icons take the size and the caret and muted colors.
     for (old_themes, themes) |a, b| {
@@ -4362,26 +4490,33 @@ fn isConf(path: ?[]const u8) bool {
 /// Rewrites one line of the settings file and applies it. An open
 /// config.toml with unsaved edits gets the same line in its text, as an
 /// undoable edit, instead of a reload that would ask to drop those edits.
-fn store(opt: settings.Opt, value: []const u8) void {
-    const p = conf_path orelse return;
-    const before = files.stamp(p);
-    settings.store(gpa, p, &conf_saved, opt, value) catch return alert("Couldn't write the settings file.", p);
-    const after = files.stamp(p);
-    loadSettings();
-    for (docs.items) |d| if (isConf(d.file.path)) {
-        if (d.file.ed.buf.dirty() and std.meta.eql(d.file.stamp, before)) {
-            setConfLine(d, opt, value) catch continue;
-            d.file.stamp = after;
-            refresh(d);
-        }
+fn store(opt: settings.Opt, value: []const u8) bool {
+    const p = conf_path orelse return false;
+    const change = settings.store(gpa, p, &conf_saved, opt, value) catch {
+        alert("Couldn't write the settings file.", p);
+        return false;
     };
+    acceptSettings(change.after);
+    var merged = true;
+    for (docs.items) |d| if (!d.closing) for (0..tabCount(d)) |j| {
+        const pg = tabPage(d, j);
+        if (!isConf(pg.path) or !pg.ed.buf.dirty() or !std.meta.eql(pg.stamp, change.before)) continue;
+        setConfLine(pg, opt, value) catch {
+            merged = false;
+            continue;
+        };
+        pg.stamp = change.after.stamp;
+        refresh(d);
+    };
+    if (!merged) alert("Zag saved the setting but couldn't update every open config tab.", "Zag left those tabs' unsaved edits unchanged. Review them before saving.");
     checkFiles(true);
+    return true;
 }
 
 /// Sets the `opt` line in the doc's own text, replacing only the bytes that
 /// differ, with the caret and selection shifted past the change.
-fn setConfLine(d: *Doc, opt: settings.Opt, value: []const u8) !void {
-    const e = &d.file.ed;
+fn setConfLine(p: *Page, opt: settings.Opt, value: []const u8) !void {
+    const e = &p.ed;
     const old = e.text();
     const new = try settings.setLine(gpa, old, opt, value);
     defer gpa.free(new);
@@ -4459,13 +4594,13 @@ fn confChanged(_: ?*anyopaque) callconv(.c) void {
 fn recheckSettings() void {
     const p = conf_path orelse return;
     const now = files.stamp(p);
-    if (now != null and !std.meta.eql(now, conf_stamp)) loadSettings();
+    if (now != null and !std.meta.eql(now, conf_stamp)) _ = loadSettings();
 }
 
 pub fn openSettings() void {
     const p = conf_path orelse return;
     settings.ensure(gpa, p, &conf_saved) catch return alert("Couldn't write the settings file.", p);
-    loadSettings();
+    _ = loadSettings();
     _ = openFile(conf_path.?);
 }
 
@@ -4478,21 +4613,20 @@ fn revealConfig() void {
 
 /// Zag > Reload Settings: reads config.toml again, naming its problems again.
 fn reloadSettings() void {
-    toastFront("Settings reloaded");
     report_key = 0;
-    loadSettings();
+    if (!loadSettings()) return alert("Couldn't reload the settings file.", "Zag left the current settings unchanged.");
+    if (conf_saved.report.count == 0) toastFront("Settings reloaded");
 }
 
 /// Zag > Reset Settings to Defaults…: after asking, config.toml goes to the
 /// Trash and a new one with every default takes its place.
 fn resetSettings() void {
-    const p = conf_path orelse return;
     if (askAlert("Reset all settings to their defaults?", "Zag moves your config.toml to the Trash and writes a new one with every setting at its default.", &.{ "Reset", "Cancel" }) != 1000) return;
-    if (files.exists(p) and !trash(p)) return alert("Couldn't move the settings file to the Trash.", p);
+    const p = conf_path orelse return;
+    const snapshot = settings.reset(gpa, p, trash) catch return alert("Couldn't reset the settings file.", "Zag left the current settings file unchanged.");
     zoom_due = false;
-    settings.prepare(gpa, p);
     report_key = 0;
-    loadSettings();
+    acceptSettings(snapshot);
     watchConf();
     checkFiles(true);
     toastFront("Settings reset to their defaults");
@@ -4514,7 +4648,7 @@ fn revealPath(p: []const u8) void {
 
 /// Writes the opposite of flag `opt` to the settings file.
 fn flip(comptime opt: settings.Opt) void {
-    store(opt, if (@field(conf_saved, settings.fieldName(opt))) "false" else "true");
+    _ = store(opt, if (@field(conf_saved, settings.fieldName(opt))) "false" else "true");
 }
 
 pub fn toggleTypewriter() void {
@@ -4523,7 +4657,7 @@ pub fn toggleTypewriter() void {
 
 pub fn pickFocus(i: usize) void {
     if (conf.late_night) return;
-    if (i < std.enums.values(settings.Focus).len) store(.focus, @tagName(@as(settings.Focus, @enumFromInt(i))));
+    if (i < std.enums.values(settings.Focus).len) _ = store(.focus, @tagName(@as(settings.Focus, @enumFromInt(i))));
 }
 
 /// Leaving zen the usual way while Late-Night is on ends Late-Night.
@@ -4535,13 +4669,13 @@ pub fn toggleZen() void {
 pub fn pickScheme(i: usize) void {
     if (i >= settings.schemes.len or conf.late_night) return;
     const sc = settings.schemes[i];
-    store(if (sc.dark) .@"dark-theme" else .@"light-theme", sc.key);
+    _ = store(if (sc.dark) .@"dark-theme" else .@"light-theme", sc.key);
 }
 
 /// View > Theme > Appearance: 0 Auto, 1 Light, 2 Dark.
 pub fn pickLook(i: usize) void {
     if (i >= std.enums.values(settings.Look).len or conf.late_night) return;
-    store(.appearance, @tagName(@as(settings.Look, @enumFromInt(i))));
+    _ = store(.appearance, @tagName(@as(settings.Look, @enumFromInt(i))));
 }
 
 // ---- prompt ----
@@ -4580,7 +4714,6 @@ fn startPrompt(d: *Doc, m: Mode) void {
     d.pe = .{};
     dropSteps(&d.pundo);
     dropSteps(&d.predo);
-    const was_palette = d.palette;
     switch (m) {
         .find, .replace => {
             d.which = 0;
@@ -4627,9 +4760,8 @@ fn startPrompt(d: *Doc, m: Mode) void {
             }
         },
         .command => {
-            listCommands();
             d.palette = true;
-            pickFiles(d, d.palette != was_palette);
+            listCommands(d);
         },
         else => {},
     }
@@ -4715,7 +4847,7 @@ fn quickBoosts(d: *const Doc, out: []finder.Boost, q: []const u8) []const finder
 
 /// A menu item the palette lists, with its shortcut, whether it's checked,
 /// and whether Late-Night has set it, which dims it.
-const Command = struct { item: Id, act: Sel, tag: isize, keys: []const u8, on: bool, grey: bool };
+const Command = struct { item: Id, act: Sel, tag: isize, target: Id, represented: Id, keys: []const u8, on: bool, grey: bool };
 var cmd_arena: std.heap.ArenaAllocator = .init(gpa);
 var cmd_names: std.ArrayList([]const u8) = .empty;
 var cmds: std.ArrayList(Command) = .empty;
@@ -4723,11 +4855,19 @@ var cmds: std.ArrayList(Command) = .empty;
 /// Lists every command in the menu bar, the View menu's first since the
 /// palette is mostly for settings. Running one runs its menu item, so the
 /// palette never needs its own copy of a command.
-fn listCommands() void {
-    // Each item is retained, so one that AppKit drops while the palette is
-    // open stays safe to run.
-    for (cmds.items) |c| msg(void, c.item, "release", .{});
-    _ = cmd_arena.reset(.retain_capacity);
+fn listCommands(opening: *Doc) void {
+    // Keep the old catalog alive until every palette has rebased its selection.
+    var old_arena = cmd_arena;
+    const old_cmds = cmds.items;
+    defer {
+        for (old_cmds) |c| {
+            msg(void, c.item, "release", .{});
+            msg(void, c.target, "release", .{});
+            msg(void, c.represented, "release", .{});
+        }
+        old_arena.deinit();
+    }
+    cmd_arena = .init(gpa);
     cmd_names = .empty;
     cmds = .empty;
     const bar = msg(Id, msg(Id, objc.class("NSApplication"), "sharedApplication", .{}), "mainMenu", .{});
@@ -4739,6 +4879,29 @@ fn listCommands() void {
         const view_menu = std.mem.eql(u8, objc.utf8(msg(Id, it, "title", .{})), "View");
         if (view_menu == (pass == 0)) addCommands(sub, "");
     };
+    for (docs.items) |d| {
+        const selected: ?Command = if (d != opening and d.mode == .command and d.pick < d.npicks and d.picks[d.pick] < old_cmds.len) old_cmds[d.picks[d.pick]] else null;
+        if (d.palette) {
+            d.prev_n = 0;
+            d.prev_none = false;
+            d.phov_t.snap(0);
+            if (d.mode != .command) d.npicks = 0;
+        }
+        if (d.mode != .command or d.closing) continue;
+        pickFiles(d, true);
+        if (selected) |old| {
+            const selected_index: ?usize = for (d.picks[0..d.npicks], 0..) |index, j| {
+                const c = cmds.items[index];
+                if (c.act == old.act and c.tag == old.tag and c.target == old.target and
+                    (c.represented == old.represented or msg(bool, c.represented, "isEqual:", .{old.represented}))) break j;
+            } else null;
+            if (selected_index) |j| {
+                d.pick = j;
+                showPick(d);
+            } else cancelPrompt(d);
+        }
+        refresh(d);
+    }
 }
 
 /// Adds `menu`'s items. A submenu's items are named after it ("Theme: Dark"),
@@ -4775,7 +4938,9 @@ fn addCommands(menu: Id, prefix: []const u8) void {
         }
         // The same command in two menus, or under a second key, is listed once.
         const tag = msg(isize, it, "tag", .{});
-        if (act == palette_sel or act == window_sel or act == shortcuts_sel or listedAlready(act, tag)) continue;
+        const target = msg(Id, it, "target", .{});
+        const represented = msg(Id, it, "representedObject", .{});
+        if (act == palette_sel or act == window_sel or act == shortcuts_sel or listedAlready(act, tag, target, represented)) continue;
         // Each built-in theme is a command of its own: "Theme: Paper (Light)".
         const name = (if (act == scheme_sel)
             std.fmt.allocPrint(a, "Theme: {s} ({s})", .{ title, if (settings.schemes[@intCast(tag)].dark) "Dark" else "Light" })
@@ -4786,14 +4951,15 @@ fn addCommands(menu: Id, prefix: []const u8) void {
         cmd_names.ensureUnusedCapacity(a, 1) catch return;
         cmds.ensureUnusedCapacity(a, 1) catch return;
         cmd_names.appendAssumeCapacity(name);
-        cmds.appendAssumeCapacity(.{ .item = msg(Id, it, "retain", .{}), .act = act, .tag = tag, .keys = keysOf(a, it) catch "", .on = isChecked(it), .grey = greyed(it) });
+        cmds.appendAssumeCapacity(.{ .item = msg(Id, it, "retain", .{}), .act = act, .tag = tag, .target = msg(Id, target, "retain", .{}), .represented = msg(Id, represented, "retain", .{}), .keys = keysOf(a, it) catch "", .on = isChecked(it), .grey = greyed(it) });
     }
 }
 
-/// Whether the palette already lists a command that runs `act` with `tag`.
-fn listedAlready(act: Sel, tag: isize) bool {
+/// Whether the palette already lists this action with the same destination.
+fn listedAlready(act: Sel, tag: isize, target: Id, represented: Id) bool {
     for (cmds.items) |c| {
-        if (c.act == act and c.tag == tag) return true;
+        if (c.act == act and c.tag == tag and c.target == target and
+            (c.represented == represented or msg(bool, c.represented, "isEqual:", .{represented}))) return true;
     }
     return false;
 }
@@ -5080,7 +5246,7 @@ fn accept(d: *Doc) void {
         },
         .open => openPick(d, .here),
         .command => {
-            if (d.npicks == 0) return;
+            if (d.pick >= d.npicks or d.picks[d.pick] >= cmds.items.len) return;
             const c = cmds.items[d.picks[d.pick]];
             // A command Late-Night set stays put and says why.
             if (c.grey) return toast(d.win, late_night_why);
@@ -5197,7 +5363,7 @@ fn cancelPrompt(d: *Doc) void {
     const n = d.file.ed.text().len;
     d.file.ed.select(@min(d.origin_sel[0], n), @min(d.origin_sel[1], n));
     d.file.sy = d.origin_sy;
-    clampScroll(d);
+    if (!clampScroll(d)) return;
 }
 
 const OpenHow = enum { here, tab, split };
@@ -5217,7 +5383,9 @@ fn openPick(d: *Doc, how: OpenHow) void {
     const path = joinPath(&buf, root orelse return, paths[d.picks[d.pick]]) orelse return;
     d.mode = .edit;
     switch (how) {
-        .here => open(path, d),
+        .here => {
+            _ = open(path, d);
+        },
         .tab => placeFile(d.win, path, .{ .card = d, .zone = .tabs, .k = d.at + 1 }),
         .split => placeBeside(d, path),
     }
@@ -5417,29 +5585,31 @@ fn wrapCols(d: *const Doc) usize {
 }
 
 /// Brings the row counts up to date after edits, a resize or a font change.
-fn layout(d: *Doc) void {
+/// False leaves invalidation intact; callers must not consume row geometry.
+fn layout(d: *Doc) bool {
     const b = &d.file.ed.buf;
     if (!wrapping()) {
         if (b.wraps.items.len > 0) b.wraps.clearAndFree(gpa);
         d.vfirst.clearAndFree(gpa);
-        return;
+        return true;
     }
     const cols = if (d.closing and b.wraps_cols >= 8) b.wraps_cols else wrapCols(d);
     const stale = d.vfirst.items.len != b.lines() + 1;
+    b.wraps.ensureTotalCapacity(gpa, b.lines()) catch return false;
+    d.vfirst.ensureTotalCapacity(gpa, b.lines() + 1) catch return false;
     if (cols != b.wraps_cols or b.wraps.items.len != b.lines()) {
-        b.wraps.resize(gpa, b.lines()) catch return;
+        b.wraps.items.len = b.lines();
         b.wraps_cols = cols;
         @memset(b.wraps.items, 0);
         b.wraps_from = 0;
     }
-    if (b.wraps_from == std.math.maxInt(usize) and !stale) return;
+    if (b.wraps_from == std.math.maxInt(usize) and !stale) return true;
     var from = @min(b.wraps_from, b.lines());
-    b.wraps_from = std.math.maxInt(usize);
     for (b.wraps.items[from..], from..) |*w, i| {
         if (w.* == 0) w.* = @intCast(rowsOf(d, b.line(i), cols));
     }
     const old = d.vfirst.items.len;
-    d.vfirst.resize(gpa, b.lines() + 1) catch return;
+    d.vfirst.items.len = b.lines() + 1;
     if (from >= old) from = 0;
     var acc: u32 = if (from == 0) 0 else d.vfirst.items[from];
     for (from..b.lines()) |i| {
@@ -5447,10 +5617,12 @@ fn layout(d: *Doc) void {
         acc += b.wraps.items[i];
     }
     d.vfirst.items[b.lines()] = acc;
+    b.wraps_from = std.math.maxInt(usize);
+    return true;
 }
 
 fn totalRows(d: *const Doc) usize {
-    return if (wrapping() and d.vfirst.items.len > 0) d.vfirst.items[d.vfirst.items.len - 1] else d.file.ed.buf.lines();
+    return if (wrapping()) d.vfirst.items[d.vfirst.items.len - 1] else d.file.ed.buf.lines();
 }
 
 fn rowOfLine(d: *const Doc, i: usize) usize {
@@ -5519,13 +5691,13 @@ fn segFrom(d: *const Doc, l: []const u8, s: Seg) Seg {
     const tw = d.file.ed.tabWidth();
     if (!wrapping()) return .{ .end = l.len, .tw = tw };
     const cols = d.file.ed.buf.wraps_cols;
-    const ind = if (s.k > 0) hangOf(l, cols, tw) else 0;
+    const ind = if (s.k == 0) 0 else if (s.k == 1) hangOf(l, cols, tw) else s.ind;
     const r = editor.rowEnd(l, s.start, s.col, cols - ind, tw);
     return .{ .k = s.k, .start = s.start, .col = s.col, .end = r.end, .ecol = r.col, .tw = tw, .ind = ind };
 }
 
 fn nextSeg(d: *const Doc, l: []const u8, s: Seg) Seg {
-    return segFrom(d, l, .{ .k = s.k + 1, .start = s.end, .col = s.ecol });
+    return segFrom(d, l, .{ .k = s.k + 1, .start = s.end, .col = s.ecol, .ind = s.ind });
 }
 
 fn wrapCache(dc: *const Doc, l: []const u8, first: *Seg) ?[]const Seg {
@@ -5603,11 +5775,24 @@ fn caretEnd(l: []const u8, s: Seg) usize {
 }
 
 const RowCol = struct { row: usize, col: usize };
+const CaretRowKey = struct { page: u32, changes: u64, cursor: usize, cols: usize, tw: usize, wrap: bool, hang: bool };
 
 /// The caret's screen row, and its column within that row.
-fn caretRow(d: *Doc) RowCol {
-    layout(d);
-    return rowColOf(d, d.file.ed.cur);
+fn caretRow(d: *Doc) ?RowCol {
+    if (!layout(d)) return null;
+    const key: CaretRowKey = .{
+        .page = d.file.id,
+        .changes = d.file.ed.buf.changes,
+        .cursor = d.file.ed.cur,
+        .cols = d.file.ed.buf.wraps_cols,
+        .tw = d.file.ed.tabWidth(),
+        .wrap = wrapping(),
+        .hang = conf.hanging_indent,
+    };
+    if (d.row_key) |old| if (std.meta.eql(old, key)) return d.row_value;
+    d.row_value = rowColOf(d, d.file.ed.cur);
+    d.row_key = key;
+    return d.row_value;
 }
 
 fn rowColOf(d: *const Doc, pos: usize) RowCol {
@@ -5629,15 +5814,16 @@ fn rowOf(d: *const Doc, pos: usize) usize {
 }
 
 /// Up and down by screen rows, keeping the column.
-fn vmove(d: *Doc, delta: isize, extend: bool) void {
+fn vmove(d: *Doc, delta: isize, extend: bool) bool {
     const e = &d.file.ed;
-    const here = caretRow(d);
+    const here = caretRow(d) orelse return false;
     const want = e.want orelse here.col;
     const to = @as(isize, @intCast(here.row)) + delta;
     const r: usize = @intCast(std.math.clamp(to, 0, @as(isize, @intCast(totalRows(d) - 1))));
     const pos = if (r == here.row) (if (delta < 0) @as(usize, 0) else e.text().len) else byteAtRow(d, r, f(want));
     e.moveTo(pos, extend);
     e.want = want;
+    return true;
 }
 
 fn byteAtRow(d: *const Doc, row: usize, x: f64) usize {
@@ -5650,8 +5836,8 @@ fn byteAtRow(d: *const Doc, row: usize, x: f64) usize {
 
 /// ⌘← and ⌘→ while wrapped: the ends of the screen row. False on a line's
 /// first row going left, where the editor's smart home takes over.
-fn rowEdge(d: *Doc, right: bool, extend: bool) bool {
-    layout(d);
+fn rowEdge(d: *Doc, right: bool, extend: bool) ?bool {
+    if (!layout(d)) return null;
     const b = &d.file.ed.buf;
     const i = b.lineOf(d.file.ed.cur);
     const l = b.line(i);
@@ -5668,18 +5854,19 @@ const past_end = 3;
 
 /// The scroll's top and bottom. Typewriter mode lets the first and last
 /// rows reach the middle, so the top can be negative.
-fn scrollRange(d: *Doc) [2]f64 {
+fn scrollRange(d: *Doc) ?[2]f64 {
     // A scroll can come before the draw that lays out a tab just shown.
-    layout(d);
+    if (!layout(d)) return null;
     const lo = if (conf.typewriter) (lh - textH(d)) / 2 else 0;
     const hi = if (conf.typewriter) lo + f(totalRows(d) -| 1) * lh else f(totalRows(d) + past_end) * lh - textH(d);
     return .{ lo, @max(lo, hi) };
 }
 
-fn clampScroll(d: *Doc) void {
-    const range = scrollRange(d);
+fn clampScroll(d: *Doc) bool {
+    const range = scrollRange(d) orelse return false;
     d.file.sy = std.math.clamp(d.file.sy, range[0], range[1]);
     d.file.sx = if (wrapping()) 0 else @max(d.file.sx, 0);
+    return true;
 }
 
 /// Centers the caret's row in typewriter mode; otherwise scrolls just
@@ -5687,7 +5874,7 @@ fn clampScroll(d: *Doc) void {
 /// fewer when the card is too short for them.
 const scroll_off = 2;
 fn reveal(d: *Doc) void {
-    const c = caretRow(d);
+    const c = caretRow(d) orelse return;
     const y = f(c.row) * lh;
     const th = textH(d);
     if (conf.typewriter) {
@@ -5703,12 +5890,13 @@ fn reveal(d: *Doc) void {
         if (x < d.file.sx) d.file.sx = @max(0, x - 8 * cw);
         if (x > d.file.sx + tw - cw) d.file.sx = x - tw + 8 * cw;
     }
-    clampScroll(d);
+    if (!clampScroll(d)) return;
 }
 
 /// Puts the caret a third of the way down when it's off screen.
 fn center(d: *Doc) void {
-    const y = f(caretRow(d).row) * lh;
+    const c = caretRow(d) orelse return;
+    const y = f(c.row) * lh;
     if (y < d.file.sy or y + lh > d.file.sy + textH(d)) d.file.sy = y - textH(d) / 3;
     reveal(d);
 }
@@ -5858,20 +6046,20 @@ pub const ax = struct {
     }
 
     /// The cell of the character at byte `pos`, one column wide.
-    pub fn cell(d: *Doc, pos: usize) Rect {
-        layout(d);
+    pub fn cell(d: *Doc, pos: usize) ?Rect {
+        if (!layout(d)) return null;
         const c = rowColOf(d, pos);
         return .{ .x = d.org.x + gap + padL(d) + f(c.col) * cw - d.vx, .y = d.org.y + top_h + f(c.row) * lh - d.vy, .w = cw, .h = lh };
     }
 
     /// The byte nearest `p`.
-    pub fn posAtPoint(d: *Doc, p: Point) usize {
+    pub fn posAtPoint(d: *Doc, p: Point) ?usize {
         return posAt(d, inPane(d, p));
     }
 
     /// The bytes on show, from the top row's start to the bottom row's end.
-    pub fn visible(d: *Doc) [2]usize {
-        return .{ posAt(d, .{ .y = top_h }), posAt(d, .{ .x = 1e9, .y = bottom(d) - 1 }) };
+    pub fn visible(d: *Doc) ?[2]usize {
+        return .{ posAt(d, .{ .y = top_h }) orelse return null, posAt(d, .{ .x = 1e9, .y = bottom(d) - 1 }) orelse return null };
     }
 
     /// Selects `anchor` to `cur` and brings the caret into view.
@@ -5944,11 +6132,11 @@ pub const ax = struct {
     pub fn rowRect(w: *const Win, i: usize) Rect {
         const now = CACurrentMediaTime();
         const sy = sideOffset(w, now);
-        var stuck: [max_stuck]usize = undefined;
-        const n = stuckRows(sy, &stuck);
-        for (stuck[0..n], 0..) |k, slot| if (k == i) return .{ .y = pinnedY(k, slot, sy), .w = side_w, .h = side_h };
         var vs: [2]FoldView = undefined;
         const vn = foldViews(tree.rows.items, now, &vs);
+        var stuck: [max_stuck]usize = undefined;
+        const n = stuckRows(sy, vs[0..vn], &stuck);
+        for (stuck[0..n], 0..) |k, slot| if (k == i) return .{ .y = pinnedY(k, slot, sy, vs[0..vn]), .w = side_w, .h = side_h };
         return .{ .y = listTop() + f(i) * side_h - shiftOf(vs[0..vn], i) - sy, .w = side_w, .h = side_h };
     }
 
@@ -5972,8 +6160,7 @@ pub const ax = struct {
         }
         const path = std.fmt.allocPrint(gpa, "{s}/{s}", .{ root orelse return false, want }) catch return false;
         defer gpa.free(path);
-        open(path, w.focus);
-        return true;
+        return open(path, w.focus);
     }
 };
 
@@ -6041,7 +6228,7 @@ const Kinds = struct {
 
 /// For a new language or file: every line lexes again.
 fn clearSyntax(d: *Doc) void {
-    d.file.states.clearRetainingCapacity();
+    if (syntax.needsState(d.file.lang)) d.file.states.clearRetainingCapacity() else d.file.states.clearAndFree(gpa);
     for (&d.lex) |*x| x.clear();
 }
 
@@ -6067,7 +6254,7 @@ fn lineKinds(d: *Doc, i: usize, l: []const u8, walk: *usize, reuse: bool) ?usize
     while (walk.* < old.len and old[walk.*].line < i) walk.* += 1;
     if (walk.* < old.len and old[walk.*].line == i) {
         @memcpy(out, d.lex[1].kinds.items[old[walk.*].at..][0..l.len]);
-    } else _ = syntax.lexLine(d.file.lang, l, d.file.states.items[i], out);
+    } else _ = syntax.lexLine(d.file.lang, l, if (syntax.needsState(d.file.lang)) d.file.states.items[i] else .normal, out);
     return at;
 }
 
@@ -6450,15 +6637,14 @@ const max_stuck = 3;
 /// `out`. An open folder pins the moment its row reaches its slot, so it never
 /// slides under the ones above. They pin over the rows they cover, so the row
 /// they hold is the one under them: a few passes settle it.
-fn stuckRows(sy: f64, out: *[max_stuck]usize) usize {
+fn stuckRows(sy: f64, vs: []const FoldView, out: *[max_stuck]usize) usize {
     const rows = tree.rows.items;
     var n: usize = 0;
     for (0..max_stuck + 1) |_| {
-        const t = @as(usize, @intFromFloat(@max(@floor(sy / side_h), 0))) + n;
-        if (t >= rows.len) break;
+        const t = foldedRow(@max(sy, 0) + f(n) * side_h, vs, rows.len) orelse break;
         var m: usize = 0;
         // Only once it has moved past its slot: sitting exactly on it, the row draws itself.
-        const past = rows[t].depth >= n and sy > @as(f64, @floatFromInt(t - n)) * side_h;
+        const past = rows[t].depth >= n and sy > f(t) * side_h - shiftOf(vs, t) - f(n) * side_h;
         if (past and t + 1 < rows.len and rows[t + 1].depth > rows[t].depth and rows[t].depth < max_stuck) {
             out[rows[t].depth] = t;
             m += 1;
@@ -6481,18 +6667,19 @@ fn stuckRows(sy: f64, out: *[max_stuck]usize) usize {
     return n;
 }
 
-fn pinnedY(i: usize, slot: usize, sy: f64) f64 {
-    return @min(listTop() + f(slot) * side_h, listTop() + f(tree.end(i)) * side_h - sy - side_h);
+fn pinnedY(i: usize, slot: usize, sy: f64, vs: []const FoldView) f64 {
+    const end = tree.end(i);
+    return @min(listTop() + f(slot) * side_h, listTop() + f(end) * side_h - shiftOf(vs, end) - sy - side_h);
 }
 
 /// The pinned folder under `y`, if any.
-fn pinnedAt(w: *const Win, y: f64) ?usize {
+fn pinnedAt(w: *const Win, y: f64, now: f64, vs: []const FoldView) ?usize {
     if (y < listTop() or y >= msg(Rect, w.view, "bounds", .{}).h - gap) return null;
-    const sy = sideOffset(w, CACurrentMediaTime());
+    const sy = sideOffset(w, now);
     var stuck: [max_stuck]usize = undefined;
-    const n = stuckRows(sy, &stuck);
+    const n = stuckRows(sy, vs, &stuck);
     for (stuck[0..n], 0..) |i, slot| {
-        const top = pinnedY(i, slot, sy);
+        const top = pinnedY(i, slot, sy, vs);
         if (y >= top and y < top + side_h) return i;
     }
     return null;
@@ -6500,31 +6687,53 @@ fn pinnedAt(w: *const Win, y: f64) ?usize {
 
 /// The tree row under `y`: a pinned folder, or a row in the list.
 fn sideRow(w: *const Win, y: f64) ?usize {
-    return pinnedAt(w, y) orelse listRow(w, y);
+    const now = CACurrentMediaTime();
+    var vs: [2]FoldView = undefined;
+    const vn = foldViews(tree.rows.items, now, &vs);
+    return pinnedAt(w, y, now, vs[0..vn]) orelse listRow(w, y, now, vs[0..vn]);
 }
 
 fn sideOffset(w: *const Win, now: f64) f64 {
     return if (w.side_t.moving(now)) w.side_t.at(now) else w.side_y;
 }
 
-fn listRow(w: *const Win, y: f64) ?usize {
+fn listRow(w: *const Win, y: f64, now: f64, vs: []const FoldView) ?usize {
     if (y < listTop() or y >= msg(Rect, w.view, "bounds", .{}).h - gap) return null;
-    // Rows after a folding folder have slid up by how far it's shut, so a
-    // click lands on the row it shows, in the tree's own numbering.
-    const now = CACurrentMediaTime();
-    var ly = y - listTop() + sideOffset(w, now);
-    var vs: [2]FoldView = undefined;
-    const vn = foldViews(tree.rows.items, now, &vs);
-    if (vn == 2 and vs[0].rest > vs[1].rest) std.mem.swap(FoldView, &vs[0], &vs[1]);
+    return foldedRow(y - listTop() + sideOffset(w, now), vs, tree.rows.items.len);
+}
+
+/// Inverts the same fold offsets used by drawing and pinned ancestors.
+fn foldedRow(y: f64, vs: []const FoldView, row_count: usize) ?usize {
+    var ly = y;
     var cum: f64 = 0;
-    for (vs[0..vn]) |v| {
+    for (vs) |v| {
         if (ly < f(v.rest) * side_h - cum - v.off) break;
         cum += v.off;
     }
     ly += cum;
     const at = @floor(ly / side_h);
-    if (at < 0 or at >= f(tree.rows.items.len)) return null;
+    if (at < 0 or at >= f(row_count)) return null;
     return @intFromFloat(at);
+}
+
+test "folded row geometry maps compressed neighbors and endpoints" {
+    var vs = [_]FoldView{
+        .{ .at = 0, .rest = 21, .n = 20, .p = 0.5, .off = 10 * side_h, .closing = true },
+        .{ .at = 21, .rest = 26, .n = 4, .p = 0.5, .off = 2 * side_h, .closing = false },
+    };
+    try std.testing.expectEqual(@as(?usize, 21), foldedRow(11 * side_h, &vs, 30));
+    try std.testing.expectEqual(@as(?usize, 26), foldedRow(14 * side_h, &vs, 30));
+    for ([_]usize{ 0, 21, 26, 29 }) |row| {
+        try std.testing.expectEqual(@as(?usize, row), foldedRow(f(row) * side_h - shiftOf(&vs, row), &vs, 30));
+    }
+    try std.testing.expectEqual(@as(?usize, null), foldedRow(-1, &vs, 30));
+    try std.testing.expectEqual(@as(?usize, null), foldedRow(18 * side_h, &vs, 30));
+    vs[0].off = 20 * side_h;
+    vs[0].p = 0;
+    try std.testing.expectEqual(@as(?usize, 21), foldedRow(side_h, vs[0..1], 30));
+    vs[0].off = 0;
+    vs[0].p = 1;
+    try std.testing.expectEqual(@as(?usize, 21), foldedRow(21 * side_h, vs[0..1], 30));
 }
 
 /// Folders open and close over this long: the rows below slide while the
@@ -6558,11 +6767,12 @@ const FoldView = struct { at: usize, rest: usize, n: usize, p: f64, off: f64, cl
 fn foldViews(rows: []const tree_mod.Row, now: f64, out: *[2]FoldView) usize {
     var nv: usize = 0;
     for (&folds) |*o| {
-        if (!o.t.moving(now) or o.at >= rows.len or !std.mem.eql(u8, rows[o.at].rel, o.rel[0..o.len])) continue;
+        if ((!o.closing and !o.t.moving(now)) or o.at >= rows.len or !std.mem.eql(u8, rows[o.at].rel, o.rel[0..o.len])) continue;
         const p = std.math.clamp(o.t.at(now), 0, 1);
         out[nv] = .{ .at = o.at, .rest = o.at + o.n + 1, .n = o.n, .p = p, .off = (1 - p) * f(o.n) * side_h, .closing = o.closing };
         nv += 1;
     }
+    if (nv == 2 and out[0].rest > out[1].rest) std.mem.swap(FoldView, &out[0], &out[1]);
     return nv;
 }
 
@@ -6641,13 +6851,17 @@ fn startFold(i: usize) void {
     const fo = &folds[0];
     @memcpy(fo.rel[0..rel.len], rel);
     fo.len = rel.len;
-    fo.at = at;
     fo.closing = shut;
     if (!shut) {
         tree.toggle(gpa, rel);
         rebuildTree();
-        refindFold(&folds[1], now);
+        at = tree.rowOf(rel) orelse {
+            fo.closing = false;
+            fo.t.snap(1);
+            return;
+        };
     }
+    fo.at = at;
     fo.t.snap(if (shut) 1 else 0);
     fo.t.aim(if (shut) 0 else 1, now);
     fo.n = tree.end(at) - at - 1;
@@ -6663,8 +6877,6 @@ fn finishFold(o: *Fold) void {
         tree.toggle(gpa, o.rel[0..o.len]);
         rebuildTree();
     }
-    const now = CACurrentMediaTime();
-    for (&folds) |*x| if (x != o) refindFold(x, now);
     for (wins.items) |w| hoverNow(w);
     for (wins.items) |w| redrawSide(w);
 }
@@ -6907,16 +7119,17 @@ fn drawSide(w: *Win, ctx: Id, th: *const Theme, dark: bool, key: bool, bg: Rgb, 
     // Pinned folders, each held up by the end of its rows, the outer ones
     // drawn last so they stay on top. The one under the mouse lights like a
     // row, on its own highlight, so the rows' highlight stays under the pins.
-    w.nstuck = stuckRows(sy, &w.stuck);
+    var stuck: [max_stuck]usize = undefined;
+    const nstuck = stuckRows(sy, vs[0..vn], &stuck);
     if (w.hov_pin) |hp| w.pin_row = hp;
     w.pin_t.aim(if (w.hov_pin != null) 1 else 0, now);
     const pin_a = w.pin_t.at(now);
     var low = lt;
-    var j = w.nstuck;
+    var j = nstuck;
     while (j > 0) {
         j -= 1;
-        const a = w.stuck[j];
-        const y = pinnedY(a, j, sy);
+        const a = stuck[j];
+        const y = pinnedY(a, j, sy, vs[0..vn]);
         objc.CGContextClearRect(ctx, .{ .y = y, .w = side_w, .h = side_h });
         fillA(ctx, bg, chromeAlpha(th, dark, w.z.x), 0, y, side_w, side_h);
         if (a == w.pin_row and pin_a > 0.01) sideHoverPill(ctx, th, dark, key, pin_a * fade, y);
@@ -6984,13 +7197,16 @@ fn fadeList(ctx: Id, bg: Rgb, a: f64, end: f64, h: f64, erase_only: bool) void {
 /// A folder opens or closes; a file shows in the focused card, or with ⌘
 /// in a new window.
 fn sideClick(w: *Win, p: Point, flags: usize) void {
-    finishFolds(CACurrentMediaTime());
-    const i = sideRow(w, p.y) orelse return;
+    const now = CACurrentMediaTime();
+    finishFolds(now);
+    var vs: [2]FoldView = undefined;
+    const vn = foldViews(tree.rows.items, now, &vs);
+    const pin = pinnedAt(w, p.y, now, vs[0..vn]);
+    const i = pin orelse listRow(w, p.y, now, vs[0..vn]) orelse return;
     // A pinned folder scrolls back to where its rows start.
-    if (pinnedAt(w, p.y) != null) {
-        const now = CACurrentMediaTime();
+    if (pin != null) {
         w.side_t.snap(sideOffset(w, now));
-        w.side_y = f(i) * side_h;
+        w.side_y = f(i) * side_h - shiftOf(vs[0..vn], i);
         w.side_t.aim(w.side_y, now);
         return redrawSide(w);
     }
@@ -7072,7 +7288,7 @@ fn sideKey(w: *Win, ev: Id) bool {
             var buf: [std.fs.max_path_bytes]u8 = undefined;
             const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ root.?, rows[i].rel }) catch return true;
             w.side_key = false;
-            open(path, w.focus);
+            _ = open(path, w.focus);
             redrawSide(w);
             return true;
         },
@@ -7111,7 +7327,7 @@ fn sideShowRow(w: *Win, i: usize) void {
     const vn = foldViews(tree.rows.items, now, &vs);
     const y = f(i) * side_h - shiftOf(vs[0..vn], i);
     var stuck: [max_stuck]usize = undefined;
-    const pinned = f(stuckRows(sideOffset(w, now), &stuck)) * side_h;
+    const pinned = f(stuckRows(sideOffset(w, now), vs[0..vn], &stuck)) * side_h;
     var to = w.side_y;
     if (y < w.side_y + pinned) to = y - pinned else if (y + side_h > w.side_y + view_h) to = y + side_h - view_h;
     to = @max(0, to);
@@ -7301,7 +7517,7 @@ fn themeOf(w: *Win) *const Theme {
 
 /// `kinds` is the row's line's offset in `lex[0].kinds`, not a slice, since
 /// lexing a later row can move that buffer.
-const VRow = struct { line: usize, seg: Seg, kinds: ?usize = null, reach: u8 = 0 };
+const VRow = struct { line: usize, seg: Seg, trail: usize, kinds: ?usize = null, reach: u8 = 0 };
 
 fn cardRect(d: *const Doc) Rect {
     return .{ .x = gap, .y = gap, .w = d.size.x - 2 * gap, .h = d.size.y - 2 * gap };
@@ -7655,10 +7871,14 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     const b = &d.file.ed.buf;
     d.gut.aim(gutCols(d), now);
     d.gw = d.gut.at(now) * cw * zen_k;
-    layout(d);
+    const here = caretRow(d) orelse {
+        d.shown = false;
+        moveCaret(d, now);
+        return;
+    };
     if (conf.typewriter and d.center_h != textH(d)) reveal(d);
     d.center_h = textH(d);
-    clampScroll(d);
+    if (!clampScroll(d)) return;
     // Jumps glide the scroll. Stepping past the edge a few rows at a time and
     // live resizing snap it (the trackpad snaps in scrollWheel), and the caret
     // and band move with the page so they don't bounce back to the edge.
@@ -7686,7 +7906,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     d.vx = d.xs.at(now);
     // The Markdown preview follows the previewed file down the page.
     if (preview.shownFor(d.file.id)) {
-        const range = scrollRange(d);
+        const range = scrollRange(d) orelse return;
         const span = range[1] - range[0];
         const fr = if (span > 0) std.math.clamp((d.vy - range[0]) / span, 0, 1) else 0;
         if (fr != preview_frac) {
@@ -7717,7 +7937,6 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     // the left, rather than running into the card's border.
     const cols: usize = @intFromFloat(@max(@floor((card.x + card.w - pad_x - ox) / cw), 0));
     const s = d.file.ed.sel();
-    const here = caretRow(d);
     const finding = (d.mode == .find or d.mode == .replace) and d.prompt.items.len > 0;
 
     // The screen rows in view, and the line and part of it each one shows.
@@ -7727,9 +7946,11 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
     if (first < last) {
         var i = lineOfRow(d, first);
         var sg = segN(d, b.line(i), first - rowOfLine(d, i));
+        var trail = if (conf.show_invisibles == .trailing) std.mem.trimEnd(u8, b.line(i), " \t\r").len else 0;
         while (nvis < @min(last - first, vis.len)) {
-            vis[nvis] = .{ .line = i, .seg = sg };
+            vis[nvis] = .{ .line = i, .seg = sg, .trail = trail };
             nvis += 1;
+            if (nvis == @min(last - first, vis.len)) break;
             const l = b.line(i);
             if (sg.end < l.len) {
                 sg = nextSeg(d, l, sg);
@@ -7737,6 +7958,7 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
                 i += 1;
                 if (i >= b.lines()) break;
                 sg = segFrom(d, b.line(i), .{});
+                trail = if (conf.show_invisibles == .trailing) std.mem.trimEnd(u8, b.line(i), " \t\r").len else 0;
             }
         }
     }
@@ -7938,12 +8160,13 @@ fn drawPane(d: *Doc, ctx: Id, th: *const Theme, dark: bool, win_key: bool, many:
             if (pass == 0) {
                 if (v.line != lexed) {
                     lexed = v.line;
-                    kinds = if (d.file.lang != &syntax.plain and v.line < d.file.states.items.len) lineKinds(d, v.line, l, &walk, reuse_kinds) else null;
+                    kinds = if (d.file.lang != &syntax.plain and (!syntax.needsState(d.file.lang) or v.line < d.file.states.items.len)) lineKinds(d, v.line, l, &walk, reuse_kinds) else null;
                 }
                 v.kinds = kinds;
             }
             const ks: ?[]const syntax.Kind = if (v.kinds) |at| d.lex[0].kinds.items[at..][0..l.len] else null;
             k.offset = ls;
+            k.trail = v.trail;
             const row_y = top_h + f(row) * lh - d.vy;
             // Later passes redraw only the last columns, at the x pass 0 gives them.
             // A wrapped row's hanging indent moves it right.
@@ -8122,7 +8345,7 @@ fn scanWide(d: *Doc, from: usize, to: usize, tw: usize) void {
 
 fn drawBar(d: *Doc, ctx: Id, th: *const Theme, card: Rect, snap: WideSnap, now: f64) void {
     const bar_room = textH(d);
-    const range = scrollRange(d);
+    const range = scrollRange(d) orelse return;
     const bar_span = range[1] - range[0];
     // How far the text scrolls sideways: the longest line in display columns,
     // measured again after edits or tab-width changes.
@@ -8704,7 +8927,9 @@ fn runHint(d: *Doc, i: usize) void {
         .open => openPanel(),
         .recent, .folder => |j| {
             const list = switch (d.hints[i].act) { .recent => recentFiles(), else => recentFolders() };
-            if (j < msg(usize, list, "count", .{})) open(objc.utf8(msg(Id, list, "objectAtIndex:", .{@as(usize, j)})), d);
+            if (j < msg(usize, list, "count", .{})) {
+                _ = open(objc.utf8(msg(Id, list, "objectAtIndex:", .{@as(usize, j)})), d);
+            }
         },
     }
     if (ax.alive(d)) refresh(d);
@@ -9472,7 +9697,10 @@ fn aimPreview(w: *Win, now: f64) void {
 /// enough opens as a click does.
 fn dropTab(w: *Win, t: TabDrag) void {
     if (t.file) |path| {
-        if (!t.live) return open(path, if (t.cmd) null else w.focus);
+        if (!t.live) {
+            _ = open(path, if (t.cmd) null else w.focus);
+            return;
+        }
         if (t.drop) |dr| placeFile(w, path, dr);
         return;
     }
@@ -9499,6 +9727,7 @@ fn moveTab(from: *Doc, j: usize, dr: Drop) void {
     const last = tabCount(from) == 1;
     if (last and dr.card == from) return;
     const to = landing(dr) orelse return;
+    if (replaceable(to) and !discardDraft(&to.file)) return;
     if (!replaceable(to)) to.pages.ensureUnusedCapacity(gpa, 1) catch return;
     const pg = takeTab(from, j) orelse return;
     _ = putTab(to, pg, dr.k);
@@ -9512,7 +9741,10 @@ fn moveTab(from: *Doc, j: usize, dr: Drop) void {
 /// there instead, and one open in another window comes forward in it.
 fn placeFile(w: *Win, path: [:0]const u8, dr: Drop) void {
     if (holder(path)) |h| {
-        if (h.d.win != w) return open(path, null);
+        if (h.d.win != w) {
+            _ = open(path, null);
+            return;
+        }
         if (h.d == dr.card and !splitZone(dr.zone)) {
             showTab(h.d, h.j);
             return focus(h.d);
@@ -9810,13 +10042,10 @@ fn doCommand(self: Id, _: Sel, sel: Sel) callconv(.c) void {
 fn edit(d: *Doc, name: []const u8, extend: bool) !bool {
     const e = &d.file.ed;
     const by: ?isize = if (is(name, "moveUp")) -1 else if (is(name, "moveDown")) 1 else if (is(name, "pageUp")) -@as(isize, @intCast(pageLines(d))) else if (is(name, "pageDown")) @as(isize, @intCast(pageLines(d))) else null;
-    if (by) |b| {
-        vmove(d, b, extend);
-        return true;
-    }
+    if (by) |b| return vmove(d, b, extend);
     for (moves) |m| if (std.mem.eql(u8, m[0], name)) {
         if (wrapping()) switch (m[1]) {
-            .home, .end => if (rowEdge(d, m[1] == .end, extend)) return true,
+            .home, .end => if (rowEdge(d, m[1] == .end, extend) orelse return false) return true,
             else => {},
         };
         e.move(m[1], extend);
@@ -9837,14 +10066,17 @@ fn edit(d: *Doc, name: []const u8, extend: bool) !bool {
     } else if (is(name, "cancelOperation")) {
         e.select(e.cur, e.cur);
     } else if (is(name, "scrollPageUp") or is(name, "scrollPageDown")) {
+        if (!layout(d)) return false;
         d.file.sy += if (is(name, "scrollPageUp")) -textH(d) + lh else textH(d) - lh;
-        clampScroll(d);
+        if (!clampScroll(d)) return false;
         return false;
     } else if (is(name, "scrollToBeginningOfDocument") or is(name, "scrollToEndOfDocument")) {
+        if (!layout(d)) return false;
         d.file.sy = if (is(name, "scrollToBeginningOfDocument")) 0 else std.math.inf(f64);
-        clampScroll(d);
+        if (!clampScroll(d)) return false;
         return false;
     } else if (is(name, "centerSelectionInVisibleArea")) {
+        if (!layout(d)) return false;
         d.file.sy = std.math.inf(f64);
         center(d);
         return false;
@@ -9852,8 +10084,8 @@ fn edit(d: *Doc, name: []const u8, extend: bool) !bool {
     return true;
 }
 
-fn posAt(d: *Doc, p: Point) usize {
-    layout(d);
+fn posAt(d: *Doc, p: Point) ?usize {
+    if (!layout(d)) return null;
     const yy = p.y - top_h + d.vy;
     const row: usize = if (yy < 0) 0 else @min(@as(usize, @intFromFloat(yy / lh)), totalRows(d) - 1);
     // A click in the line numbers lands at the start of its row.
@@ -10001,7 +10233,7 @@ fn cardDown(d: *Doc, p: Point, ev: Id) void {
     d.win.side_down = false;
     d.mode = .edit;
     const e = &d.file.ed;
-    const pos = posAt(d, p);
+    const pos = posAt(d, p) orelse return;
     const shift = msg(usize, ev, "modifierFlags", .{}) & objc.shift_key != 0;
     // A click in the line numbers takes the whole line, and dragging there takes more lines.
     const in_gutter = d.gw >= cw and p.x < gap + padL(d) - 0.5 * cw;
@@ -10056,17 +10288,17 @@ fn barDown(d: *Doc, p: Point) bool {
 fn barTo(d: *Doc, p: Point, glide: bool) void {
     const now = CACurrentMediaTime();
     if (d.bar_drag == .v) {
-        const range = scrollRange(d);
+        const range = scrollRange(d) orelse return;
         const room = d.vtrack.h - d.vknob.h;
         const fr = if (room > 0) std.math.clamp((p.y - d.bar_off - d.vtrack.y) / room, 0, 1) else 0;
         d.file.sy = range[0] + fr * (range[1] - range[0]);
-        clampScroll(d);
+        if (!clampScroll(d)) return;
         if (glide) d.ys.aimOver(d.file.sy, scroll_time, now) else d.ys.snap(d.file.sy);
     } else if (d.bar_drag == .h) {
         const room = d.htrack.w - d.hknob.w;
         const fr = if (room > 0) std.math.clamp((p.x - d.bar_off - d.htrack.x) / room, 0, 1) else 0;
         d.file.sx = fr * d.hmax;
-        clampScroll(d);
+        if (!clampScroll(d)) return;
         if (glide) d.xs.aimOver(d.file.sx, scroll_time, now) else d.xs.snap(d.file.sx);
     }
     d.bar_t0 = now;
@@ -10260,8 +10492,11 @@ fn sideHover(w: *Win, p: Point) void {
     var row: ?usize = null;
     var pin: ?usize = null;
     if (sideShown(w) and p.x < side_w - edge_grab and p.y >= listTop() and w.tdrag == null) {
-        pin = pinnedAt(w, p.y);
-        if (pin == null) row = listRow(w, p.y);
+        const now = CACurrentMediaTime();
+        var vs: [2]FoldView = undefined;
+        const vn = foldViews(tree.rows.items, now, &vs);
+        pin = pinnedAt(w, p.y, now, vs[0..vn]);
+        if (pin == null) row = listRow(w, p.y, now, vs[0..vn]);
     }
     if (pin != w.hov_pin) {
         w.hov_pin = pin;
@@ -10369,7 +10604,7 @@ fn mouseUp(self: Id, _: Sel, _: Id) callconv(.c) void {
     endSideDrag(w);
     if (side_rest != conf.sidebar_width) {
         var buf: [24]u8 = undefined;
-        store(.@"sidebar-width", settings.decimal(&buf, side_rest));
+        _ = store(.@"sidebar-width", settings.decimal(&buf, side_rest));
     }
     // Let go past a limit and the edge springs back.
     if (side_stretch.x != 0) {
@@ -10435,6 +10670,7 @@ fn dragSpeed(dist: f64, unit: f64) f64 {
 /// mouse holds still out there.
 fn dragText(w: *Win, at: Point) void {
     const d = w.focus;
+    if (!layout(d)) return;
     d.snap = true;
     const p = inPane(d, at);
     const sy = d.file.sy;
@@ -10447,10 +10683,10 @@ fn dragText(w: *Win, at: Point) void {
         if (p.x < left and d.file.sx > 0) d.file.sx -= dragSpeed(left - p.x, cw);
         if (p.x > right and d.file.sx < d.hmax) d.file.sx = @min(d.hmax, d.file.sx + dragSpeed(p.x - right, cw));
     }
-    clampScroll(d);
+    if (!clampScroll(d)) return;
     d.ys.snap(d.file.sy);
     d.xs.snap(d.file.sx);
-    const pos = posAt(d, p);
+    const pos = posAt(d, p) orelse return;
     if (d.drag == .char) {
         d.file.ed.moveTo(pos, true);
     } else {
@@ -10511,9 +10747,10 @@ fn scrollWheel(self: Id, _: Sel, ev: Id) callconv(.c) void {
         hoverAt(w, at);
         return msg(void, w.view, "setNeedsDisplay:", .{true});
     }
+    if (!layout(d)) return;
     d.file.sx -= dx;
     d.file.sy -= dy;
-    clampScroll(d);
+    if (!clampScroll(d)) return;
     // A trackpad follows the fingers; a mouse wheel's clicks glide.
     if (precise) {
         d.ys.snap(d.file.sy);
@@ -10601,7 +10838,7 @@ fn toolTip(self: Id, _: Sel, _: Id, _: isize, p: Point, _: ?*anyopaque) callconv
     if (!sideShown(w) or p.x >= side_w) return null;
     const r = root orelse return null;
     if (p.y < listTop()) return if (p.y >= top_h) objc.str(tilde(&buf, r)) else null;
-    const i = pinnedAt(w, p.y) orelse listRow(w, p.y) orelse return null;
+    const i = sideRow(w, p.y) orelse return null;
     var full: [std.fs.max_path_bytes]u8 = undefined;
     return objc.str(tilde(&buf, std.fmt.bufPrint(&full, "{s}/{s}", .{ r, tree.rows.items[i].rel }) catch return null));
 }
@@ -10667,7 +10904,7 @@ fn performDrag(self: Id, _: Sel, sender: Id) callconv(.c) bool {
     const n = if (urls != null) msg(usize, urls, "count", .{}) else 0;
     for (0..n) |i| {
         if (!ax.winAlive(w)) break;
-        open(objc.utf8(msg(Id, msg(Id, urls, "objectAtIndex:", .{i}), "path", .{})), w.focus);
+        _ = open(objc.utf8(msg(Id, msg(Id, urls, "objectAtIndex:", .{i}), "path", .{})), w.focus);
     }
     return n > 0;
 }
@@ -10786,7 +11023,7 @@ fn openRecentFolder(_: Id, _: Sel, item: Id) callconv(.c) void {
     var z: [std.fs.max_path_bytes]u8 = undefined;
     const dir = std.fmt.bufPrintSentinel(&z, "{s}", .{p}, 0) catch return;
     if (!files.isDir(dir)) return toastFront("That folder is gone");
-    open(dir, keyDoc());
+    _ = open(dir, keyDoc());
 }
 
 /// A folder picked in the folder name's menu, by how many levels above the
@@ -10855,7 +11092,7 @@ fn menuForEvent(self: Id, _: Sel, ev: Id) callconv(.c) Id {
         // A right-click outside the selection moves the caret there first,
         // so the menu acts where it opened.
         if (d.mode == .edit) {
-            const pos = posAt(d, lp);
+            const pos = posAt(d, lp) orelse return null;
             const s = d.file.ed.sel();
             if (s[0] == s[1] or pos < s[0] or pos > s[1]) {
                 d.file.ed.moveTo(pos, false);
@@ -11032,7 +11269,7 @@ fn openInNewSplit(_: Id, _: Sel, _: Id) callconv(.c) void {
 }
 
 fn openInNewWindow(_: Id, _: Sel, _: Id) callconv(.c) void {
-    open(menuFile(), null);
+    _ = open(menuFile(), null);
 }
 
 fn revealInFinder(_: Id, _: Sel, _: Id) callconv(.c) void {
@@ -11097,7 +11334,9 @@ fn sideCreate(folder: bool) void {
         return failed("Couldn't make the file.", p);
     };
     sideChanged(p);
-    if (!folder and ax.winAlive(w.?)) open(p, w.?.focus);
+    if (!folder and ax.winAlive(w.?)) {
+        _ = open(p, w.?.focus);
+    }
 }
 
 /// The side menu's Rename…: open tabs of the file, or of files in the
@@ -11132,7 +11371,7 @@ fn movedPath(old: []const u8, new: []const u8) void {
         const lang = langOf(pg, np);
         if (lang != pg.lang) {
             pg.lang = lang;
-            pg.states.clearRetainingCapacity();
+            if (syntax.needsState(lang)) pg.states.clearRetainingCapacity() else pg.states.clearAndFree(gpa);
         }
         pg.stamp = files.stamp(np);
         if (j == d.at) {
@@ -11189,7 +11428,13 @@ fn collapseAll(_: Id, _: Sel, _: Id) callconv(.c) void {
 }
 
 fn windowShouldClose(self: Id, _: Sel, _: Id) callconv(.c) bool {
-    return settle(winOf(self) orelse return true, false);
+    if (quitting) return true;
+    const w = winOf(self) orelse return true;
+    if (!settle(w, false)) return false;
+    for (docs.items) |d| if (d.win == w and !d.closing) {
+        for (0..tabCount(d)) |j| if (!discardDraft(tabPage(d, j))) return false;
+    };
+    return true;
 }
 
 fn windowWillClose(self: Id, _: Sel, _: Id) callconv(.c) void {
@@ -11445,9 +11690,8 @@ fn zoom(by: f64) void {
 /// Writes the last zoom's size, unless a later zoom (`ctx` is its count) is waiting.
 fn zoomWrite(ctx: ?*anyopaque) callconv(.c) void {
     if (@intFromPtr(ctx) != zoom_gen or !zoom_due) return;
-    zoom_due = false;
     var buf: [24]u8 = undefined;
-    store(.size, settings.decimal(&buf, zoom_size));
+    if (store(.size, settings.decimal(&buf, zoom_size)) and @intFromPtr(ctx) == zoom_gen) zoom_due = false;
 }
 
 /// The Font panel's choice, saved to the settings file.
@@ -11456,9 +11700,9 @@ fn changeFont(_: Id, _: Sel, sender: Id) callconv(.c) void {
     if (picked == null) return;
     const name = objc.utf8(msg(Id, picked, "fontName", .{}));
     // The system font's private name can't be asked for by name.
-    store(.font, if (name.len == 0 or name[0] == '.') "system" else name);
+    if (!store(.font, if (name.len == 0 or name[0] == '.') "system" else name)) return;
     var buf: [24]u8 = undefined;
-    store(.size, settings.decimal(&buf, @round(msg(f64, picked, "pointSize", .{}))));
+    _ = store(.size, settings.decimal(&buf, @round(msg(f64, picked, "pointSize", .{}))));
 }
 
 /// File > Save All: every file with unsaved changes, in every window. A
@@ -11479,15 +11723,18 @@ fn revealCurrent(d: *Doc) void {
 /// Window > Merge All Windows: every other window's tabs move into this
 /// card, and those windows close.
 fn mergeWindows(d: *Doc) void {
-    var others: [64]*Win = undefined;
-    var n: usize = 0;
-    for (wins.items) |w| if (w != d.win and n < others.len) {
-        others[n] = w;
-        n += 1;
-    };
-    for (others[0..n]) |w| {
+    var i: usize = 0;
+    while (i < wins.items.len) {
+        const w = wins.items[i];
+        if (w == d.win) {
+            i += 1;
+            continue;
+        }
         for (docs.items) |x| if (x.win == w and !x.closing) {
             while (!(tabCount(x) == 1 and isBlank(x))) {
+                if (replaceable(d) and !discardDraft(&d.file)) return;
+                const p = tabPage(x, 0);
+                if (p.path == null and p.ed.text().len == 0 and !discardDraft(p)) return;
                 if (!replaceable(d)) d.pages.ensureUnusedCapacity(gpa, 1) catch return;
                 var pg = takeTab(x, 0) orelse return;
                 if (pg.path == null and pg.ed.text().len == 0) {
@@ -11496,9 +11743,12 @@ fn mergeWindows(d: *Doc) void {
                 }
                 _ = putTab(d, pg, tabCount(d));
             }
+            if (!discardDraft(&x.file)) return;
         };
         // Only blank cards are left, so closing asks nothing.
         msg(void, w.window, "close", .{});
+        // Closing normally removes this slot synchronously.
+        if (i < wins.items.len and wins.items[i] == w) i += 1;
     }
     front(d);
 }
@@ -11900,8 +12150,8 @@ pub fn setup() void {
     loadPlaces();
     conf_path = settings.path(gpa) catch null;
     resolveConf();
-    if (conf_path) |p| settings.prepare(gpa, p);
-    loadSettings();
+    if (conf_path) |p| settings.prepare(gpa, p) catch alert("Couldn't prepare the settings file.", p);
+    _ = loadSettings();
     // A failed first read still needs default fonts, glyphs and theme resources.
     if (font == null) applySettings(conf);
     panelFonts();
@@ -11944,7 +12194,7 @@ pub fn setup() void {
     c.method("tick:", @ptrCast(&tick), "v@:@");
     c.method("holdRedraw:", @ptrCast(&holdRedraw), "v@:@");
     c.method("dragScroll:", @ptrCast(&dragScroll), "v@:@");
-    c.method("saveDrafts:", appAction(saveDrafts, .{}), "v@:@");
+    c.method("saveDrafts:", appAction(saveDrafts, .{false}), "v@:@");
     c.method("checkFiles:", appAction(checkFiles, .{false}), "v@:@");
     c.method("changeFont:", @ptrCast(&changeFont), "v@:@");
     c.method("menuForEvent:", @ptrCast(&menuForEvent), "@@:@");

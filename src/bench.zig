@@ -54,9 +54,17 @@ pub fn start() void {
 fn begin(self: Id, _: Sel, _: Id) callconv(.c) void {
     if (std.c.getenv("ZE_BENCH_ROOT")) |r| if (view.gpa.dupe(u8, std.mem.span(r))) |dir| view.setRoot(dir) else |_| {};
     if (std.c.getenv("ZE_BENCH_FILES")) |fs| {
-        var it = std.mem.tokenizeScalar(u8, std.mem.span(fs), ':');
-        while (it.next()) |p| view.open(p, view.keyDoc());
-    }
+        var it = std.mem.splitScalar(u8, std.mem.span(fs), ':');
+        while (it.next()) |p| {
+            var path: [std.fs.max_path_bytes]u8 = undefined;
+            const z = std.fmt.bufPrintSentinel(&path, "{s}", .{p}, 0) catch fail("benchmark input path too long");
+            var st: std.c.Stat = undefined;
+            if (std.c.stat(z, &st) != 0 or st.mode & std.c.S.IFMT != std.c.S.IFREG) fail("missing or nonregular benchmark input");
+            if (!view.open(p, view.keyDoc())) fail("cannot open benchmark input");
+            const d = view.keyDoc() orelse fail("no benchmark document");
+            if (d.file.new_file) fail("benchmark input disappeared while opening");
+        }
+    } else if (std.c.getenv("ZE_BENCH_LAUNCH_ONLY") == null) fail("missing benchmark inputs");
     findView();
     if (std.c.getenv("ZE_BENCH_LAUNCH_ONLY") == null) msg(void, win, "setFrame:display:", .{ objc.Rect{ .x = 40, .y = 40, .w = 1200, .h = 760 }, true });
     msg(void, v, "displayIfNeeded", .{});

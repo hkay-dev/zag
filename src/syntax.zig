@@ -247,6 +247,11 @@ fn isWord(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_' or c >= 0x80;
 }
 
+/// Whether lexing a line can change the next line's incoming state.
+pub fn needsState(lang: *const Lang) bool {
+    return lang.block_comment or lang.triple or lang.backtick or lang.markdown or lang.html;
+}
+
 pub const Sync = struct {
     from: usize,
     end: usize,
@@ -255,11 +260,23 @@ pub const Sync = struct {
 };
 
 /// Repairs cached line-start states, preserving shifted suffix states when a
-/// single line-count delta is known.
+/// single line-count delta is known. Stateless languages need no cache.
 pub fn syncStatesShift(gpa: std.mem.Allocator, lang: *const Lang, b: *Buffer, states: *std.ArrayList(State), upto: usize) !Sync {
     const first = b.touched;
     var res: Sync = .{ .from = first, .end = std.math.maxInt(usize) };
-    if (first < states.items.len) {
+    const stateful = needsState(lang);
+    if (!stateful) {
+        states.clearAndFree(gpa);
+        if (!b.lines_shifted) {
+            if (first != std.math.maxInt(usize)) res.end = b.touched_end;
+        } else if (b.line_delta) |delta| {
+            if (b.shift_at == first) {
+                res.shift_at = first;
+                res.delta = delta;
+                res.end = b.touched_end;
+            }
+        }
+    } else if (first < states.items.len) {
         var converge = !b.lines_shifted;
         if (b.lines_shifted) {
             if (b.line_delta) |delta| if (b.shift_at == first and first + 1 < states.items.len) {
@@ -293,7 +310,7 @@ pub fn syncStatesShift(gpa: std.mem.Allocator, lang: *const Lang, b: *Buffer, st
         }
     }
     // Leave pending invalidation intact if extending the cache fails.
-    if (lang != &plain) {
+    if (stateful) {
         if (states.items.len == 0) try states.append(gpa, .normal);
         while (states.items.len <= upto and states.items.len < b.lines()) {
             const i = states.items.len - 1;
@@ -837,6 +854,10 @@ fn expectIncremental(lang: *const Lang, b: *Buffer, states: *std.ArrayList(State
     if (b.lines_shifted) b.line_delta = null;
     const sync = try syncStatesShift(t.allocator, lang, b, states, b.lines() - 1);
     const invalid = [2]usize{ sync.from, sync.end };
+    if (!needsState(lang)) {
+        try t.expectEqual(@as(usize, 0), states.items.len);
+        try t.expectEqual(@as(usize, 0), states.capacity);
+    }
     // A line-count change may move all later rows; discard those old slots.
     if (cached.items.len != b.lines()) {
         for (cached.items) |k| t.allocator.free(k);
@@ -846,14 +867,15 @@ fn expectIncremental(lang: *const Lang, b: *Buffer, states: *std.ArrayList(State
     var state: State = .normal;
     for (0..b.lines()) |i| {
         const line = b.line(i);
+        const incoming: State = if (needsState(lang)) states.items[i] else .normal;
         if (i >= invalid[0] and i < invalid[1]) {
             t.allocator.free(cached.items[i]);
             cached.items[i] = try t.allocator.alloc(Kind, line.len);
-            _ = lexLine(lang, line, states.items[i], cached.items[i]);
+            _ = lexLine(lang, line, incoming, cached.items[i]);
         }
         const scratch = try t.allocator.alloc(Kind, line.len);
         defer t.allocator.free(scratch);
-        try t.expectEqual(state, states.items[i]);
+        try t.expectEqual(state, incoming);
         state = lexLine(lang, line, state, scratch);
         try t.expectEqualSlices(Kind, scratch, cached.items[i]);
     }
@@ -866,6 +888,14 @@ test "incremental kinds converge inside and outside multiline regions" {
         .{ &python, "a = 1\nx = \"\"\"start\ninside\nend\"\"\"\nb = 2\nc = 3" },
         .{ &js, "let a;\nx = `start\ninside\nend`;\nlet b;\nlet c;" },
         .{ &zig, "const a = 1;\nconst x =\n    \\\\start\n    \\\\inside\n;\nconst b = 2;" },
+        .{ &shell, "echo first\n# comment\necho $#\necho 'text'\nexport X=1\nlast" },
+        .{ &fish, "echo first\n# comment\nset x 1\necho 'text'\nend\nlast" },
+        .{ &ruby, "def first\n# comment\nvalue = 1\nputs 'text'\nend\nlast" },
+        .{ &lua, "local first\n-- comment\nvalue = 1\nprint('text')\nend\nlast" },
+        .{ &diff, "diff a b\n@@ header\n+added\n-removed\n same\nlast" },
+        .{ &data, "{\n\"key\": 1,\n\"yes\": true,\n\"text\": \"value\"\n}\nlast" },
+        .{ &hash_data, "key: value\n# comment\nyes: true\ntext: 'value'\nnext: 2\nlast" },
+        .{ &toml, "[section]\n# comment\nyes = true\ntext = 'value'\nnext = 2\nlast" },
         .{ &markdown, "before\n```\ninside\n```\nafter\nlast" },
         .{ &markdown, "before\n~~~~\ninside\n~~~~\nafter\nlast" },
         .{ &markdown, "before\n````\ninside\n````\nafter\nlast" },
@@ -1169,5 +1199,95 @@ test "incremental states notice fence metadata and quoted attribute edits" {
         }
         try b.replace(t.allocator, 0, 0, "before\n", 0, false);
         _ = try expectIncremental(case[0], &b, &states, &cached);
+    }
+}
+
+test "needsState derives only cross-line lexer features" {
+    inline for (.{ &plain, &zig, &shell, &fish, &ruby, &lua, &diff, &data, &hash_data, &toml }) |lang| {
+        try t.expect(!needsState(lang));
+    }
+    inline for (.{ &c_like, &js, &python, &rust, &go, &swift, &sql, &php, &dart, &css, &markdown, &html }) |lang| {
+        try t.expect(needsState(lang));
+    }
+    inline for (.{ "block_comment", "triple", "backtick", "markdown", "html" }) |field| {
+        var lang: Lang = .{};
+        @field(lang, field) = true;
+        try t.expect(needsState(&lang));
+    }
+}
+
+test "stateless sync preserves invalidation and shifts without allocation" {
+    inline for (.{ &plain, &zig, &shell, &fish, &ruby, &lua, &diff, &data, &hash_data, &toml }) |lang| {
+        var b = try Buffer.init(t.allocator, "first\nsecond\nthird\nlast");
+        defer b.deinit(t.allocator);
+        var states: std.ArrayList(State) = .empty;
+        var failing = t.FailingAllocator.init(t.allocator, .{ .fail_index = 0 });
+        const gpa = failing.allocator();
+        defer states.deinit(gpa);
+        const all = std.math.maxInt(usize);
+
+        try t.expectEqual(Sync{ .from = 0, .end = all }, try syncStatesShift(gpa, lang, &b, &states, b.lines() - 1));
+        try t.expectEqual(Sync{ .from = all, .end = all }, try syncStatesShift(gpa, lang, &b, &states, 0));
+        const p1 = b.lineStart(1);
+        try b.replace(t.allocator, p1, p1, "x", p1, false);
+        try t.expectEqual(Sync{ .from = 1, .end = 2 }, try syncStatesShift(gpa, lang, &b, &states, 0));
+
+        try b.replace(t.allocator, 0, 0, "x", 0, false);
+        const p3 = b.lineStart(3);
+        try b.replace(t.allocator, p3, p3, "y", p3, false);
+        try t.expectEqual(Sync{ .from = 0, .end = 4 }, try syncStatesShift(gpa, lang, &b, &states, 0));
+
+        const e0 = b.lineEnd(0);
+        try b.replace(t.allocator, e0, e0, "\n", e0, false);
+        try t.expectEqual(Sync{ .from = 0, .end = 2, .shift_at = 0, .delta = 1 }, try syncStatesShift(gpa, lang, &b, &states, 0));
+        try b.replace(t.allocator, e0, e0 + 1, "", e0 + 1, false);
+        try t.expectEqual(Sync{ .from = 0, .end = 1, .shift_at = 0, .delta = -1 }, try syncStatesShift(gpa, lang, &b, &states, 0));
+
+        try b.replace(t.allocator, e0, e0, "\n", e0, false);
+        try b.replace(t.allocator, e0 + 1, e0 + 1, "\n", e0 + 1, false);
+        try t.expectEqual(Sync{ .from = 0, .end = all }, try syncStatesShift(gpa, lang, &b, &states, 0));
+
+        // An earlier edit prevents shifting the whole suffix at touched.
+        try b.replace(t.allocator, 0, 0, "x", 0, false);
+        const e2 = b.lineEnd(2);
+        try b.replace(t.allocator, e2, e2, "\n", e2, false);
+        try t.expectEqual(Sync{ .from = 0, .end = all }, try syncStatesShift(gpa, lang, &b, &states, 0));
+        try t.expectEqual(@as(usize, 0), states.items.len);
+        try t.expectEqual(@as(usize, 0), states.capacity);
+        try t.expectEqual(all, b.touched);
+        try t.expectEqual(@as(usize, 0), b.touched_end);
+        try t.expect(!b.lines_shifted);
+        try t.expectEqual(@as(?isize, null), b.line_delta);
+    }
+}
+
+test "language transitions release stateless caches and refresh token kinds" {
+    var b = try Buffer.init(t.allocator, "/* open\nconst x = 1;\n*/\nlast");
+    defer b.deinit(t.allocator);
+    var states: std.ArrayList(State) = .empty;
+    defer states.deinit(t.allocator);
+    var cached: std.ArrayList([]Kind) = .empty;
+    defer {
+        for (cached.items) |k| t.allocator.free(k);
+        cached.deinit(t.allocator);
+    }
+    const cases = .{
+        .{ &c_like, Kind.comment },
+        .{ &zig, Kind.keyword },
+        .{ &data, Kind.text },
+        .{ &markdown, Kind.text },
+        .{ &shell, Kind.text },
+        .{ &html, Kind.text },
+        .{ &plain, Kind.text },
+        .{ &c_like, Kind.comment },
+    };
+    inline for (cases) |case| {
+        // The language picker invalidates all rows and resets stateful caches.
+        if (needsState(case[0])) states.clearRetainingCapacity();
+        b.touched = 0;
+        b.touched_end = b.lines();
+        _ = try expectIncremental(case[0], &b, &states, &cached);
+        try t.expectEqual(case[1], cached.items[1][0]);
+        if (needsState(case[0])) try t.expect(states.capacity > 0);
     }
 }

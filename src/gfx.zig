@@ -340,13 +340,14 @@ pub fn iconFor(name: []const u8) Id {
     const ext = if (dot > 0 and name.len - dot - 1 <= low.len) name[dot + 1 ..] else "";
     const key = std.ascii.lowerString(low[0..ext.len], ext);
     for (kind_icons.items) |e| if (std.mem.eql(u8, e.key[0..e.len], key)) return e.img;
+    kind_icons.ensureUnusedCapacity(gpa, 1) catch return null;
     const ut = objc.class("UTType");
     const ty = if (key.len > 0) msg(Id, ut, "typeWithFilenameExtension:", .{objc.str(key)}) else null;
     const ws = msg(Id, objc.class("NSWorkspace"), "sharedWorkspace", .{});
     const img = msg(Id, msg(Id, ws, "iconForContentType:", .{ty orelse msg(Id, ut, "typeWithIdentifier:", .{objc.str("public.plain-text")})}), "retain", .{});
     var e: KindIcon = .{ .key = undefined, .len = @intCast(key.len), .img = img };
     @memcpy(e.key[0..key.len], key);
-    kind_icons.append(gpa, e) catch {};
+    kind_icons.appendAssumeCapacity(e);
     return img;
 }
 
