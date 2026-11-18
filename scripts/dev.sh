@@ -5,7 +5,7 @@
 # (default /tmp/ze-dev-home) and its session in its own defaults
 # (dev.hkay.ze.dev), never the stable app's. What it prints, panics included,
 # goes to ZE_DEV_LOG (default /tmp/ze-dev.log). ZE_DEBUG=1 makes a debug build.
-# The stable Zag is the one at ~/Applications/Zag.app; only Ship it changes
+# The stable Zag is the one at /Applications/Zag.app; only Ship it changes
 # that (scripts/ship.sh).
 set -eu
 # `open` starts the app in /, so paths are made absolute from here first.
