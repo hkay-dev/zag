@@ -72,6 +72,32 @@ cat > "$app/Contents/Info.plist" <<EOF
       <key>LSItemContentTypes</key>
       <array><string>public.text</string><string>public.data</string><string>public.folder</string></array>
     </dict>
+    <dict>
+      <key>CFBundleTypeRole</key><string>Editor</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <!-- Finder's Open With lists apps that claim a file's extension by name
+           for files that macOS has no type for (.env.local, foo.env, build.zig);
+           the public.data claim above covers none of them. -->
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>env</string><string>envrc</string><string>local</string><string>example</string>
+        <string>sample</string><string>template</string><string>dist</string><string>development</string>
+        <string>production</string><string>staging</string><string>test</string><string>zig</string>
+        <string>zon</string><string>rs</string><string>go</string><string>mod</string>
+        <string>sum</string><string>toml</string><string>lock</string><string>conf</string>
+        <string>cfg</string><string>ini</string><string>ts</string><string>tsx</string>
+        <string>mts</string><string>cts</string><string>jsx</string><string>mjs</string>
+        <string>cjs</string><string>vue</string><string>svelte</string><string>astro</string>
+        <string>kt</string><string>kts</string><string>lua</string><string>nix</string>
+        <string>nu</string><string>fish</string><string>ex</string><string>exs</string>
+        <string>dart</string><string>scala</string><string>sol</string><string>gleam</string>
+        <string>hcl</string><string>tf</string><string>tfvars</string><string>graphql</string>
+        <string>gql</string><string>proto</string><string>jsonc</string><string>json5</string>
+        <string>jsonl</string><string>mdx</string><string>gradle</string><string>properties</string>
+        <string>editorconfig</string><string>gitignore</string><string>gitattributes</string>
+        <string>dockerignore</string><string>npmrc</string><string>log</string>
+      </array>
+    </dict>
   </array>
 </dict>
 </plist>
